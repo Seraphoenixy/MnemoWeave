@@ -16,7 +16,10 @@ import { isRecord, RPC_CHANNEL } from '../shared/contract.ts';
 import type { HostContext } from './types.ts';
 
 export const name = 'dsh-mnemo-weave/ui';
-export const inject = ['connection'] as const;
+// `connection.rpc.handle` mounts the channel route on the web server through the context that read
+// the service, so that context must also carry `webServer`; without it registration throws
+// `cannot get property "webServer" without inject` and the entry fails.
+export const inject = ['connection', 'webServer'] as const;
 
 export const DEFAULT_BRIDGE_UI_URL = 'http://127.0.0.1:4319';
 export const MIN_TOKEN_LENGTH = 24;
@@ -121,8 +124,14 @@ export function apply(ctx: HostContext, config?: unknown): void {
   const client = new BridgeUiClient({ baseUrl: resolved.bridgeUrl, token: resolved.token, ...(resolved.hostId === undefined ? {} : { hostId: resolved.hostId }), timeoutMs: resolved.timeoutMs });
   ctx.effect(() => {
     const connection = ctx.connection;
-    if (connection === undefined) return;
-    const dispose = connection.rpc.handle(RPC_CHANNEL, createRpcHandler(client));
+    const webServer = ctx.get('webServer');
+    if (connection === undefined || webServer === undefined) return;
+    // The channel is mounted through the context that read `connection`, so hand the registration a
+    // context carrying `webServer` as its own property, the way dsh-mnemon registers its channels.
+    const owner = ctx.extend === undefined ? ctx : ctx.extend({ webServer });
+    const target = owner.connection;
+    if (target === undefined) return;
+    const dispose = target.rpc.handle(RPC_CHANNEL, createRpcHandler(client));
     return () => { if (typeof dispose === 'function') (dispose as () => void)(); };
   }, 'dsh-mnemo-weave: read channel');
 }

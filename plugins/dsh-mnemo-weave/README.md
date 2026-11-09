@@ -15,13 +15,13 @@
 
 Host 半（`src/ui/`）：
 
-- `index.ts`：Cordis 插件；`inject: ['connection']`，注册 `connection.rpc.handle('mnemoweave', …)`；配置非法或缺 token 时只写 stderr 诊断，不中断 DSH。
+- `index.ts`：Cordis 插件；`inject: ['connection','webServer']`，注册 `connection.rpc.handle('/dsh-mnemo-weave', …)`。DSH 只接受 `/` 开头且匹配 `/^\/[A-Za-z0-9._~-]+$/` 的通道名；注册时的上下文还必须带 `webServer`（`connection.rpc` 以读取该服务的上下文为 owner，路由挂在该 owner 的 web server 上），否则条目分别以 `invalid or reserved RPC channel` 与 `cannot get property "webServer" without inject` 失败。配置非法或缺 token 时只写 stderr 诊断，不中断 DSH。
 - `bridge-client.ts`：Bridge UI 客户端；3 秒超时、响应上限、逐字段校验、API 版本检查。
 - `rpc.ts`：`status`/`memories`/`memory`/`intents` 四个端点；请求先校验，再读取。
 
 客户端半（`src/client/`）：
 
-- `index.tsx`：`inject: ['slots','connection','layout']`；注册 `main` 面板与 `sidebar.panellist` 入口，失败时回滚已注册项。
+- `index.tsx`：`inject: ['slots','connection','layout','locale']`；注册 `main` 面板与 `sidebar.panellist` 入口，失败时回滚已注册项。侧边栏在注册与每次语言变更时都会调用 `label`，因此读取 locale 走带回退的读取函数：读取抛错或服务缺失时回退为英文标签，不让异常逃逸。
 - `page.tsx`：状态标签、搜索（防抖 + 取消在途请求）、列表/详情、意图队列、错误横幅与重试。
 - `view-model.ts`、`i18n.ts`：可无 DOM 测试的纯函数与 zh/en 文案。
 - `styles.ts`：一次性注入的样式表，颜色优先使用 DSH 主题变量。

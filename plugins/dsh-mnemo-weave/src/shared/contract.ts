@@ -7,7 +7,9 @@
  * `UI_API_VERSION` on both sides.
  */
 
-export const RPC_CHANNEL = 'mnemoweave';
+// DSH resolves RPC channels as `/name`: `@deepseek-ai/dsh-client-connection` rejects a name that
+// does not match /^\/[A-Za-z0-9._~-]+$/ (or that equals "/api") when the Host half registers it.
+export const RPC_CHANNEL = '/dsh-mnemo-weave';
 export const UI_API_VERSION = 1 as const;
 
 export type AvailabilityStatus = 'ok' | 'unauthorized' | 'unavailable' | 'corrupted';

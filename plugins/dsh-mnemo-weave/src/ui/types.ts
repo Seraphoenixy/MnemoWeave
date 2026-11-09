@@ -14,4 +14,6 @@ export interface HostContext {
   effect(setup: () => void | (() => void), label?: string): void;
   get(name: string): unknown;
   inject?(deps: string[], setup: (ctx: HostContext) => void): void;
+  /** Cordis child context: the channel registration needs `webServer` as an own property. */
+  extend?(meta: Record<string, unknown>): HostContext;
 }

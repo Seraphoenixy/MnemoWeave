@@ -92,7 +92,7 @@ test('the built client bundle registers a page and a sidebar entry through DSH s
   assert.equal(module.id, 'dsh-mnemo-weave');
   assert.equal(typeof module.exports['apply'], 'function');
   assert.equal(module.exports['name'], 'dsh-mnemo-weave');
-  assert.deepEqual([...(module.exports['inject'] as string[])].sort(), ['connection', 'layout', 'slots']);
+  assert.deepEqual([...(module.exports['inject'] as string[])].sort(), ['connection', 'layout', 'locale', 'slots']);
 
   const calls = { injected: [] as string[], registered: [] as Registration[], released: [] as string[], styles: 0 };
   const apply = module.exports['apply'] as (ctx: unknown) => void;
@@ -143,4 +143,35 @@ test('a failing sidebar registration releases the panel it already registered', 
   };
   assert.throws(() => (state.loaded[0]!.exports['apply'] as (ctx: unknown) => void)(context), /slot conflict/);
   assert.deepEqual(calls.released, ['main']);
+});
+
+/**
+ * The client tree throws `cannot get property "locale" without inject` for a service the plugin did
+ * not declare. That exception used to escape through the sidebar's locale subscriber — which derives
+ * panel metadata at registration and on every locale change — and failed the whole web boot with
+ * `1 entry did not activate`. The label must answer with its fallback instead.
+ */
+test('the sidebar label never throws when the locale service cannot be read', async () => {
+  const code = await bundle();
+  for (const mode of ['throwing', 'missing'] as const) {
+    const state = harness();
+    run(code, state);
+    const calls = { injected: [] as string[], registered: [] as Registration[], released: [] as string[], styles: 0 };
+    const context = makeContext(state, calls) as unknown as Record<string, unknown>;
+    if (mode === 'throwing') {
+      Object.defineProperty(context, 'locale', {
+        configurable: true,
+        get() { throw new Error('cannot get property "locale" without inject'); },
+      });
+    } else {
+      delete context['locale'];
+    }
+    (state.loaded[0]!.exports['apply'] as (ctx: unknown) => void)(context);
+    const entry = calls.registered[1]!;
+    assert.equal(entry.options.name, 'sidebar.panellist');
+    assert.equal((entry.options.label as () => string)(), 'MnemoWeave Memory', `${mode} locale must fall back to the English label`);
+    const pageInject = calls.registered[0]!.options.inject!;
+    assert.deepEqual(Object.keys(pageInject()).sort(), ['connection', 'locale']);
+    assert.equal(pageInject()['locale'], undefined, `${mode} locale must reach the page as undefined`);
+  }
 });

@@ -1,6 +1,6 @@
 # DSH 界面：MnemoWeave 客户端插件（补充规格）
 
-状态：2026-11-09 实现并验证到程序化层面；真实 DSH 会话中的加载与点击尚未验收（见第 8 节）。
+状态：2026-11-09 实现并验证到程序化层面；已在 desktop profile 安装。首次真实启动因客户端未声明 `locale` 注入而失败（见第 7 节「真实启动缺陷与修复」），修复后宿主条目 active，侧边栏入口与页面待刷新确认（见第 8 节）。
 
 本文是 `README.md` 所列十五份规格之外的补充文档，跟随 `runtime-memory.md` 的追加方式；不改变 ADR-001–026，也不把 DSH 客户端层变成 MnemoWeave 的运行时依赖。
 
@@ -18,7 +18,7 @@
 ```
 DSH 浏览器页面
   └─ dsh-mnemo-weave/client   （Cordis 客户端插件：注册 main 面板 + sidebar.panellist 入口）
-        └─ connection.rpc.call('mnemoweave', 'status' | 'memories' | 'memory' | 'intents')
+        └─ connection.rpc.call('/dsh-mnemo-weave', 'status' | 'memories' | 'memory' | 'intents')
               └─ dsh-mnemo-weave/ui（Cordis Host 条目，Node，持有 UI token）
                     └─ GET http://127.0.0.1:4319/v1/ui/*   （Bearer + 拒绝 Origin）
                           └─ Bridge.uiStatus / uiMemories / uiMemory / uiIntents
@@ -55,13 +55,13 @@ DSH 浏览器页面
 
 | 文件 | 职责 |
 |---|---|
-| `src/ui/index.ts` | Cordis Host 条目：校验配置（loopback URL、token、超时），注册 `connection.rpc.handle('mnemoweave', …)`，随 Fiber 释放；无 token 时保持惰性并写 stderr 诊断 |
+| `src/ui/index.ts` | Cordis Host 条目：校验配置（loopback URL、token、超时），`inject: ['connection','webServer']`，注册 `connection.rpc.handle('/dsh-mnemo-weave', …)`，随 Fiber 释放；无 token 时保持惰性并写 stderr 诊断。通道名必须匹配 DSH 的 `/^\/[A-Za-z0-9._~-]+$/`，且注册上下文必须带 `webServer`，否则分别抛 `invalid or reserved RPC channel` 与 `cannot get property "webServer" without inject` |
 | `src/ui/bridge-client.ts` | Bridge UI 客户端：3 秒超时、响应大小上限、逐字段校验、API 版本检查 |
 | `src/ui/rpc.ts` | 端点 `status`/`config`/`memories`/`memory`/`revision`/`intents`；请求校验先于任何读取；错误码透传；`config` 只回地址、Host 与是否有 token，绝不回 token |
-| `src/client/index.tsx` | 客户端插件：`inject: ['slots','connection','layout']`；先声明 `main` 面板，再注册 `sidebar.panellist` 入口；任一失败都释放已注册项 |
+| `src/client/index.tsx` | 客户端插件：`inject: ['slots','connection','layout','locale']`；先声明 `main` 面板，再注册 `sidebar.panellist` 入口；任一失败都释放已注册项。`label` 与面板注入通过带回退的读取函数取 locale：侧边栏在注册和每次语言变更时都会调用 `label`，读取抛错会中止侧边栏条目并让整个 web boot 失败 |
 | `src/client/page.tsx` | 页面：状态标签、搜索（280ms 防抖并取消在途请求）、作用域过滤、列表/详情/历史版本正文、意图队列、错误横幅与重试 |
 | `src/client/view-model.ts` | 纯函数：授权/副本标签、相对时间、范围文本、可用性原因；可无 DOM 测试 |
-| `src/shared/contract.ts` | 两端共享契约（UI API v1）；自包含，不依赖 MnemoWeave 工作区 |
+| `src/shared/contract.ts` | 两端共享契约（UI API v1，RPC 通道 `/dsh-mnemo-weave`）；自包含，不依赖 MnemoWeave 工作区 |
 
 原有 `lib/index.js`（提示期注入骨架）保持不动，仍由条目 `mnemo-weave` 加载；本 UI 由 `mnemo-weave-ui` 条目加载。
 
@@ -119,7 +119,9 @@ node scripts/build-plugins.mjs                  # 打包到 dist/plugins/（会�
 5. 重启一次 DSH（首次加载热重载监视器）；之后 `node plugins/dsh-mnemo-weave/dev.mjs` 即可边改边生效，浏览器刷新页面拿到新的客户端包。
 6. 打开侧边栏的“MnemoWeave 记忆”，确认状态标签与授权一致。
 
-本机限制：`%LOCALAPPDATA%\deepseek-harness\bin\dsh.cmd` 仍返回 “Harness CLI not found”，因此不能用 `dsh plugin add` 自动安装。2026-11-09 按用户要求把 `profiles/desktop` 的依赖从 `link:...dist/plugins/...` 改到 `link:D:/projects/MnemoWeave/plugins/dsh-mnemo-weave`（并同步 lockfile 的两行 specifier、把 `node_modules` 链接重指到检出目录），备份留在同目录的 `package.json.bak-hotreload`、`pnpm-lock.yaml.bak-hotreload`。
+历史记录（旧机器与旧检出路径，已失效）：`%LOCALAPPDATA%\deepseek-harness\bin\dsh.cmd` 仍返回 “Harness CLI not found”，因此不能用 `dsh plugin add` 自动安装。2026-11-09 按用户要求把 `profiles/desktop` 的依赖从 `link:...dist/plugins/...` 改到 `link:D:/projects/MnemoWeave/plugins/dsh-mnemo-weave`（并同步 lockfile 的两行 specifier、把 `node_modules` 链接重指到检出目录），备份留在同目录的 `package.json.bak-hotreload`、`pnpm-lock.yaml.bak-hotreload`。
+
+本机（2026-11-09，检出 `D:\project\MnemoWeave`）：`dsh` CLI 可用（`%LOCALAPPDATA%\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd`，0.2.2-rc.1）。安装用 `dsh plugin --profile desktop add 'link:D:/project/MnemoWeave/plugins/dsh-mnemo-weave'`，它一次写入 `dependencies`、`dsh.profile.bundles` 与 `pnpm-lock.yaml`；profile 带 HMR，条目在运行中的宿主里实时激活，无需重启。备份为同目录的 `package.json.bak-mnemoweave`、`pnpm-lock.yaml.bak-mnemoweave`、`cordis.patch.yml.bak-mnemoweave`。第 3 步的 `link:` 路径以本机检出目录为准。
 
 ## 7. 验证结果（2026-11-09，本轮）
 
@@ -135,7 +137,44 @@ node scripts/build-plugins.mjs                  # 打包到 dist/plugins/（会�
 | 热重载判定/去抖/结果 | `tests/unit/dsh-ui-hot-reload.test.ts`（桩宿主 + 真实 fs.watch） | 4/4 通过 |
 | 开发循环（监视 `src/` 自动重建） | `node plugins/dsh-mnemo-weave/dev.mjs` + 改动源文件 | 通过（创建/删除源文件各触发一次两半重建） |
 
+### 真实启动缺陷与修复（2026-11-09，装入 desktop profile 后）
+
+把插件装入 `%DSH_HOME%\profiles\desktop` 后首次真实启动即失败，崩溃记录 `crash-2026-11-09T04-27-32-020Z-web-boot.log`：
+
+```
+Uncaught Error: cannot get property "locale" without inject
+locale subscriber crashed: Error: cannot get property "locale" without inject   （18 次）
+Error: web boot: 1 entry did not activate
+@deepseek-ai/dsh-client-ui-sidebar: loading
+```
+
+原因：客户端 `inject` 未声明 `locale`，而 `label` 读取 `ctx.locale`。侧边栏在注册条目和每次语言变更时都会重新推导面板元数据（调用 `label`），真实客户端树对未声明服务的读取直接抛错，异常从侧边栏的 locale 订阅者逃逸，使侧边栏条目激活失败并中止 web boot。此前把该项判为低风险是错的：契约测试的桩 `ctx` 无条件提供 `locale`，测不出真实树的这一行为。
+
+修复：客户端 `inject` 增加 `'locale'`；`label` 与面板注入改经 `readLocale`/`readActiveLocale` 读取，读取抛错或服务缺失时回退为英文标签与 `undefined`，不再向侧边栏抛错。
+
+| 检查 | 命令 | 结果 |
+|---|---|---|
+| 客户端类型 | `node node_modules/typescript/bin/tsc -p plugins/dsh-mnemo-weave/tsconfig.client.json` | 通过 |
+| 客户端契约（含新增抛错回归用例） | `node --test tests/contract/dsh-ui-client.test.ts` | 4/4 通过 |
+| 客户端打包 | `node plugins/dsh-mnemo-weave/build-client.mjs` | 通过（产物内 `inject = ["slots","connection","layout","locale"]`，读取函数带 try/catch） |
+| profile 安装 | `dsh plugin --profile desktop add 'link:D:/project/MnemoWeave/plugins/dsh-mnemo-weave'` | 写入 dependencies、`dsh.profile.bundles`、lockfile |
+| 宿主条目 | `plugin_manager list_plugins` | `include:mnemo-weave`、`include:mnemo-weave-ui` 均为 `fiberPhase: active` |
+| 重新启用后是否再次崩溃 | 监视 `%APPDATA%\@deepseek-ai\dsh-desktop\logs` | 未产生新的崩溃记录 |
+
+装上 UI token 后，Host 半又暴露出两处与真实宿主契约不符的实现，均已修复：
+
+- **通道名非法**：`connection.rpc.handle('mnemoweave', …)` 使条目以 `connection: invalid or reserved RPC channel "mnemoweave"` 失败。`@deepseek-ai/dsh-client-connection` 的 `CHANNEL_PATTERN` 是 `/^\/[A-Za-z0-9._~-]+$/` 且禁止 `/api`。改为 `/dsh-mnemo-weave`，与 dsh-mnemon 的 `/dsh-mnemon-*` 命名一致。
+- **缺少 `webServer` 注入**：`connection.rpc` 以「读取该服务的上下文」为 owner，`register()` 在其中执行 `owner.webServer.register(route)`；插件只声明 `connection` 时抛 `cannot get property "webServer" without inject`。Host 半改为 `inject: ['connection','webServer']`，并像 dsh-mnemon 一样用 `ctx.extend({ webServer })` 把该服务作为自有属性交给注册调用。
+
+| 检查 | 命令 | 结果 |
+|---|---|---|
+| Host/客户端契约（含通道名与注入列表断言） | `node --test tests/contract/dsh-ui-host.test.ts tests/contract/dsh-ui-client.test.ts` | 10/10 通过 |
+| 宿主条目 | `plugin_manager list_plugins` | `include:mnemo-weave`、`include:mnemo-weave-ui` 均 `fiberPhase: active`，无 diagnostic |
+| 端到端数据链路 | `node work/e2e-ui-check.mjs`（本机 Server + Bridge） | paired、grant 有效、replica 3 条记忆 / 3 个版本、列表与详情均 `ok` |
+
 新增用例：
+
+- 客户端契约新增「the sidebar label never throws when the locale service cannot be read」：用一个读取即抛 `cannot get property "locale" without inject` 的 `ctx`，以及一个没有 `locale` 属性的 `ctx`，断言 `apply` 不抛错、`label` 回退为英文标签、面板注入收到 `locale: undefined`。
 
 - `tests/contract/bridge-ui.test.ts`：状态/列表/检索/详情/版本正文、作用域与项目过滤、grant 越权与未配对、token 与 Origin 拒绝、GET-only、非法参数。
 - `tests/contract/dsh-ui-host.test.ts`：真实 UI HTTP 服务上的五个 RPC 端点、请求校验、错误码、API 版本、配置解析、停机 Bridge。
@@ -144,11 +183,11 @@ node scripts/build-plugins.mjs                  # 打包到 dist/plugins/（会�
 - `tests/unit/dsh-ui-hot-reload.test.ts`：检出判定、宿主产物过滤、宿主结果解析与失败上报、去抖与忽略 `client.js`。
 - `tests/support/dsh-ui-verify.ts`：真实 Host 安装前的操作探针。
 
-测试证明的是程序化行为与打包产物结构；没有证明真实 DSH 桌面加载了本插件或用户按预期使用。
+测试证明的是程序化行为与打包产物结构；宿主侧安装状态由 `plugin_manager` 查询确认。真实桌面上的侧边栏入口与页面仍未经用户确认。
 
 ## 8. 未完成与限制
 
-1. 未在真实 DSH 桌面会话中点击验收；CLI 仍不可用，插件的加载/热重载只做了程序化验证。
+1. 真实桌面会话只走到启动与宿主条目层面：首次启动失败已修复，宿主两条目 active，但侧边栏入口与页面尚未由用户点击确认（`dsh` CLI 现已可用，版本 0.2.2-rc.1）。
 2. 热重载：宿主侧改动自动生效（需 profile 指向检出目录且有 `hmr` 服务，首次需重启一次）；客户端 `client.js` 改动仍需刷新页面，没有做页面级 HMR。
 3. 只读：候选审核、写入、冲突处理、设置页尚未接线；这些需要 Bridge 的写/审核通道先有稳定接口。
 4. 页面不含会话上下文（不显示“当前会话可见的 View”）；注入仍由 `lib/index.js` 骨架与后续 Host 适配器负责。

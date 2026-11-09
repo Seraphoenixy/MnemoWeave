@@ -15,7 +15,7 @@
 - 注入截止涵盖授权；超时不重复召回；旧回合/关闭会话不能再绑定迟到结果；Pinned 改动按当前请求处理；View 递归冻结，来源/版本/上下文封装纳入预算。
 - 快照目录与单调 Cursor 同事务捕获；日志清空仍保留高水位；按 Grant 过滤快照、增量和摘要。小漂移按快照高水位定向修复，超过 5% 重建；正文哈希与 pending 参加核对；重叠同步/排空合并，切换中断可恢复 previous 副本。
 - schema v10 增加项目、pin、临时工作素材和提炼账本；每次从 v9 迁移前备份。仅在 work/ 隔离目录演练，未升级用户真实状态目录。
-- DSH 只读界面：Bridge 增加独立 token 的 `/v1/ui/*`（状态/记忆/详情/历史版本/意图，按 Grant 过滤，支持作用域与项目收窄），并扩展现有 `plugins/dsh-mnemo-weave` 包（`dsh-mnemo-weave/ui` 条目 + `lib/client.js` 侧边栏记忆页 + Host RPC）。token 只留在 Host 进程；另加开发用热重载（监视 `lib/` → 宿主 `pluginManager.setBundleEnabled`，参考 dsh-plugin-harbor）。真实 DSH 桌面点击验收仍未完成，见 [dsh-ui.md](dsh-ui.md)。
+- DSH 只读界面：Bridge 增加独立 token 的 `/v1/ui/*`（状态/记忆/详情/历史版本/意图，按 Grant 过滤，支持作用域与项目收窄），并扩展现有 `plugins/dsh-mnemo-weave` 包（`dsh-mnemo-weave/ui` 条目 + `lib/client.js` 侧边栏记忆页 + Host RPC）。token 只留在 Host 进程；另加开发用热重载（监视 `lib/` → 宿主 `pluginManager.setBundleEnabled`，参考 dsh-plugin-harbor）。真实 DSH 桌面点击验收仍未完成，见 [dsh-ui.md](dsh-ui.md)。2026-11-09 已把该插件装入 `profiles/desktop`；首次启动因客户端未声明 `locale` 注入失败（web boot: 1 entry did not activate），修复后宿主条目 `active`，侧边栏入口与页面仍待用户确认；Bridge UI token 未设置，页面数据通道尚未可用。
 
 细节、路径和实际接口见 [runtime-memory.md](runtime-memory.md)。ADR-001–026 未改动；同步扩展仍是可演进实现，不冻结 Q3/Q4 Schema。
 

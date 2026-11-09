@@ -5,12 +5,26 @@ import type { AddressInfo } from 'node:net';
 import { createUiServer, type UiApi } from '../../apps/bridge/src/ui-server.ts';
 import { BridgeUiClient } from '../../plugins/dsh-mnemo-weave/src/ui/bridge-client.ts';
 import { createRpcHandler } from '../../plugins/dsh-mnemo-weave/src/ui/rpc.ts';
-import { resolveConfig } from '../../plugins/dsh-mnemo-weave/src/ui/index.ts';
+import { inject as hostInject, resolveConfig } from '../../plugins/dsh-mnemo-weave/src/ui/index.ts';
 import type { UiIntentsRecord, UiMemoryDetailRecord, UiMemoryListRecord, UiRevisionRecord, UiStatusRecord } from '../../packages/bridge/src/ui-read.ts';
 import type { UiIntents, UiMemoryDetail, UiMemoryList, UiRevision, UiStatus } from '../../plugins/dsh-mnemo-weave/src/shared/contract.ts';
+import { RPC_CHANNEL } from '../../plugins/dsh-mnemo-weave/src/shared/contract.ts';
 
 const TOKEN = 'dsh-ui-host-contract-token-000001';
 const MEMORY_ID = '22222222-2222-4222-8222-222222222222';
+
+/**
+ * The Host half registers this name with `connection.rpc.handle`, and that service rejects a channel
+ * that does not match its own pattern. Registering `mnemoweave` failed the entry with
+ * `invalid or reserved RPC channel "mnemoweave"`, so the shape is asserted here.
+ */
+test('the RPC channel name is one the DSH connection service accepts', () => {
+  assert.match(RPC_CHANNEL, /^\/[A-Za-z0-9._~-]+$/);
+  assert.notEqual(RPC_CHANNEL, '/api');
+  // `connection.rpc.handle` mounts the route through the reading context, which must carry the web
+  // server: without it the entry failed with `cannot get property "webServer" without inject`.
+  assert.deepEqual([...hostInject].sort(), ['connection', 'webServer']);
+});
 
 const status: UiStatusRecord = {
   schemaVersion: 1, hostId: 'dsh-desktop', generatedAt: new Date().toISOString(), paired: true,
