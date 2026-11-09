@@ -1,0 +1,15 @@
+{
+  "name": "mnemo-weave-local",
+  "description": "Local MnemoWeave plugin marketplace",
+  "pluginRoot": ".",
+  "plugins": [
+    {
+      "name": "zcode-mnemo-weave",
+      "source": "./zcode-mnemo-weave",
+      "description": "Session View injection and memory tools backed by MnemoWeave",
+      "version": "0.1.0",
+      "category": "Productivity",
+      "tags": ["memory", "recall"]
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "type": "module",
+  "name": "@mnemoweave/protocols-http",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": {
+    "@mnemoweave/contracts": "workspace:*",
+    "@mnemoweave/application": "workspace:*",
+    "@mnemoweave/governance": "workspace:*"
+  }
+}

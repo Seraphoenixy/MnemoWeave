@@ -1,0 +1,16 @@
+{
+  "name": "@mnemoweave/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "zod": "4.6.7",
+    "@mnemoweave/protocols-http": "workspace:*",
+    "@mnemoweave/application": "workspace:*",
+    "@mnemoweave/providers-mnemon": "workspace:*",
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "@mnemoweave/protocols-mcp": "workspace:*",
+    "@mnemoweave/governance": "workspace:*",
+    "@mnemoweave/model-gateway": "workspace:*"
+  }
+}

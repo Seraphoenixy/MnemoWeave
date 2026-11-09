@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "mnemoweave": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["${ZCODE_PLUGIN_ROOT}/dist/apps/server/src/mcp-main.js"],
+      "env": {
+        "MNEMON_BINARY": "${user_config.mnemon_binary}",
+        "MNEMON_DATA_DIR": "${user_config.mnemon_data_dir}",
+        "MNEMON_STORE": "${user_config.mnemon_store}",
+        "MNEMOWEAVE_STATE_DIR": "${user_config.state_dir}"
+      },
+      "enabled": true,
+      "timeoutMs": 60000
+    }
+  }
+}

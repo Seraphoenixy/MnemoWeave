@@ -1,0 +1,9 @@
+{
+  "type": "module",
+  "name": "@mnemoweave/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": {
+    "zod": "4.6.7"
+  }
+}

@@ -1,0 +1,580 @@
+import { SqliteRuntime } from './runtime-store.ts';
+import { DatabaseSync } from 'node:sqlite';
+import { mkdirSync, statSync, readFileSync, writeFileSync, renameSync, readdirSync, unlinkSync } from 'node:fs';
+import { dirname, isAbsolute, join } from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
+import type { CandidateRepository } from '../../../core/application/src/index.ts';
+import { Candidate, CandidateRequest, MnemoWeaveError, RememberInput } from '../../../core/contracts/src/index.ts';
+import type { CandidateRecord, RememberRequest, RetentionSweepReport } from '../../../core/contracts/src/index.ts';
+import { CANDIDATE_BODY_RETENTION_DAYS } from './events.ts';
+
+const DAY_MS = 86_400_000;
+/** Larger candidate bodies live in content-addressed files; metadata stays in SQLite. */
+const BLOB_THRESHOLD_BYTES = 4096;
+const BLOB_ORPHAN_GRACE_MS = 3_600_000;
+import type { Assessment } from '../../../core/contracts/src/index.ts';
+import type { WorkflowRepository, ReviewDecision, Job, WriteResult } from '../../../core/application/src/workflow-ports.ts';
+import { SqliteMemoryCatalog, REVIEW_INTERVAL_DAYS, DEFAULT_REVIEW_INTERVAL_DAYS } from './catalog.ts';
+import { SessionEventStore } from './events.ts';
+import type { VersionCheckpoint } from '../../../core/application/src/version-ports.ts';
+import type {ConflictResolutionRequest} from '../../../core/contracts/src/index.ts';
+
+/** Incremental governance schema v1. No formal memory, Revision or replica schema. */
+export class SqliteCandidates implements CandidateRepository, WorkflowRepository {
+  private readonly db: DatabaseSync;
+  private readonly dbPath: string;
+  private readonly blobsDir: string;
+  private readonly quotaSoftBytes: number | undefined;
+  private readonly quotaHardBytes: number | undefined;
+  private quotaSoftLogged = false;
+  private transactionDepth = 0;
+  readonly catalog: SqliteMemoryCatalog;
+  readonly events: SessionEventStore;
+  readonly runtime: SqliteRuntime;
+  /** Ordered change stream (SYNC-P2): catalog mutations append here in the same transaction. */
+  private appendSync(op: string, entityId: string, payload: Record<string, unknown>): void {
+    const json = JSON.stringify(payload);
+    this.db.prepare('INSERT INTO sync_log(op,entity_id,payload_json,payload_hash,op_at) VALUES(?,?,?,?,?)')
+      .run(op, entityId, json, createHash('sha256').update(json).digest('hex'), new Date().toISOString());
+  }
+  constructor(path: string, quota: { softBytes?: number; hardBytes?: number } = {}) {
+    if (!isAbsolute(path)) throw new Error('Governance database path must be absolute');
+    if (quota.softBytes !== undefined && quota.hardBytes !== undefined && quota.softBytes >= quota.hardBytes) throw new Error('Quota soft limit must be below the hard limit');
+    this.dbPath = path;
+    this.blobsDir = join(dirname(path), 'blobs');
+    mkdirSync(this.blobsDir, { recursive: true });
+    this.quotaSoftBytes = quota.softBytes;
+    this.quotaHardBytes = quota.hardBytes;
+    mkdirSync(dirname(path), { recursive: true });
+    this.db = new DatabaseSync(path, { timeout: 5000 });
+    try {
+      this.transaction(() => {
+        const version = Number(this.db.prepare('PRAGMA user_version').get()!['user_version']);
+      if (version > 10) throw new Error('Unsupported governance schema version');
+        if (version === 0) {
+          if (this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").get()) throw new Error('Refusing to initialize an unidentified existing database');
+          this.db.exec(`
+            CREATE TABLE governance_candidates (
+              id TEXT PRIMARY KEY,
+              idempotency_key TEXT NOT NULL UNIQUE,
+              request_hash TEXT NOT NULL,
+              request_json TEXT NOT NULL,
+              status TEXT NOT NULL CHECK(status='pending_review'),
+              submitted_at TEXT NOT NULL
+            ) STRICT;
+            CREATE TABLE governance_submission_receipts (
+              id TEXT PRIMARY KEY,
+              candidate_id TEXT NOT NULL UNIQUE REFERENCES governance_candidates(id),
+              status TEXT NOT NULL CHECK(status='candidate')
+            ) STRICT;
+            PRAGMA user_version=1;
+          `);
+        } else {
+          // Validate ownership before changing any persistent database settings.
+          this.db.prepare(`SELECT c.id, c.idempotency_key, c.request_hash, c.request_json,
+            c.status, c.submitted_at, r.id, r.status FROM governance_candidates c
+            JOIN governance_submission_receipts r ON r.candidate_id=c.id LIMIT 0`).all();
+        }
+      });
+      if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) === 1) {
+        // VACUUM INTO uses SQLite's consistent snapshot, including committed WAL pages.
+        const destination = `${path}.pre-v2.${randomUUID()}.db`;
+        this.db.prepare('VACUUM INTO ?').run(destination);
+        this.transaction(() => {
+          if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) !== 1) return;
+          this.db.exec(`
+            CREATE TABLE governance_lifecycle(candidate_id TEXT PRIMARY KEY REFERENCES governance_candidates(id), status TEXT NOT NULL);
+            CREATE TABLE governance_reviews(id TEXT PRIMARY KEY, candidate_id TEXT NOT NULL REFERENCES governance_candidates(id), decision TEXT NOT NULL, actor TEXT NOT NULL, reason TEXT NOT NULL, assessment_json TEXT, created_at TEXT NOT NULL);
+            CREATE TABLE governance_review_tasks(id TEXT PRIMARY KEY, candidate_id TEXT NOT NULL UNIQUE REFERENCES governance_candidates(id), kind TEXT NOT NULL, state TEXT NOT NULL);
+            CREATE TABLE governance_tasks(id TEXT PRIMARY KEY, candidate_id TEXT NOT NULL UNIQUE REFERENCES governance_candidates(id), write_key TEXT NOT NULL UNIQUE, state TEXT NOT NULL, checkpoint TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER, owner TEXT);
+            CREATE TABLE governance_outbox(id TEXT PRIMARY KEY, task_id TEXT NOT NULL UNIQUE REFERENCES governance_tasks(id), state TEXT NOT NULL);
+            CREATE TABLE governance_runs(id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES governance_tasks(id), state TEXT NOT NULL, started_at TEXT NOT NULL, ended_at TEXT);
+            CREATE TABLE governance_execution_receipts(id TEXT PRIMARY KEY, candidate_id TEXT NOT NULL REFERENCES governance_candidates(id), task_id TEXT NOT NULL REFERENCES governance_tasks(id), run_id TEXT NOT NULL REFERENCES governance_runs(id), result_json TEXT NOT NULL, created_at TEXT NOT NULL);
+            CREATE TABLE governance_provider_binding(id INTEGER PRIMARY KEY CHECK(id=1), identity TEXT NOT NULL);
+            CREATE TABLE governance_workflow_lock(id INTEGER PRIMARY KEY CHECK(id=1), owner TEXT, until_ms INTEGER NOT NULL);
+            INSERT INTO governance_workflow_lock VALUES(1,NULL,0);
+            PRAGMA user_version=2;
+          `);
+        });
+      }
+      this.catalog = new SqliteMemoryCatalog(this.db, path, operation => this.transaction(operation));
+      this.catalog.setSyncHook((op, entityId, payload) => this.appendSync(op, entityId, payload));
+      if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) === 5) {
+        const destination = `${path}.pre-v6.${randomUUID()}.db`;
+        this.db.prepare('VACUUM INTO ?').run(destination);
+        this.transaction(() => {
+          if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) !== 5) return;
+          this.db.exec(`
+            ALTER TABLE governance_tasks ADD COLUMN first_failed_at INTEGER;
+            ALTER TABLE governance_tasks ADD COLUMN alerted_at INTEGER;
+            -- WP2 decision: the Outbox is an enqueue journal that advances with its Task;
+            -- the mirror states (dispatching/failed/delivered) implied an independent dispatcher and are removed.
+            CREATE TABLE governance_outbox_v6(id TEXT PRIMARY KEY, task_id TEXT NOT NULL UNIQUE REFERENCES governance_tasks(id));
+            INSERT INTO governance_outbox_v6(id, task_id) SELECT id, task_id FROM governance_outbox;
+            DROP TABLE governance_outbox;
+            ALTER TABLE governance_outbox_v6 RENAME TO governance_outbox;
+            PRAGMA user_version=6;
+          `);
+        });
+      }
+      if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) === 6) {
+        const destination = `${path}.pre-v7.${randomUUID()}.db`;
+        this.db.prepare('VACUUM INTO ?').run(destination);
+        this.transaction(() => {
+          if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) !== 6) return;
+          this.db.exec(`
+            ALTER TABLE governance_candidates ADD COLUMN body_cleared_at TEXT;
+            CREATE TABLE governance_candidate_bodies(candidate_id TEXT PRIMARY KEY REFERENCES governance_candidates(id), content TEXT NOT NULL, content_hash TEXT NOT NULL);
+            ALTER TABLE governance_lifecycle ADD COLUMN changed_at TEXT;
+            CREATE TABLE session_events(host_id TEXT NOT NULL, event_id TEXT NOT NULL, session_id TEXT NOT NULL, turn_id TEXT, project_id TEXT,
+              kind TEXT NOT NULL CHECK(kind IN ('session.started','session.ended','message.user','message.assistant.final','tool.completed')),
+              occurred_at TEXT NOT NULL, received_at TEXT NOT NULL, source_ref TEXT NOT NULL, adapter_version TEXT NOT NULL, protocol_version TEXT NOT NULL,
+              stage TEXT NOT NULL CHECK(stage IN ('hot','archived','cleared')), important INTEGER NOT NULL DEFAULT 0, protected_reason TEXT,
+              archived_at TEXT, inferred INTEGER NOT NULL DEFAULT 0, payload_json TEXT NOT NULL, PRIMARY KEY(host_id,event_id));
+            CREATE TABLE session_event_refs(host_id TEXT NOT NULL, event_id TEXT NOT NULL, candidate_id TEXT NOT NULL REFERENCES governance_candidates(id), PRIMARY KEY(host_id,event_id,candidate_id));
+            ALTER TABLE catalog_revisions ADD COLUMN applicability TEXT;
+            ALTER TABLE catalog_revisions ADD COLUMN scope TEXT;
+            PRAGMA user_version=7;
+          `);
+          // Split bodies out of request_json: the body ledger becomes the content authority and
+          // 30-day clearing deletes only that row. Metadata stays in request_json forever.
+          const candidates = this.db.prepare('SELECT id, request_json FROM governance_candidates').all();
+          const insertBody = this.db.prepare('INSERT INTO governance_candidate_bodies VALUES(?,?,?)');
+          for (const row of candidates) {
+            const request = RememberInput.parse(JSON.parse(String(row['request_json'])));
+            insertBody.run(String(row['id']), request.content, createHash('sha256').update(request.content).digest('hex'));
+          }
+          // Revision provenance columns free the version catalog from candidate request parsing.
+          // The immutability trigger guards content and identity; the provenance backfill is
+          // their one-time initialization, so the trigger is rebuilt after the migration.
+          const revisions = this.db.prepare(`SELECT r.id AS revision_id, r.candidate_id, c.request_json FROM catalog_revisions r
+            JOIN governance_candidates c ON c.id=r.candidate_id`).all();
+          this.db.exec('DROP TRIGGER IF EXISTS catalog_revisions_immutable_update;');
+          const setRevision = this.db.prepare('UPDATE catalog_revisions SET applicability=?, scope=? WHERE id=?');
+          for (const row of revisions) {
+            const request = RememberInput.parse(JSON.parse(String(row['request_json'])));
+            setRevision.run(request.provenance.applicability, request.scope, String(row['revision_id']));
+          }
+          this.db.exec(`CREATE TRIGGER catalog_revisions_immutable_update BEFORE UPDATE ON catalog_revisions BEGIN SELECT RAISE(ABORT,'Revision is immutable'); END;`);
+          this.db.exec('UPDATE governance_lifecycle SET changed_at=(SELECT submitted_at FROM governance_candidates c WHERE c.id=governance_lifecycle.candidate_id) WHERE changed_at IS NULL');
+        });
+      }
+      if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) === 7) {
+        const destination = `${path}.pre-v8.${randomUUID()}.db`;
+        this.db.prepare('VACUUM INTO ?').run(destination);
+        this.transaction(() => {
+          if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) !== 7) return;
+          // WP6 (SYNC-P1–P8): ordered change stream, per-host grants and the revocation watermark.
+          this.db.exec(`
+            CREATE TABLE sync_log(seq INTEGER PRIMARY KEY AUTOINCREMENT, op TEXT NOT NULL, entity_id TEXT NOT NULL, payload_json TEXT NOT NULL, payload_hash TEXT NOT NULL, op_at TEXT NOT NULL);
+            CREATE TABLE sync_grants(grant_id TEXT PRIMARY KEY, host_id TEXT NOT NULL UNIQUE, projects_json TEXT NOT NULL, global_included INTEGER NOT NULL, issued_at TEXT NOT NULL, expires_at TEXT NOT NULL, generation INTEGER NOT NULL, revoked_at TEXT);
+            CREATE TABLE sync_license_state(id INTEGER PRIMARY KEY CHECK(id=1), revocation_watermark INTEGER NOT NULL);
+            INSERT INTO sync_license_state VALUES(1,0);
+            PRAGMA user_version=8;
+          `);
+        });
+      }
+      if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) === 8) {
+        const destination = `${path}.pre-v9.${randomUUID()}.db`;
+        this.db.prepare('VACUUM INTO ?').run(destination);
+        this.transaction(() => {
+          if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) !== 8) return;
+          // KNOWLEDGE-01: review schedule derived from publication time and knowledge type.
+          this.db.exec(`
+            CREATE TABLE catalog_review_state(memory_id TEXT PRIMARY KEY REFERENCES catalog_memories(id),knowledge_type TEXT NOT NULL,interval_days INTEGER NOT NULL,last_reviewed_at TEXT,due_at TEXT NOT NULL);
+            CREATE TABLE catalog_review_history(id TEXT PRIMARY KEY,memory_id TEXT NOT NULL REFERENCES catalog_memories(id),reviewed_at TEXT NOT NULL,reviewer TEXT NOT NULL,reason TEXT NOT NULL);
+            PRAGMA user_version=9;
+          `);
+          const rows = this.db.prepare(`SELECT m.id AS memory_id, r.effective_at, c.request_json
+            FROM catalog_memories m JOIN catalog_revisions r ON r.id=m.current_revision_id
+            JOIN governance_candidates c ON c.id=r.candidate_id`).all();
+          const insert = this.db.prepare('INSERT OR IGNORE INTO catalog_review_state(memory_id,knowledge_type,interval_days,last_reviewed_at,due_at) VALUES(?,?,?,NULL,?)');
+          for (const row of rows) {
+            const request = JSON.parse(String(row['request_json'])) as { knowledgeType?: string };
+            const knowledgeType = typeof request.knowledgeType === 'string' ? request.knowledgeType : 'Practice';
+            const intervalDays = REVIEW_INTERVAL_DAYS[knowledgeType] ?? DEFAULT_REVIEW_INTERVAL_DAYS;
+            const dueAt = new Date(new Date(String(row['effective_at'])).getTime() + intervalDays * 86_400_000).toISOString();
+            insert.run(String(row['memory_id']), knowledgeType, intervalDays, dueAt);
+          }
+        });
+      }
+      if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) === 9) {
+        this.db.prepare('VACUUM INTO ?').run(`${path}.pre-v10.${randomUUID()}.db`);
+        this.transaction(() => {
+          if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) !== 9) return;
+          this.db.exec(`
+            CREATE TABLE runtime_user_events(host_id TEXT NOT NULL,event_id TEXT NOT NULL,event_json TEXT NOT NULL,created_ms INTEGER NOT NULL,PRIMARY KEY(host_id,event_id));
+            CREATE TABLE runtime_projects(id TEXT PRIMARY KEY);
+            CREATE TABLE runtime_pins(id TEXT PRIMARY KEY,pin_json TEXT NOT NULL);
+            CREATE TABLE runtime_sessions(host_id TEXT NOT NULL,session_id TEXT NOT NULL,project_id TEXT,task TEXT,entries_json TEXT NOT NULL,revision INTEGER NOT NULL,closed INTEGER NOT NULL,updated_ms INTEGER NOT NULL,capture_state TEXT NOT NULL,PRIMARY KEY(host_id,session_id));
+            CREATE TABLE runtime_event_ids(host_id TEXT NOT NULL,event_id TEXT NOT NULL,created_ms INTEGER NOT NULL,event_hash TEXT NOT NULL,PRIMARY KEY(host_id,event_id));
+            CREATE TABLE runtime_capture_tasks(id TEXT PRIMARY KEY,host_id TEXT NOT NULL,session_id TEXT NOT NULL,project_id TEXT,input_json TEXT NOT NULL,state TEXT NOT NULL,owner TEXT,until_ms INTEGER NOT NULL,attempts INTEGER NOT NULL,next_ms INTEGER NOT NULL,created_ms INTEGER NOT NULL);
+            CREATE TABLE runtime_capture_runs(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,owner TEXT NOT NULL,state TEXT NOT NULL,started_ms INTEGER NOT NULL,ended_ms INTEGER);
+            CREATE TABLE runtime_capture_receipts(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,run_id TEXT NOT NULL,result_json TEXT NOT NULL,created_ms INTEGER NOT NULL);
+            PRAGMA user_version=10;
+          `);
+        });
+      }
+      this.runtime = new SqliteRuntime(this.db, operation => this.transaction(operation), request => this.submit(request), (hostId, event, candidateId) => { this.events.record(hostId, event, true); this.events.linkEvidence(event.eventId, hostId, candidateId); });
+      this.events = new SessionEventStore(this.db, operation => this.transaction(operation));
+      this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;');
+    } catch (error) { this.db.close(); throw error; }
+  }
+  private transaction<T>(operation: () => T): T {
+    if (this.transactionDepth > 0) return operation();
+    this.db.exec('BEGIN IMMEDIATE');
+    this.transactionDepth++;
+    try { const result = operation(); this.db.exec('COMMIT'); return result; }
+    catch (error) { this.db.exec('ROLLBACK'); throw error; }
+    finally { this.transactionDepth--; }
+  }
+  submit(input: RememberRequest): CandidateRecord {
+    const request = RememberInput.parse(input);
+    // The stable hash covers the FULL normalized request (body included) and never changes,
+    // even after retention clearing removes the body; metadata-only JSON is stored instead.
+    const hash = createHash('sha256').update(JSON.stringify(request)).digest('hex');
+    return this.transaction(() => {
+      const existing = this.db.prepare('SELECT id, request_hash FROM governance_candidates WHERE idempotency_key=?').get(request.idempotencyKey);
+      if (existing) {
+        const stored = this.db.prepare('SELECT request_hash, request_json FROM governance_candidates WHERE id=?').get(existing['id']!);
+        let storedHash = String(stored!['request_hash']);
+        if (storedHash !== hash) {
+          // Legacy rows normalize differently; a cleared body can no longer be re-derived and fails closed.
+          try { storedHash = createHash('sha256').update(JSON.stringify(RememberInput.parse(JSON.parse(String(stored!['request_json']))))).digest('hex'); } catch { /* fail closed */ }
+        }
+        if (storedHash !== hash) throw new MnemoWeaveError('IDEMPOTENCY_CONFLICT');
+        return this.get(String(existing['id']));
+      }
+      const id = randomUUID();
+      const submittedAt = new Date().toISOString();
+      this.enforceQuota();
+      this.db.prepare('INSERT INTO governance_candidates(id,idempotency_key,request_hash,request_json,status,submitted_at) VALUES(?,?,?,?,?,?)')
+        .run(id, request.idempotencyKey, hash, JSON.stringify({ ...request, content: '' }), 'pending_review', submittedAt);
+      this.db.prepare('INSERT INTO governance_candidate_bodies(candidate_id,content,content_hash) VALUES(?,?,?)')
+        .run(id, this.storeBody(request.content), createHash('sha256').update(request.content).digest('hex'));
+      this.db.prepare('INSERT INTO governance_submission_receipts VALUES(?,?,?)').run(randomUUID(), id, 'candidate');
+      this.catalog.registerConflict(id,request);
+      return this.get(id);
+    });
+  }
+  reviewDue(now?: Date): ReturnType<SqliteMemoryCatalog['reviewDue']> { return this.catalog.reviewDue(now); }
+  completeReview(memoryId: string, actor: string, reason: string, now?: Date): ReturnType<SqliteMemoryCatalog['completeReview']> {
+    return this.transaction(() => this.catalog.completeReview(memoryId, actor, reason, now));
+  }
+  get(candidateId: string): CandidateRecord {
+    const row = this.db.prepare(`SELECT c.*, r.id AS receipt_id FROM governance_candidates c
+      JOIN governance_submission_receipts r ON r.candidate_id=c.id WHERE c.id=?`).get(candidateId);
+    if (!row) throw new MnemoWeaveError('NOT_FOUND');
+    const storedRequest = CandidateRequest.parse(JSON.parse(String(row['request_json'])));
+    const body = this.db.prepare('SELECT content FROM governance_candidate_bodies WHERE candidate_id=?').get(candidateId);
+    const request: RememberRequest = { ...storedRequest, content: body ? this.loadBody(String(body['content'])) : '' };
+    const lifecycle = this.db.prepare('SELECT status FROM governance_lifecycle WHERE candidate_id=?').get(candidateId);
+    const reviews = this.db.prepare('SELECT * FROM governance_reviews WHERE candidate_id=? ORDER BY rowid').all(candidateId).map(review => ({
+      id: review['id'], decision: review['decision'], actor: review['actor'], reason: review['reason'], createdAt: review['created_at'], assessment: review['assessment_json'] ? JSON.parse(String(review['assessment_json'])) : null,
+    }));
+    const executionReceipts = this.db.prepare('SELECT * FROM governance_execution_receipts WHERE candidate_id=? ORDER BY rowid').all(candidateId).map(receipt => ({ id: receipt['id'], taskId: receipt['task_id'], runId: receipt['run_id'], createdAt: receipt['created_at'], ...JSON.parse(String(receipt['result_json'])) }));
+    const task = this.db.prepare('SELECT id,write_key,state,checkpoint,attempts,next_at FROM governance_tasks WHERE candidate_id=?').get(candidateId);
+    const publication = this.catalog.publicationForCandidate(candidateId);
+    const conflictCaseId=this.catalog.conflictForCandidate(candidateId);
+    return Candidate.parse({ id: row['id'], status: lifecycle?.['status'] ?? row['status'], submittedAt: row['submitted_at'], request, reviews, executionReceipts, ...(task ? { task } : {}), ...(publication ? { publication } : {}),...(conflictCaseId?{conflictCaseId}:{}),...(body ? {} : { bodyCleared: true }),
+      receipt: { id: row['receipt_id'], candidateId: row['id'], idempotencyKey: request.idempotencyKey, status: 'candidate', submittedAt: row['submitted_at'] },
+    });
+  }
+  bindProvider(identity: string): void {
+    this.transaction(() => {
+      const binding = this.db.prepare('SELECT identity FROM governance_provider_binding WHERE id=1').get();
+      if (binding && binding['identity'] !== identity) throw new Error('Governance database belongs to a different Provider store');
+      this.db.prepare('INSERT OR IGNORE INTO governance_provider_binding VALUES(1,?)').run(identity);
+    });
+  }
+  pending(exclude: readonly string[] = []): string | undefined {
+    const filter = exclude.length ? `AND c.id NOT IN (${exclude.map(() => '?').join(',')})` : '';
+    const row = this.db.prepare(`SELECT c.id FROM governance_candidates c LEFT JOIN governance_lifecycle l ON l.candidate_id=c.id
+      WHERE (l.candidate_id IS NULL OR l.status='pending_review') ${filter} ORDER BY c.rowid LIMIT 1`).get(...exclude);
+    return row ? String(row['id']) : undefined;
+  }
+  isKnownDuplicate(candidateId: string, providerIds: string[]): boolean {
+    const incoming = this.get(candidateId).request;
+    return providerIds.every(providerId => this.db.prepare(`SELECT r.candidate_id FROM governance_candidates c
+      JOIN governance_execution_receipts r ON r.candidate_id=c.id
+      WHERE json_extract(r.result_json,'$.status')='persisted' AND json_extract(r.result_json,'$.providerMemoryId')=?`).all(providerId).some(row => {
+      const candidateId = String(row['candidate_id']);
+      const body = this.db.prepare('SELECT content FROM governance_candidate_bodies WHERE candidate_id=?').get(candidateId);
+      if (!body) return false; // cleared body: no content comparison, never a false duplicate
+      const prior = CandidateRequest.parse(JSON.parse(String(this.db.prepare('SELECT request_json FROM governance_candidates WHERE id=?').get(candidateId)!['request_json'])));
+      return String(body['content']) === incoming.content && prior.scope === incoming.scope && prior.knowledgeType === incoming.knowledgeType && JSON.stringify(prior.tags) === JSON.stringify(incoming.tags) && JSON.stringify(prior.provenance) === JSON.stringify(incoming.provenance);
+    }));
+  }
+  acquire(owner: string, duration: number): boolean {
+    return this.db.prepare('UPDATE governance_workflow_lock SET owner=?,until_ms=? WHERE id=1 AND until_ms<=?').run(owner, Date.now() + duration, Date.now()).changes === 1;
+  }
+  renew(owner: string, duration: number): boolean {
+    return this.db.prepare('UPDATE governance_workflow_lock SET until_ms=? WHERE id=1 AND owner=? AND until_ms>?').run(Date.now() + duration, owner, Date.now()).changes === 1;
+  }
+  release(owner: string): void { this.db.prepare('UPDATE governance_workflow_lock SET owner=NULL,until_ms=0 WHERE id=1 AND owner=?').run(owner); }
+  private fence(owner: string): void {
+    if (!this.db.prepare('SELECT id FROM governance_workflow_lock WHERE id=1 AND owner=? AND until_ms>?').get(owner, Date.now())) throw new MnemoWeaveError('INVALID_STATE');
+  }
+  private status(id: string, state: string): void {
+    // changed_at records when the CURRENT state was entered; retention periods start here.
+    this.db.prepare(`INSERT INTO governance_lifecycle(candidate_id,status,changed_at) VALUES(?,?,?)
+      ON CONFLICT(candidate_id) DO UPDATE SET status=excluded.status, changed_at=excluded.changed_at`).run(id, state, new Date().toISOString());
+  }
+  private recordReview(id: string, decision: string, actor: string, reason: string, assessment: Assessment | null): void {
+    this.db.prepare('INSERT INTO governance_reviews VALUES(?,?,?,?,?,?,?)').run(randomUUID(), id, decision, actor, reason, assessment ? JSON.stringify(assessment) : null, new Date().toISOString());
+  }
+  review(id: string, decision: ReviewDecision, actor: string, reason: string, assessment: Assessment | null, owner?: string,resolution?:'revise'|'supersede'|'coexist'): CandidateRecord {
+    return this.transaction(() => {
+      if (owner) this.fence(owner);
+      const candidate = this.get(id);
+      if (!['pending_review', 'needs_review'].includes(candidate.status)) throw new MnemoWeaveError('INVALID_STATE');
+      if (decision === 'approve' && candidate.request.change) this.catalog.prepare(id,candidate.request,resolution);
+      this.recordReview(id, decision, actor, reason, assessment);
+      this.status(id, decision === 'approve' ? 'approved' : decision === 'reject' ? 'rejected' : 'needs_review');
+      if(decision==='reject')this.catalog.dismissCaseForCandidate(id,actor,reason);
+      if (decision === 'human') {
+        this.db.prepare('INSERT OR IGNORE INTO governance_review_tasks VALUES(?,?,?,?)').run(randomUUID(), id, assessment?.conflict && assessment.conflict !== 'none' ? 'conflict' : 'quality', 'open');
+      } else {
+        this.db.prepare("UPDATE governance_review_tasks SET state='resolved' WHERE candidate_id=?").run(id);
+      }
+      if (decision === 'approve') {
+        const taskId = randomUUID();
+        this.db.prepare('INSERT INTO governance_tasks(id,candidate_id,write_key,state,checkpoint,attempts,next_at,owner) VALUES(?,?,?,?,?,?,?,?)').run(taskId, id, `candidate:${id}`, 'queued', 'ready', 0, Date.now(), null);
+        this.db.prepare('INSERT INTO governance_outbox VALUES(?,?)').run(randomUUID(), taskId);
+      }
+      return this.get(id);
+    });
+  }
+  claim(owner: string): Job | undefined {
+    return this.transaction(() => {
+      this.fence(owner);
+      const row = this.db.prepare(`SELECT * FROM governance_tasks WHERE state='running' OR (state IN ('queued','failed') AND next_at IS NOT NULL AND next_at<=?) ORDER BY rowid LIMIT 1`).get(Date.now());
+      if (!row) return undefined;
+      this.db.prepare("UPDATE governance_runs SET state='interrupted',ended_at=? WHERE task_id=? AND state='running'").run(new Date().toISOString(), row['id']!);
+      this.db.prepare("UPDATE governance_tasks SET state='running',owner=?,attempts=attempts+1 WHERE id=?").run(owner, row['id']!);
+      this.status(String(row['candidate_id']), 'persisting');
+      const runId = randomUUID();
+      this.db.prepare('INSERT INTO governance_runs VALUES(?,?,?,?,?)').run(runId, row['id']!, 'running', new Date().toISOString(), null);
+      return { taskId: String(row['id']), runId, candidateId: String(row['candidate_id']), writeKey: String(row['write_key']), checkpoint: String(row['checkpoint']) as Job['checkpoint'], owner };
+    });
+  }
+  private checkJob(job: Job): void {
+    this.fence(job.owner);
+    if (!this.db.prepare("SELECT id FROM governance_tasks WHERE id=? AND state='running' AND owner=?").get(job.taskId, job.owner)) throw new MnemoWeaveError('INVALID_STATE');
+  }
+  writing(job: Job): void {
+    this.transaction(() => { this.checkJob(job); this.db.prepare("UPDATE governance_tasks SET checkpoint='writing' WHERE id=?").run(job.taskId); });
+  }
+  versionOperation(job: Job) { this.checkJob(job); return this.catalog.operation(job.candidateId); }
+  versionCheckpoint(job: Job, checkpoint: VersionCheckpoint): void {
+    this.transaction(() => { this.checkJob(job); this.catalog.checkpoint(job.candidateId,checkpoint); });
+  }
+  checkSupersedesProjection(job:Job,sourceProviderId:string):void{
+    this.transaction(()=>{this.checkJob(job);this.catalog.checkSupersedesProjection(job.candidateId,sourceProviderId);});
+  }
+  finish(job: Job, result: WriteResult, reconciled: boolean): void {
+    this.transaction(() => {
+      this.checkJob(job);
+      const request = this.get(job.candidateId).request;
+      const contentHash = createHash('sha256').update(request.content).digest('hex');
+      if (request.change) this.catalog.publishOperation(job.candidateId,request,result.id,contentHash,new Date().toISOString());
+      else this.catalog.publishInitial(job.candidateId, request, result.id, contentHash, new Date().toISOString());
+      this.recordReceipt(job, { status: 'persisted', providerMemoryId: result.id, providerAction: result.action, writeKey: job.writeKey, reconciled, contentHash });
+      this.db.prepare("UPDATE governance_tasks SET state='succeeded',next_at=NULL,owner=NULL,first_failed_at=NULL,alerted_at=NULL WHERE id=?").run(job.taskId);
+      this.db.prepare("UPDATE governance_runs SET state='succeeded',ended_at=? WHERE id=?").run(new Date().toISOString(), job.runId);
+      this.status(job.candidateId, 'persisted');
+    });
+  }
+  private recordReceipt(job: Job, result: unknown): void {
+    this.db.prepare('INSERT INTO governance_execution_receipts VALUES(?,?,?,?,?,?)').run(randomUUID(), job.candidateId, job.taskId, job.runId, JSON.stringify(result), new Date().toISOString());
+  }
+  fail(job: Job, code: string, uncertain: boolean): void {
+    this.transaction(() => {
+      this.checkJob(job);
+      // TASK-04: non-model recoverable infrastructure failures keep retrying with capped backoff
+      // and alert after 24 hours; semantic/integrity failures wait for an operator instead.
+      const task = this.db.prepare('SELECT attempts, first_failed_at, alerted_at FROM governance_tasks WHERE id=?').get(job.taskId)!;
+      const now = Date.now();
+      const retryable = !uncertain && !['PROVIDER_INTEGRITY', 'REVIEW_REQUIRED', 'INVALID_STATE', 'UNSUPPORTED_VERSION'].includes(code);
+      const retryAt = retryable ? now + Math.min(2000 * 2 ** (Number(task['attempts']) - 1), 900000) : null;
+      let firstFailedAt = task['first_failed_at'] === null ? null : Number(task['first_failed_at']);
+      let alertedAt = task['alerted_at'] === null ? null : Number(task['alerted_at']);
+      if (retryable) {
+        firstFailedAt ??= now;
+        if (now - firstFailedAt > 86_400_000 && alertedAt === null) {
+          alertedAt = now;
+          process.stderr.write(`${JSON.stringify({ event: 'task_retry_alert', taskId: job.taskId, candidateId: job.candidateId, code, failingSince: new Date(firstFailedAt).toISOString() })}\n`);
+        }
+      }
+      this.recordReceipt(job, { status: 'failed', code, uncertain, writeKey: job.writeKey });
+      this.db.prepare("UPDATE governance_tasks SET state='failed',next_at=?,owner=NULL,first_failed_at=?,alerted_at=? WHERE id=?").run(retryAt, firstFailedAt, alertedAt, job.taskId);
+      this.db.prepare("UPDATE governance_runs SET state='failed',ended_at=? WHERE id=?").run(new Date().toISOString(), job.runId);
+      this.status(job.candidateId, 'failed');
+    });
+  }
+  retry(id: string, actor: string, reason: string): CandidateRecord {
+    return this.transaction(() => {
+      if (this.get(id).status !== 'failed') throw new MnemoWeaveError('INVALID_STATE');
+      this.recordReview(id, 'retry', actor, reason, null);
+      this.db.prepare("UPDATE governance_tasks SET state='queued',checkpoint='retry',next_at=?,first_failed_at=NULL,alerted_at=NULL WHERE candidate_id=?").run(Date.now(), id);
+      this.status(id, 'approved');
+      return this.get(id);
+    });
+  }
+  amend(id: string, request: RememberRequest, actor: string, reason: string): CandidateRecord {
+    return this.transaction(() => {
+      const replacement = this.submit(request);
+      if (replacement.id === id) throw new MnemoWeaveError('INVALID_INPUT');
+      this.review(id, 'reject', actor, `${reason}\nReplacement candidate: ${replacement.id}`, null);
+      this.recordReview(replacement.id, 'resubmitted', actor, `Amended from ${id}: ${reason}`, null);
+      return this.get(replacement.id);
+    });
+  }
+  resolveConflict(input:ConflictResolutionRequest,actor:string):CandidateRecord{
+    return this.transaction(()=>{
+      const conflict=this.catalog.getConflict(input.caseId);
+      const candidate=this.get(conflict.candidateId);
+      if(candidate.status!=='needs_review')throw new MnemoWeaveError('INVALID_STATE');
+      let followUp:CandidateRecord|undefined;
+      if(input.decision==='coexist'){
+        const replacement=input.replacement!;
+        if(replacement.change?.kind!=='coexist'||replacement.change.targetMemoryId!==conflict.targetMemoryId||replacement.change.expectedRevisionId!==conflict.baseRevisionId)throw new MnemoWeaveError('INVALID_INPUT');
+        followUp=this.submit(replacement);
+        if(followUp.id===candidate.id||followUp.status!=='pending_review')throw new MnemoWeaveError('INVALID_INPUT');
+      }
+      this.catalog.resolve(input.caseId,input.decision,actor,input.reason,input.evidence,followUp?.id);
+      if(input.decision==='keep_existing')return this.review(candidate.id,'reject',actor,input.reason,null);
+      if(input.decision==='unverified')return this.review(candidate.id,'human',actor,input.reason,null);
+      if(input.decision==='coexist'){
+        this.review(candidate.id,'reject',actor,`${input.reason}\nQualified replacement: ${followUp!.id}`,null);
+        this.recordReview(followUp!.id,'resubmitted',actor,`Conflict ${input.caseId}: ${input.reason}`,null);
+        return this.get(followUp!.id);
+      }
+      return this.review(candidate.id,'approve',actor,input.reason,null,undefined,input.decision);
+    });
+  }
+  cancelVersion(candidateId:string,actor:string,reason:string):CandidateRecord{
+    return this.transaction(()=>{
+      const candidate=this.get(candidateId);if(!candidate.request.change||!['approved','persisting','failed'].includes(candidate.status))throw new MnemoWeaveError('INVALID_STATE');
+      const task=this.db.prepare('SELECT * FROM governance_tasks WHERE candidate_id=?').get(candidateId)!;
+      if(task['state']==='running'&&this.db.prepare('SELECT id FROM governance_workflow_lock WHERE until_ms>?').get(Date.now()))throw new MnemoWeaveError('INVALID_STATE');
+      this.catalog.cancel(candidateId,actor,reason);this.recordReview(candidateId,'reject',actor,`Cancelled unpublished version: ${reason}`,null);
+      const runId=randomUUID();const now=new Date().toISOString();
+      this.db.prepare('INSERT INTO governance_runs VALUES(?,?,?,?,?)').run(runId,task['id']!,'cancelled',now,now);
+      this.db.prepare('INSERT INTO governance_execution_receipts VALUES(?,?,?,?,?,?)').run(randomUUID(),candidateId,task['id']!,runId,JSON.stringify({status:'failed',code:'OPERATION_CANCELLED',uncertain:true,writeKey:task['write_key']}),now);
+      this.db.prepare("UPDATE governance_runs SET state='cancelled',ended_at=? WHERE task_id=? AND state='running'").run(now,task['id']!);
+      this.db.prepare("UPDATE governance_tasks SET state='cancelled',next_at=NULL,owner=NULL WHERE candidate_id=?").run(candidateId);
+      this.status(candidateId,'rejected');return this.get(candidateId);
+    });
+  }
+  /** Large bodies are content-addressed files; the metadata row stores a `blob:<sha256>` marker. */
+  private storeBody(content: string): string {
+    if (Buffer.byteLength(content, 'utf8') <= BLOB_THRESHOLD_BYTES) return content;
+    const hash = createHash('sha256').update(content).digest('hex');
+    const staging = join(this.blobsDir, `.tmp-${hash}-${randomUUID()}`);
+    writeFileSync(staging, content, 'utf8');
+    renameSync(staging, join(this.blobsDir, hash));
+    return `blob:${hash}`;
+  }
+  private loadBody(stored: string): string {
+    if (!stored.startsWith('blob:')) return stored;
+    const hash = stored.slice(5);
+    try {
+      const content = readFileSync(join(this.blobsDir, hash), 'utf8');
+      if (createHash('sha256').update(content).digest('hex') !== hash) throw new MnemoWeaveError('PROVIDER_INTEGRITY');
+      return content;
+    } catch (error) {
+      if (error instanceof MnemoWeaveError) throw error;
+      throw new MnemoWeaveError('PROVIDER_INTEGRITY');
+    }
+  }
+  /** Blob GC: only unreferenced objects older than the grace window are removed. */
+  collectBlobs(now: Date = new Date()): number {
+    const referenced = new Set(this.db.prepare("SELECT content FROM governance_candidate_bodies WHERE content LIKE 'blob:%'").all().map(row => String(row['content']).slice(5)));
+    let removed = 0;
+    for (const name of readdirSync(this.blobsDir)) {
+      if (referenced.has(name)) continue;
+      const path = join(this.blobsDir, name);
+      try {
+        if (now.getTime() - statSync(path).mtimeMs < BLOB_ORPHAN_GRACE_MS) continue;
+        unlinkSync(path); removed++;
+      } catch { /* already gone */ }
+    }
+    return removed;
+  }
+  /** STORAGE-02: measured over the governance database and its WAL, not the Provider store. */  private databaseBytes(): number {
+    let total = 0;
+    for (const suffix of ['', '-wal']) {
+      try { total += statSync(`${this.dbPath}${suffix}`).size; } catch { /* file not created yet */ }
+    }
+    return total;
+  }
+  /** Hard limit rejects new growth; soft limit reports once per process and lets cleanup run. */
+  private enforceQuota(): void {
+    if (this.quotaHardBytes === undefined) return;
+    const usedBytes = this.databaseBytes();
+    if (usedBytes >= this.quotaHardBytes) throw new MnemoWeaveError('QUOTA_EXCEEDED');
+    if (this.quotaSoftBytes !== undefined && usedBytes >= this.quotaSoftBytes && !this.quotaSoftLogged) {
+      this.quotaSoftLogged = true;
+      process.stderr.write(`${JSON.stringify({ event: 'quota_soft_exceeded', usedBytes, softBytes: this.quotaSoftBytes })}${String.fromCharCode(10)}`);
+    }
+  }
+  storageStatus(): { usedBytes: number; state: 'ok' | 'soft' | 'hard'; softBytes?: number; hardBytes?: number } {
+    const usedBytes = this.databaseBytes();
+    const state = this.quotaHardBytes !== undefined && usedBytes >= this.quotaHardBytes ? 'hard' as const
+      : this.quotaSoftBytes !== undefined && usedBytes >= this.quotaSoftBytes ? 'soft' as const : 'ok' as const;
+    return {
+      usedBytes, state,
+      ...(this.quotaSoftBytes !== undefined ? { softBytes: this.quotaSoftBytes } : {}),
+      ...(this.quotaHardBytes !== undefined ? { hardBytes: this.quotaHardBytes } : {}),
+    };
+  }
+  /**
+   * RETENTION-01/02 sweep: event hot→archive→clear lifecycle plus candidate body clearing.
+   * Deadlines are computed from planned stage times (state entry / received_at), so delayed
+   * sweeps never extend them; skew is reported instead of silently shifting deadlines.
+   */
+  sweepRetention(now: Date = new Date()): RetentionSweepReport {
+    const report: RetentionSweepReport = { archivedEvents: 0, clearedEvents: 0, protectedEvents: 0, clearedCandidates: 0, deferredCandidates: [], planSkewMs: { events: 0, candidates: 0 } };
+    this.events.sweepEvents(now, report);
+    let maxSkew = 0;
+    const clearedBlobs: string[] = [];
+    this.transaction(() => {
+      const rows = this.db.prepare(`SELECT c.id, c.request_json, c.submitted_at, c.status AS base_status, l.status AS lifecycle_status, l.changed_at
+        FROM governance_candidates c LEFT JOIN governance_lifecycle l ON l.candidate_id=c.id`).all();
+      for (const row of rows) {
+        const candidateId = String(row['id']);
+        const status = row['lifecycle_status'] === null ? String(row['base_status']) : String(row['lifecycle_status']);
+        if (status !== 'rejected' && status !== 'persisted') { report.deferredCandidates.push({ candidateId, reason: `status_${status}` }); continue; }
+        const clearableSince = row['changed_at'] === null ? String(row['submitted_at']) : String(row['changed_at']);
+        if (new Date(clearableSince).getTime() > now.getTime() - CANDIDATE_BODY_RETENTION_DAYS * DAY_MS) { report.deferredCandidates.push({ candidateId, reason: 'retention_not_due' }); continue; }
+        const activeTask = this.db.prepare("SELECT state FROM governance_tasks WHERE candidate_id=? AND state IN ('queued','running')").get(candidateId);
+        if (activeTask) { report.deferredCandidates.push({ candidateId, reason: 'active_task' }); continue; }
+        const openReviewTask = this.db.prepare("SELECT id FROM governance_review_tasks WHERE candidate_id=? AND state='open'").get(candidateId);
+        if (openReviewTask) { report.deferredCandidates.push({ candidateId, reason: 'review_task' }); continue; }
+        const conflictCase = this.db.prepare('SELECT id FROM catalog_conflicts WHERE candidate_id=? OR follow_up_candidate_id=?').get(candidateId, candidateId);
+        if (conflictCase) { report.deferredCandidates.push({ candidateId, reason: 'conflict_case_evidence' }); continue; }
+        const evidenceRef = this.db.prepare('SELECT event_id FROM session_event_refs WHERE candidate_id=?').get(candidateId);
+        if (evidenceRef) { report.deferredCandidates.push({ candidateId, reason: 'protected_evidence' }); continue; }
+        // Post-v7 rows already store metadata-only JSON; legacy rows are scrubbed here. Either
+        // way the body row is the content authority and is removed with the same transaction.
+        const body = this.db.prepare('SELECT content FROM governance_candidate_bodies WHERE candidate_id=?').get(candidateId);
+        if (body && String(body['content']).startsWith('blob:')) clearedBlobs.push(String(body['content']).slice(5));
+        const request = CandidateRequest.parse(JSON.parse(String(row['request_json'])));
+        this.db.prepare('UPDATE governance_candidates SET request_json=?, body_cleared_at=? WHERE id=?')
+          .run(JSON.stringify({ ...request, content: '' }), now.toISOString(), candidateId);
+        this.db.prepare('DELETE FROM governance_candidate_bodies WHERE candidate_id=?').run(candidateId);
+        maxSkew = Math.max(maxSkew, now.getTime() - (new Date(clearableSince).getTime() + CANDIDATE_BODY_RETENTION_DAYS * DAY_MS));
+        report.clearedCandidates++;
+      }
+      report.planSkewMs.candidates = maxSkew;
+    });
+    for (const hash of clearedBlobs) {
+      try { unlinkSync(join(this.blobsDir, hash)); } catch { /* already collected */ }
+    }
+    this.collectBlobs(now);
+    return report;
+  }
+
+  close(): void { this.db.close(); }
+}

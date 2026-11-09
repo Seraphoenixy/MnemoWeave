@@ -1,0 +1,10 @@
+packages:
+  - 'apps/*'
+  - 'packages/*'
+  - 'packages/core/*'
+  - 'packages/infrastructure/*'
+  - 'packages/providers/*'
+  - 'packages/protocols/*'
+  - 'packages/adapters/*'
+allowBuilds:
+  esbuild: true

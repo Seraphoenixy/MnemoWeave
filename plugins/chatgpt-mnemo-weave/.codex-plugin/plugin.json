@@ -1,0 +1,9 @@
+{
+  "name": "chatgpt-mnemo-weave",
+  "version": "0.1.0",
+  "description": "MnemoWeave memory orchestration for ChatGPT desktop: session View injection and recall/remember tools.",
+  "author": { "name": "MnemoWeave" },
+  "keywords": ["memory", "recall", "mnemon"],
+  "hooks": "hooks/hooks.json",
+  "mcpServers": ".mcp.json"
+}

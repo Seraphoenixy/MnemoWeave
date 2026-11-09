@@ -1,0 +1,19 @@
+{
+  "hooks": {
+    "SessionStart": [
+      { "matcher": "startup|clear|compact", "hooks": [ { "type": "command", "command": "node \"${ZCODE_PLUGIN_ROOT}/dist/packages/adapters/zcode/src/hook-main.js\"", "timeout": 5, "statusMessage": "Loading MnemoWeave session view" } ] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "node \"${ZCODE_PLUGIN_ROOT}/dist/packages/adapters/zcode/src/hook-main.js\"", "timeout": 5, "statusMessage": "Checking MnemoWeave context" } ] }
+    ],
+    "PostToolUse": [
+      { "hooks": [ { "type": "command", "command": "node \"${ZCODE_PLUGIN_ROOT}/dist/packages/adapters/zcode/src/hook-main.js\"", "timeout": 5 } ] }
+    ],
+    "PostToolUseFailure": [
+      { "hooks": [ { "type": "command", "command": "node \"${ZCODE_PLUGIN_ROOT}/dist/packages/adapters/zcode/src/hook-main.js\"", "timeout": 5 } ] }
+    ],
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "node \"${ZCODE_PLUGIN_ROOT}/dist/packages/adapters/zcode/src/hook-main.js\"", "timeout": 5 } ] }
+    ]
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "zcode-mnemo-weave",
+  "version": "0.1.0",
+  "description": "MnemoWeave memory orchestration: session View injection, recall/remember tools, candidate review.",
+  "author": { "name": "MnemoWeave" },
+  "keywords": ["memory", "recall", "mnemon"],
+  "hooks": "hooks/hooks.json",
+  "mcpServers": ".mcp.json",
+  "userConfig": {
+    "mnemon_binary": { "type": "file", "title": "Mnemon binary", "description": "Official Mnemon 0.2.13 executable", "required": true },
+    "mnemon_data_dir": { "type": "directory", "title": "Mnemon data directory", "description": "Dedicated store directory, not the default user memory directory", "required": true },
+    "mnemon_store": { "type": "string", "title": "Mnemon store", "default": "development" },
+    "state_dir": { "type": "directory", "title": "MnemoWeave state directory", "description": "Governance database, blobs and snapshots" },
+    "server_url": { "type": "string", "title": "MnemoWeave server URL", "default": "http://127.0.0.1:4317" }
+  }
+}

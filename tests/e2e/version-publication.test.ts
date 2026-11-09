@@ -1,0 +1,57 @@
+import { testHostHeaders, pairTestHost, TEST_OPERATOR } from '../support/server.ts';
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdir,mkdtemp } from 'node:fs/promises';
+import { join,resolve } from 'node:path';
+import { RememberInput } from '../../packages/core/contracts/src/index.ts';
+import type { CandidateRecord } from '../../packages/core/contracts/src/index.ts';
+import { startServer,stopProcess,until } from '../support/server.ts';
+import {Client} from '@modelcontextprotocol/sdk/client/index.js';
+import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
+
+test('Real Provider: logical revisions, stale bases, independent supersession and scope coexistence', { timeout:60000 },async()=>{
+  await mkdir('work/e2e',{recursive:true}); const root=await mkdtemp(resolve('work/e2e/versions-'));
+  const env={MNEMON_BINARY:process.env.MNEMON_BINARY??resolve('work/tools/mnemon/mnemon.exe'),MNEMON_DATA_DIR:join(root,'provider'),MNEMON_STORE:'versions',MNEMOWEAVE_STATE_DIR:join(root,'state'),MNEMOWEAVE_PORT:'0',MNEMOWEAVE_TOKEN:'version-host-token-0123456789',MNEMOWEAVE_OPERATOR_TOKEN:'version-operator-token-987654321'};
+  let server=await startServer(env);
+  let client:Client|undefined;
+  const headers=testHostHeaders(env.MNEMOWEAVE_TOKEN);
+  const operator={...headers,authorization:`Bearer ${env.MNEMOWEAVE_OPERATOR_TOKEN}`};
+  const getCandidate=async(id:string)=>await(await fetch(`${server.url}/v1/candidates/${id}`,{headers})).json() as CandidateRecord;
+  const input=(key:string,content:string)=>RememberInput.parse({idempotencyKey:key,content,knowledgeType:'Practice',provenance:{source:'test',sourceReference:'fixture:versions',evidence:['fixture only'],verificationStatus:'unverified',confidence:0.5,applicability:'ARM fixture project',limitations:'not production knowledge',lastVerified:null}});
+  const submit=async(body:unknown)=>{const response=await fetch(`${server.url}/v1/remember`,{method:'POST',headers,body:JSON.stringify(body)}); assert.equal(response.status,202);return await response.json() as CandidateRecord;};
+  const approve=(id:string)=>fetch(`${server.url}/v1/review`,{method:'POST',headers:operator,body:JSON.stringify({candidateId:id,decision:'approve',reason:'Operator verified the test change and baseline'})});
+  const publish=async(body:unknown)=>{const submitted=await submit(body);await until(()=>getCandidate(submitted.id),c=>c.status==='needs_review');assert.equal((await approve(submitted.id)).status,200);return until(()=>getCandidate(submitted.id),c=>c.status==='persisted');};
+  const read=async(id:string,revisionId?:string)=>{const response=await fetch(`${server.url}/v1/memories/${id}${revisionId?`?revisionId=${revisionId}`:''}`,{headers});assert.equal(response.status,200);return await response.json() as {id:string;currentRevisionId:string;content:string;state:string;revisions:{id:string}[];relations:{kind:string}[]};};
+  try{
+    const first=await publish(input('version-initial-001','MnemoWeave version fixture: project transport uses V1.'));
+    const target=first.publication!;
+    const change={kind:'revise',targetMemoryId:target.memoryId,expectedRevisionId:target.revisionId,effectiveAt:new Date().toISOString(),reason:'Version evolved to V2',evidence:['reviewed fixture update']};
+    const {MNEMOWEAVE_OPERATOR_TOKEN:_operator,...hostEnv}=env;
+    client=new Client({name:'version-host',version:'0.1.0'});
+    await client.connect(new StdioClientTransport({command:process.execPath,args:['apps/server/src/mcp-main.ts'],cwd:resolve('.'),env:{MNEMOWEAVE_MCP_MODE:'standalone',...hostEnv,MNEMOWEAVE_WORKER:'off',...(process.env.SystemRoot?{SystemRoot:process.env.SystemRoot}:{})}}));
+    const submitted=await client.callTool({name:'remember',arguments:{...input('version-second-001','MnemoWeave version fixture: project transport uses V2.'),change}});assert.notEqual(submitted.isError,true);
+    const candidate=JSON.parse((submitted.content as {text:string}[])[0]!.text) as CandidateRecord;await until(()=>getCandidate(candidate.id),c=>c.status==='needs_review');assert.equal((await approve(candidate.id)).status,200);
+    const second=await until(()=>getCandidate(candidate.id),c=>c.status==='persisted');
+    assert.equal(second.publication!.memoryId,target.memoryId);
+    assert.notEqual(second.publication!.revisionId,target.revisionId);
+    const current=await read(target.memoryId);
+    assert.equal(current.revisions.length,2);assert.equal(current.content,second.request.content);
+    assert.equal((await read(target.memoryId,target.revisionId)).content,first.request.content);
+    const mcpHistory=await client.callTool({name:'read_memory',arguments:{memoryId:target.memoryId,revisionId:target.revisionId}});assert.notEqual(mcpHistory.isError,true);assert.equal(JSON.parse((mcpHistory.content as {text:string}[])[0]!.text).content,first.request.content);
+    const stale=await submit({...input('version-stale-001','MnemoWeave version fixture: stale competing update.'),change});
+    await until(()=>getCandidate(stale.id),c=>c.status==='needs_review'); assert.equal((await approve(stale.id)).status,409);
+    const replacement=await publish({...input('version-replacement-001','MnemoWeave version fixture: reviewed independent design B.'),change:{...change,kind:'supersede',expectedRevisionId:second.publication!.revisionId,effectiveAt:new Date().toISOString(),reason:'Independent design replaces former approach'}});
+    assert.notEqual(replacement.publication!.memoryId,target.memoryId);
+    assert.equal((await read(target.memoryId)).state,'superseded');
+    const replacementMemory=await read(replacement.publication!.memoryId);assert.ok(replacementMemory.relations.some(r=>r.kind==='Supersedes'));
+    const coexistInput=input('version-coexist-001','MnemoWeave version fixture: PowerPC requires an alternative valid transport.');coexistInput.provenance.applicability='PowerPC fixture project';
+    const coexist=await publish({...coexistInput,change:{...change,kind:'coexist',targetMemoryId:replacement.publication!.memoryId,expectedRevisionId:replacement.publication!.revisionId,effectiveAt:new Date().toISOString(),reason:'Different platform, both remain valid'}});
+    assert.equal((await read(replacement.publication!.memoryId)).state,'active');assert.equal((await read(coexist.publication!.memoryId)).state,'active');
+    const recalled=await(await fetch(`${server.url}/v1/recall`,{method:'POST',headers,body:JSON.stringify({query:'MnemoWeave version fixture',limit:20})})).json() as {memories:{content:string}[]};
+    assert.ok(recalled.memories.some(m=>m.content===replacement.request.content));assert.ok(recalled.memories.some(m=>m.content===coexist.request.content));
+    assert.ok(!recalled.memories.some(m=>m.content===first.request.content||m.content===second.request.content));
+    await client.close();client=undefined;await stopProcess(server.child);server=await startServer(env);
+    assert.equal((await read(target.memoryId,target.revisionId)).content,first.request.content);
+    assert.equal((await read(replacement.publication!.memoryId)).currentRevisionId,replacement.publication!.revisionId);
+  }finally{await client?.close();await stopProcess(server.child);}
+});

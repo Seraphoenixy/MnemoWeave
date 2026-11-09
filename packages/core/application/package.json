@@ -1,0 +1,9 @@
+{
+  "type": "module",
+  "name": "@mnemoweave/application",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": {
+    "@mnemoweave/contracts": "workspace:*"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "type": "module",
+  "name": "@mnemoweave/providers-mnemon",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": {
+    "@mnemoweave/contracts": "workspace:*",
+    "zod": "4.6.7",
+    "@mnemoweave/application": "workspace:*"
+  }
+}

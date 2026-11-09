@@ -1,0 +1,14 @@
+node_modules/
+work/
+dist/
+coverage/
+plugins/dsh-mnemo-weave/lib/client.js
+plugins/dsh-mnemo-weave/lib/ui/
+plugins/dsh-mnemo-weave/lib/shared/
+.env
+.env.*
+!.env.example
+*.db
+*.db-wal
+*.db-shm
+*.log

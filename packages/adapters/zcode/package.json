@@ -1,0 +1,12 @@
+{
+  "name": "@mnemoweave/adapters-zcode",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@mnemoweave/contracts": "workspace:*",
+    "@mnemoweave/bridge": "workspace:*",
+    "@mnemoweave/adapters-shared-sdk": "workspace:*",
+    "zod": "4.6.7"
+  }
+}

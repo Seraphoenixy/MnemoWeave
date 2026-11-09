@@ -1,0 +1,10 @@
+{
+  "hooks": {
+    "SessionStart": [
+      { "matcher": "startup|resume", "hooks": [ { "type": "command", "command": "node \"${CODEX_PLUGIN_ROOT}/dist/packages/adapters/codex/src/hook-main.js\"", "timeout": 5, "statusMessage": "Loading MnemoWeave session view" } ] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "node \"${CODEX_PLUGIN_ROOT}/dist/packages/adapters/codex/src/hook-main.js\"", "timeout": 5, "statusMessage": "Checking MnemoWeave context" } ] }
+    ]
+  }
+}

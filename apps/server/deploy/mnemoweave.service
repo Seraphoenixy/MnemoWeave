@@ -1,0 +1,21 @@
+# MnemoWeave Server — Linux systemd user unit (WP8; no Docker per ADR-018/026).
+# Install: cp to ~/.config/systemd/user/ && systemctl --user daemon-reload
+# Run:     systemctl --user enable --now mnemoweave
+# Logs:    journalctl --user -u mnemoweave (stderr diagnostics; journald rotation applies)
+[Unit]
+Description=MnemoWeave memory orchestration server
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/node %h/mnemoweave/dist/apps/server/src/main.js
+WorkingDirectory=%h/mnemoweave
+Restart=on-failure
+RestartSec=5
+# Environment is kept out of the unit: secrets come from an environment file readable only by the user.
+EnvironmentFile=%h/mnemoweave/apps/server/deploy/mnemoweave.env
+# The governance store and Mnemon data directory must be absolute paths owned by this user.
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=default.target

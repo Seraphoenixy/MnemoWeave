@@ -1,0 +1,12 @@
+{
+  "name": "@mnemoweave/bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@mnemoweave/contracts": "workspace:*",
+    "@mnemoweave/application": "workspace:*",
+    "@mnemoweave/governance": "workspace:*",
+    "@mnemoweave/adapters-shared-sdk": "workspace:*"
+  }
+}
