@@ -64,7 +64,8 @@ test('v2 published receipts backfill v3 without changing Candidate or Provider i
     -- Revert the v7 body split too: a genuine v2 store keeps full content in request_json.
     UPDATE governance_candidates SET request_json=json_set(request_json,'$.content',(SELECT content FROM governance_candidate_bodies WHERE candidate_id=governance_candidates.id));
     DROP TABLE session_event_refs; DROP TABLE session_events; DROP TABLE governance_candidate_bodies;
-    DROP TABLE sync_log; DROP TABLE sync_grants; DROP TABLE sync_license_state;
+    DROP TABLE IF EXISTS entry_versions; DROP TABLE IF EXISTS sync_state; DROP TABLE IF EXISTS sync_outbox; DROP TABLE IF EXISTS sync_inbox; DROP TABLE IF EXISTS formal_map; DROP TABLE IF EXISTS runtime_rules; DROP TABLE IF EXISTS project_archives; DROP TABLE IF EXISTS project_bindings; DROP TABLE IF EXISTS runtime_injections;
+    DROP TABLE IF EXISTS sync_log; DROP TABLE IF EXISTS sync_grants; DROP TABLE IF EXISTS sync_license_state;
     ALTER TABLE governance_candidates DROP COLUMN body_cleared_at; ALTER TABLE governance_lifecycle DROP COLUMN changed_at;
     DROP TABLE runtime_user_events; DROP TABLE runtime_projects; DROP TABLE runtime_pins; DROP TABLE runtime_sessions; DROP TABLE runtime_event_ids; DROP TABLE runtime_capture_tasks; DROP TABLE runtime_capture_runs; DROP TABLE runtime_capture_receipts;
     PRAGMA user_version=2;`); old.close();

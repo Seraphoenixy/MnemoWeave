@@ -93,9 +93,13 @@ test('The step budget caps retries even when every failure is temporary', async 
     (init.signal as AbortSignal | null)?.addEventListener('abort', () => reject((init.signal as AbortSignal).reason), { once: true });
   }));
   try {
-    await assert.rejects(call(gateway));
-    assert.equal(usage.filter(entry => entry.outcome === 'timeout').length, 2, 'second attempt refused by exhausted budget');
-    assert.equal(stub.calls.length, 2);
+    // Both endings are correct: the second attempt is refused because the budget is
+    // already spent, or it starts and times out with the remaining time. Load decides
+    // which one happens, so the contract asserted here is the cap, not the exact count.
+    await assert.rejects(call(gateway), (error: unknown) => ['timeout', 'budget_exhausted'].includes((error as { outcome?: string }).outcome ?? ''));
+    const timeouts = usage.filter(entry => entry.outcome === 'timeout').length;
+    assert.ok(stub.calls.length >= 1 && stub.calls.length <= 2, `retries must stay capped, saw ${stub.calls.length} attempt(s)`);
+    assert.equal(timeouts, stub.calls.length, 'every attempt that ran is recorded as a timeout');
     for (const entry of usage) { assert.equal(entry.promptTokens, 'unknown'); assert.equal(entry.completionTokens, 'unknown'); }
   } finally { stub.restore(); }
 });

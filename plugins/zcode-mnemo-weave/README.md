@@ -1,6 +1,6 @@
 # MnemoWeave ZCode 插件
 
-状态：本地开发插件。安装后随插件启用 hooks 与 MCP；实际注入依赖 MnemoWeave Server（与可选 Bridge）。
+状态：本地开发插件。安装后随插件启用 hooks 与 MCP；实际注入依赖 MnemoWeave Server（直连，无本地代理进程）。
 
 ## 组成
 
@@ -16,15 +16,16 @@
 
 ## 配置
 
-插件详情页的 Configuration 填写 Mnemon 路径、专用数据目录、Store、状态目录与 Server URL；这些值用于 MCP 子进程。
+插件详情页的 Configuration 填写 Mnemon 数据目录、Store 与状态目录；这些值用于 MCP 子进程。`MNEMON_BINARY` 可省略，默认使用 PATH 上的 `mnemon`。
 
 hooks 子进程读取宿主继承的环境变量：
 
 | 变量 | 用途 |
 |---|---|
 | `MNEMOWEAVE_SERVER` | Server 地址，默认 `http://127.0.0.1:4317` |
-| `MNEMOWEAVE_TOKEN` | 服务令牌（必需） |
-| `MNEMOWEAVE_BRIDGE_HOST_ID` | 配对 Host 标识，默认 `zcode-host` |
-| `MNEMOWEAVE_BRIDGE_URL` / `MNEMOWEAVE_BRIDGE_TOKEN` | 可选；设置后注入走 Bridge 会话状态 |
+| `MNEMOWEAVE_TOKEN` | 服务令牌（必需，与 Server 相同） |
+| `MNEMOWEAVE_HOST_ID` | 宿主标识，作为 `x-mnemoweave-host` 发送，默认 `zcode-host` |
+| `MNEMOWEAVE_PROJECT_ID` | 可选；会话绑定的已登记项目 |
+| `MNEMOWEAVE_INJECT_DEADLINE_MS` | 可选；注入截止，默认 2000 |
 
-插件不保存令牌；未设置令牌时钩子静默跳过，不阻塞会话。
+插件不保存令牌；未设置令牌时钩子静默跳过，不阻塞会话。断网时同样静默——没有本地副本可回退。

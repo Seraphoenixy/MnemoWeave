@@ -1,10 +1,26 @@
-// Host build: Emit the read-only page's Host half as ESM the DSH Host imports from `lib/ui/index.js`.
+// Host build: bundle the Host half into `lib/ui/index.js`.
+// The Host half imports the shared client from `packages/client` with a relative path (the plugin
+// package is outside the workspace), so the packaged copy must carry that code: esbuild inlines it.
 // The legacy prompt-injection entry stays the hand-written `lib/index.js`.
-import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { mkdir } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const tsc = join(here, '..', '..', 'node_modules', 'typescript', 'bin', 'tsc');
-const result = spawnSync(process.execPath, [tsc, '-p', join(here, 'tsconfig.host.json')], { stdio: 'inherit' });
-process.exit(result.status ?? 1);
+const require = createRequire(join(here, 'package.json'));
+const esbuild = require('esbuild');
+
+await mkdir(join(here, 'lib', 'ui'), { recursive: true });
+await esbuild.build({
+  entryPoints: [join(here, 'src/ui/index.ts')],
+  outfile: join(here, 'lib', 'ui', 'index.js'),
+  bundle: true,
+  format: 'esm',
+  platform: 'node',
+  target: 'node22',
+  charset: 'utf8',
+  legalComments: 'none',
+  logLevel: 'warning',
+});
+process.stdout.write('host bundle written: lib/ui/index.js\n');

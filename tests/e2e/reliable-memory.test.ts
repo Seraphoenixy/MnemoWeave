@@ -1,4 +1,4 @@
-import { testHostHeaders, pairTestHost, TEST_OPERATOR } from '../support/server.ts';
+import { testHostHeaders, awaitServerReady, TEST_OPERATOR } from '../support/server.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -12,6 +12,7 @@ import { RememberInput, SemanticAssessment } from '../../packages/core/contracts
 import type { CandidateRecord } from '../../packages/core/contracts/src/index.ts';
 import { MnemonCliProvider, createRunner } from '../../packages/providers/mnemon/src/index.ts';
 import { startServer, stopProcess, until } from '../support/server.ts';
+import { mnemonBinary } from './mnemon-binary.ts';
 
 async function fixture() {
   await mkdir('work/e2e', { recursive: true });
@@ -36,7 +37,7 @@ async function fixture() {
   await new Promise<void>(done => model.listen(0, '127.0.0.1', done));
   const address = model.address(); assert.ok(address && typeof address === 'object');
   const env = {
-    MNEMON_BINARY: process.env.MNEMON_BINARY ?? resolve('work/tools/mnemon/mnemon.exe'), MNEMON_DATA_DIR: join(root, 'provider'), MNEMON_STORE: 'milestone',
+    MNEMON_BINARY: mnemonBinary(), MNEMON_DATA_DIR: join(root, 'provider'), MNEMON_STORE: 'milestone',
     MNEMOWEAVE_STATE_DIR: join(root, 'state'), MNEMOWEAVE_PORT: '0', MNEMOWEAVE_TOKEN: 'host-milestone-token-0123456789',
     MNEMOWEAVE_OPERATOR_TOKEN: 'operator-milestone-token-987654321',
     MNEMOWEAVE_MODEL_URL: `http://127.0.0.1:${address.port}/chat/completions`, MNEMOWEAVE_MODEL: 'fixture-semantic-reviewer', MNEMOWEAVE_WORKER: 'on',

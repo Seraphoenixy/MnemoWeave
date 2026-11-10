@@ -1,98 +1,48 @@
 /**
- * The wire contract between the MnemoWeave DSH plugin halves and the Bridge UI API.
+ * The wire contract between the MnemoWeave DSH plugin halves.
  *
- * This file is self-contained: the client bundle is built from it and the host entry
- * imports it directly, so neither needs the MnemoWeave workspace at runtime. Types
- * mirror `packages/bridge/src/ui-read.ts` (UI API v1); a shape change bumps
- * `UI_API_VERSION` on both sides.
+ * This file is self-contained: the client bundle is built from it and the Host half
+ * imports it directly. The shapes mirror the Server contract in
+ * `packages/core/contracts/src/index.ts` and the calls in `packages/client/src/index.ts`
+ * (`GET /v1/memories`, `GET /v1/memories/{id}`, `PATCH /v1/memories/{id}`, `GET /health/ready`);
+ * a server-side shape change belongs there first and then lands here.
  */
 
 // DSH resolves RPC channels as `/name`: `@deepseek-ai/dsh-client-connection` rejects a name that
 // does not match /^\/[A-Za-z0-9._~-]+$/ (or that equals "/api") when the Host half registers it.
 export const RPC_CHANNEL = '/dsh-mnemo-weave';
-export const UI_API_VERSION = 1 as const;
 
-export type AvailabilityStatus = 'ok' | 'unauthorized' | 'unavailable' | 'corrupted';
+export type AvailabilityStatus = 'ok' | 'unauthorized' | 'unavailable';
 
-export interface UiGrantView {
-  grantId: string;
-  projects: string[];
-  globalIncluded: boolean;
-  issuedAt: string;
-  expiresAt: string;
-  generation: number;
-  expired: boolean;
-  revoked: boolean;
-}
-
-export interface UiReplicaView {
-  available: boolean;
-  corrupted: boolean;
-  appliedSeq: number;
-  generation: number;
-  dataTime: string;
-  verifiedAt: string | null;
-  stale: boolean;
-  pendingContent: number;
-  memories: number;
-  revisions: number;
-}
-
+/** Health plus whether this Host can actually use the Server's memory endpoints. */
 export interface UiStatus {
-  schemaVersion: number;
+  status: AvailabilityStatus;
+  /** The Server error code when `status` is not ok; shown as written, never guessed at. */
+  reason?: string;
+  serverUrl: string;
   hostId: string;
-  generatedAt: string;
-  paired: boolean;
-  grant: UiGrantView | null;
-  replica: UiReplicaView | null;
-  intents: { queued: number; isolated: number };
+  checkedAt: string;
+  version?: string;
 }
 
+/** One list row: `MemoryListItem` from the Server contract. */
 export interface UiMemorySummary {
   memoryId: string;
   revisionId: string;
-  state: 'active' | 'superseded' | 'unverified';
+  providerMemoryId: string;
   scope: 'project' | 'global';
   projectId?: string;
   applicability: string;
-  revisionNumber: number;
-  providerMemoryId: string;
   publishedAt: string;
-  excerpt: string;
-  contentLength: number;
+  content: string;
+  entryVersion: number;
 }
 
 export interface UiMemoryList {
-  status: AvailabilityStatus;
-  reason?: string;
   query: string | null;
-  scope: 'project' | 'global' | null;
-  projectId: string | null;
-  total: number;
+  limit: number;
   returned: number;
-  complete: boolean;
-  dataTime: string | null;
   items: UiMemorySummary[];
-}
-
-export interface UiRevision {
-  status: AvailabilityStatus;
-  reason?: string;
-  memoryId: string;
-  revisionId: string;
-  number: number;
-  publishedAt: string;
-  effectiveAt: string;
-  current: boolean;
-  content: string | null;
-}
-
-/** What the Host half is configured with; never the token itself. */
-export interface UiConfigView {
-  bridgeUrl: string;
-  hostId: string | null;
-  timeoutMs: number;
-  hasToken: boolean;
 }
 
 export interface UiMemoryRevision {
@@ -103,54 +53,114 @@ export interface UiMemoryRevision {
   current: boolean;
 }
 
-export interface UiMemoryRelation {
-  id: string;
-  kind: string;
-  targetMemoryId: string;
-  reason: string;
-  effectiveAt: string;
-}
-
+/** The selected published revision plus its metadata; `content` is the authoritative text. */
 export interface UiMemoryDetail {
-  status: AvailabilityStatus;
-  reason?: string;
   memoryId: string;
-  revisionId: string | null;
-  state: 'active' | 'superseded' | 'unverified';
+  revisionId: string;
+  providerMemoryId: string;
   scope: 'project' | 'global';
   projectId?: string;
   applicability: string;
-  content: string | null;
+  state: 'active' | 'superseded' | 'unverified';
+  content: string;
+  publishedAt: string;
   revisions: UiMemoryRevision[];
-  relations: UiMemoryRelation[];
+  entryVersion: number;
 }
 
-export interface UiIntent {
-  intentId: string;
-  kind: string;
-  state: 'queued' | 'acknowledged' | 'isolated';
-  createdAt: string;
-  sessionId?: string;
-  receiptRef?: string;
-}
-
-export interface UiIntents {
-  status: AvailabilityStatus;
+/** `PATCH /v1/memories/{id}` body; the Server appends a new revision and moves the pointer. */
+export interface UiEditInput {
+  memoryId: string;
+  content: string;
   reason?: string;
-  queued: number;
-  isolated: number;
-  items: UiIntent[];
+  /** Base version shown to the user; the Server rejects the edit when it moved. */
+  entryVersion: number;
+}
+
+export interface UiEditResult {
+  memoryId: string;
+  revisionId: string;
+  providerMemoryId: string;
+  contentHash: string;
+  entryVersion: number;
+}
+
+/** What the last View for this host delivered; `null` when the host never injected. */
+export interface UiInjection {
+  id: string;
+  sessionId: string;
+  rulesInjected: number;
+  rulesOmitted: 'budget_exceeded' | null;
+  memoriesInjected: number;
+  usedTokens: number;
+  createdAt: string;
+}
+
+/** One runtime rule: `RuleRecord` from the Server contract. */
+export interface UiRule {
+  entryId: string;
+  scope: 'global' | 'project';
+  projectId: string | null;
+  body: string;
+  enabled: boolean;
+  version: number;
+  withdrawnAt: string | null;
+}
+
+/** One project archive: `ArchiveRecord` from the Server contract. */
+export interface UiArchive {
+  entryId: string;
+  projectId: string;
+  title: string;
+  body: string;
+  source: 'session' | 'tool' | 'user';
+  verification: 'verified' | 'open' | 'refuted';
+  evidence: string;
+  version: number;
+  withdrawnAt: string | null;
+}
+
+/** One scope of this local Server's sync relationship with the remote sync Server. */
+export interface UiSyncScope {
+  scope: string;
+  cursor: number;
+  lastPullAt: string | null;
+  lastError: string | null;
+  pending: number;
+  unknown: number;
+  unapplied: number;
+}
+
+export interface UiSyncStatus {
+  enabled: boolean;
+  scopes: UiSyncScope[];
+  updatedAt: string;
+}
+
+/** Result of one manual sync pass. */
+export interface UiSyncPass {
+  scopes: string[];
+  pulled: number;
+  applied: number;
+  errors: string[];
+  skipped: boolean;
+}
+
+/** What the Host half is configured with; never the token itself. */
+export interface UiConfigView {
+  serverUrl: string;
+  hostId: string;
+  hasToken: boolean;
 }
 
 export interface RpcOk<T> { ok: true; value: T }
 export interface RpcFailure { ok: false; error: { message: string; code?: string } }
 export type RpcResult<T> = RpcOk<T> | RpcFailure;
 
-export type RpcEndpoint = 'status' | 'config' | 'memories' | 'memory' | 'revision' | 'intents';
+export type RpcEndpoint = 'status' | 'memories' | 'memory' | 'edit' | 'config' | 'injection' | 'rules' | 'archives' | 'sync' | 'syncRefresh';
 
-export interface MemoriesRequest { query?: string; limit?: number; scope?: 'project' | 'global'; projectId?: string }
+export interface MemoriesRequest { query?: string; limit?: number }
 export interface MemoryRequest { memoryId: string }
-export interface RevisionRequest { memoryId: string; revisionId: string }
 
 export function isRpcOk<T>(result: RpcResult<T>): result is RpcOk<T> {
   return result.ok === true && Object.hasOwn(result, 'value');

@@ -4,6 +4,10 @@ import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import vm from 'node:vm';
+import { createApi, RpcFailure } from '../../plugins/dsh-mnemo-weave/src/client/api.ts';
+import type { ClientConnection } from '../../plugins/dsh-mnemo-weave/src/client/dsh-types.ts';
+import { createRpcHandler } from '../../plugins/dsh-mnemo-weave/src/ui/rpc.ts';
+import type { MemorySource } from '../../plugins/dsh-mnemo-weave/src/ui/memory-source.ts';
 
 const packageRoot = join(import.meta.dirname, '..', '..', 'plugins', 'dsh-mnemo-weave');
 const requireFromPackage = createRequire(join(packageRoot, 'package.json'));
@@ -108,13 +112,13 @@ test('the built client bundle registers a page and a sidebar entry through DSH s
   assert.equal(entry.options.id, 'mnemoweave');
   assert.equal(entry.options.order, 40);
   assert.equal(typeof entry.options.label, 'function');
-  assert.equal((entry.options.label as () => string)(), 'MnemoWeave 记忆');
+  assert.equal((entry.options.label as () => string)(), '记忆中枢');
   // Styles are injected once, into the document head.
   assert.equal(state.document.head.children.length, 1);
   assert.equal((state.document.head.children[0] as { dataset: Record<string, string> }).dataset['mnemoweaveUi'], 'dsh-mnemo-weave-styles');
 });
 
-test('the page renders its read-only shell and names unavailable data instead of inventing it', async () => {
+test('the page renders its editable shell and names unavailable data instead of inventing it', async () => {
   const code = await bundle();
   const state = harness();
   run(code, state);
@@ -122,12 +126,56 @@ test('the page renders its read-only shell and names unavailable data instead of
   (state.loaded[0]!.exports['apply'] as (ctx: unknown) => void)(makeContext(state, calls));
   const page = calls.registered[0]!.component as unknown as (props: { connection: unknown; locale: unknown }) => ReactElement;
   const html = renderToString(React.createElement(page, { connection: { rpc: { call: async () => ({ ok: true, value: {} }) } }, locale: { getSnapshot: () => ({ active: 'zh-CN' }) } }));
-  assert.match(html, /MnemoWeave 记忆/);
-  assert.match(html, /只读视图/);
-  assert.match(html, /搜索本机记忆/);
-  assert.match(html, /从左侧选择一条记忆/);
-  assert.match(html, /离线意图队列/);
+  assert.match(html, /记忆中枢/);
+  assert.match(html, /直连 MnemoWeave Server/);
+  // The five class tabs are the top-level navigation; overview is the landing page.
+  for (const label of ['概览', '运行时记忆', '项目档案', '正式记忆', '同步']) assert.match(html, new RegExp(label));
+  assert.match(html, /最近一次注入/);
+  assert.match(html, /尚无注入记录/);
+  assert.match(html, /本机与远端同步/);
+  assert.match(html, /正在加载|未配置远端同步/);
+  assert.match(html, /服务信息/);
   assert.doesNotMatch(html, /undefined/);
+  // No Bridge, no read-only wording, and no token value can appear in the page shell.
+  assert.doesNotMatch(html, /Bridge|只读/);
+  assert.doesNotMatch(html, /MNEMOWEAVE_TOKEN=/);
+});
+
+/**
+ * The page's data path: one channel, five endpoints. A failure keeps the Server's code so the
+ * banner can name it; nothing is retried or replaced with empty data here.
+ */
+test('the page calls the Host channel by endpoint and keeps Server error codes', async () => {
+  const calls: Array<{ channel: string; endpoint: string; payload: unknown }> = [];
+  const connection = {
+    rpc: {
+      call: async (channel: string, endpoint: string, payload?: unknown) => {
+        calls.push({ channel, endpoint, payload });
+        return { ok: true as const, value: { memoryId: 'memory-1', revisionId: 'r', providerMemoryId: 'p', contentHash: 'h' } };
+      },
+    },
+  } as unknown as ClientConnection;
+  const api = createApi(connection);
+  await api.status();
+  await api.config();
+  await api.memories({ query: 'release', limit: 20 });
+  await api.memory('memory-1');
+  await api.edit({ memoryId: 'memory-1', content: 'next text', reason: 'fix', entryVersion: 3 });
+  await api.injection();
+  await api.rules();
+  await api.archives();
+  await api.sync();
+  await api.syncRefresh();
+  assert.deepEqual(calls.map(call => call.endpoint), ['status', 'config', 'memories', 'memory', 'edit', 'injection', 'rules', 'archives', 'sync', 'syncRefresh']);
+  assert.ok(calls.every(call => call.channel === '/dsh-mnemo-weave'));
+  assert.deepEqual(calls[2]?.payload, { query: 'release', limit: 20 });
+  assert.deepEqual(calls[3]?.payload, { memoryId: 'memory-1' });
+  assert.deepEqual(calls[4]?.payload, { memoryId: 'memory-1', content: 'next text', reason: 'fix', entryVersion: 3 });
+
+  const failing = createApi({
+    rpc: { call: async () => ({ ok: false, error: { message: 'denied', code: 'UNAUTHORIZED' } }) },
+  } as unknown as ClientConnection);
+  await assert.rejects(() => failing.status(), (error: unknown) => error instanceof RpcFailure && error.code === 'UNAUTHORIZED');
 });
 
 test('a failing sidebar registration releases the panel it already registered', async () => {
@@ -174,4 +222,110 @@ test('the sidebar label never throws when the locale service cannot be read', as
     assert.deepEqual(Object.keys(pageInject()).sort(), ['connection', 'locale']);
     assert.equal(pageInject()['locale'], undefined, `${mode} locale must reach the page as undefined`);
   }
+});
+
+interface SourceCalls { edit?: { memoryId: string; content: string; reason?: string } }
+
+function stubSource(calls: SourceCalls, failure?: { code: string }): MemorySource {
+  return {
+    describe: () => ({ serverUrl: 'http://127.0.0.1:4317', hostId: 'dsh', hasToken: true }),
+    status: async () => ({
+      status: 'ok', serverUrl: 'http://127.0.0.1:4317', hostId: 'dsh', checkedAt: '2026-11-09T03:00:00.000Z',
+    }),
+    memories: async (input: { query?: string; limit: number }) => ({
+      query: input.query ?? null, limit: input.limit, returned: 0, items: [],
+    }),
+    memory: async () => { throw new Error('unexpected memory read'); },
+    edit: async (input: { memoryId: string; content: string; reason?: string }) => {
+      calls.edit = input;
+      if (failure !== undefined) throw Object.assign(new Error('server said no'), { code: failure.code });
+      return { memoryId: input.memoryId, revisionId: 'r', providerMemoryId: 'p', contentHash: 'h' };
+    },
+  } as unknown as MemorySource;
+}
+
+/**
+ * Request validation happens in the Host and before any network call: an invalid payload never
+ * reaches the source, and a Server failure keeps its code so the page can name it.
+ */
+test('the Host RPC validates requests before the Server call and passes Server codes through', async () => {
+  const calls: SourceCalls = {};
+  const handler = createRpcHandler(stubSource(calls));
+  const memoryId = '11111111-1111-4111-8111-111111111111';
+
+  const notUuid = await handler('edit', { memoryId: 'memory-1', content: 'next text' });
+  assert.equal(notUuid.ok, false);
+  if (notUuid.ok) throw new Error('expected a failure');
+  assert.equal(notUuid.error.code, 'INVALID_INPUT');
+
+  const blank = await handler('edit', { memoryId, content: '   ' });
+  assert.equal(blank.ok, false);
+  if (blank.ok) throw new Error('expected a failure');
+  assert.equal(blank.error.code, 'INVALID_INPUT');
+  assert.equal(calls.edit, undefined, 'invalid payloads must not reach the Server');
+
+  const oversized = await handler('edit', { memoryId, content: 'x'.repeat(8001) });
+  assert.equal(oversized.ok, false);
+  if (oversized.ok) throw new Error('expected a failure');
+  assert.equal(oversized.error.code, 'INVALID_INPUT');
+
+  const badLimit = await handler('memories', { limit: 0 });
+  assert.equal(badLimit.ok, false);
+  if (badLimit.ok) throw new Error('expected a failure');
+  assert.equal(badLimit.error.code, 'INVALID_INPUT');
+
+  const unknown = await handler('revision', {});
+  assert.equal(unknown.ok, false);
+  if (unknown.ok) throw new Error('expected a failure');
+  assert.equal(unknown.error.code, 'UNKNOWN_ENDPOINT');
+
+  const saved = await handler('edit', { memoryId, content: 'next text', reason: '  fix  ', entryVersion: 4 });
+  assert.equal(saved.ok, true);
+  assert.deepEqual(calls.edit, { memoryId, content: 'next text', reason: 'fix', entryVersion: 4 });
+
+  const rejected = createRpcHandler(stubSource({}, { code: 'NOT_FOUND' }));
+  const failed = await rejected('edit', { memoryId, content: 'next text', entryVersion: 0 });
+  assert.equal(failed.ok, false);
+  if (failed.ok) throw new Error('expected a failure');
+  assert.equal(failed.error.code, 'NOT_FOUND');
+
+  const status = await handler('status', {});
+  assert.equal(status.ok, true);
+});
+
+test('the Host RPC exposes rules, archives and the local-to-remote sync state', async () => {
+  const source = {
+    ...stubSource({}),
+    rules: async () => [{ entryId: 'r1', scope: 'global', projectId: null, body: '准则', enabled: true, version: 1, withdrawnAt: null }],
+    archives: async () => [{ entryId: 'a1', projectId: 'alpha', title: '标题', body: '正文', source: 'tool', verification: 'open', evidence: '证据', version: 1, withdrawnAt: null }],
+    sync: async () => ({ enabled: true, scopes: [{ scope: 'global', cursor: 3, lastPullAt: null, lastError: null, pending: 1, unknown: 0, unapplied: 0 }], updatedAt: '2026-11-10T08:00:00.000Z' }),
+    refreshSync: async () => ({ scopes: ['global'], pulled: 1, applied: 1, errors: [], skipped: false }),
+  } as unknown as MemorySource;
+  const handler = createRpcHandler(source);
+  const rules = await handler('rules', {});
+  assert.equal(rules.ok, true);
+  if (rules.ok) assert.equal((rules.value as Array<{ body: string }>)[0]?.body, '准则');
+  const archives = await handler('archives', {});
+  assert.equal(archives.ok, true);
+  if (archives.ok) assert.equal((archives.value as Array<{ projectId: string }>)[0]?.projectId, 'alpha');
+  const sync = await handler('sync', {});
+  assert.equal(sync.ok, true);
+  if (sync.ok) assert.equal((sync.value as { scopes: Array<{ pending: number }> }).scopes[0]?.pending, 1);
+  const pass = await handler('syncRefresh', {});
+  assert.equal(pass.ok, true);
+});
+
+test('the Host RPC exposes the host-scoped injection report', async () => {
+  const source = {
+    ...stubSource({}),
+    injection: async () => ({
+      id: '33333333-3333-4333-8333-333333333333', sessionId: 's-1',
+      rulesInjected: 1, rulesOmitted: null, memoriesInjected: 2, usedTokens: 320,
+      createdAt: '2026-11-09T02:50:00.000Z',
+    }),
+  } as unknown as MemorySource;
+  const result = await createRpcHandler(source)('injection', {});
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal((result.value as { rulesInjected: number }).rulesInjected, 1);
 });

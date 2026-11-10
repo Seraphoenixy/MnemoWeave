@@ -4,6 +4,7 @@ import { mkdir, mkdtemp } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { createRunner, MnemonCliProvider } from '../../packages/providers/mnemon/src/index.ts';
 import { MnemoWeaveError } from '../../packages/core/contracts/src/index.ts';
+import { mnemonBinary } from './mnemon-binary.ts';
 
 test('Official CLI: special text, Link, Forget, store isolation and process persistence', { timeout: 60000 }, async t => {
   const oldCapacity = process.env.MNEMON_MAX_INSIGHTS;
@@ -15,7 +16,7 @@ test('Official CLI: special text, Link, Forget, store isolation and process pers
   });
   await mkdir('work/e2e', { recursive: true });
   const dataDir = await mkdtemp(resolve('work/e2e/cli-'));
-  const binary = process.env.MNEMON_BINARY ?? resolve('work/tools/mnemon/mnemon.exe');
+  const binary = mnemonBinary();
   const run = createRunner(binary);
   const args = ['--data-dir', dataDir, '--store', 'behavior'];
   const content = '--特殊字符 引号 \\路径\n第二行 & | ; $(echo unsafe) % _ MnemoWeave';
@@ -45,7 +46,7 @@ test('Official CLI: special text, Link, Forget, store isolation and process pers
 test('Lost CLI response after a committed write is reconciled without another write', { timeout: 30000 }, async () => {
   await mkdir('work/e2e', { recursive: true });
   const dataDir = await mkdtemp(resolve('work/e2e/uncertain-'));
-  const binary = process.env.MNEMON_BINARY ?? resolve('work/tools/mnemon/mnemon.exe');
+  const binary = mnemonBinary();
   const native = createRunner(binary);
   let writes = 0;
   const provider = new MnemonCliProvider({ binary, dataDir, store: 'uncertain', runner: async args => {

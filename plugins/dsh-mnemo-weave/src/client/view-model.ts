@@ -1,115 +1,131 @@
-import type { UiGrantView, UiIntents, UiMemoryDetail, UiMemoryList, UiReplicaView, UiStatus } from '../shared/contract.ts';
+import type { AvailabilityStatus, UiConfigView, UiInjection, UiMemoryDetail, UiMemoryList, UiStatus } from '../shared/contract.ts';
 import { translate, type Language, type MessageKey } from './i18n.ts';
 
 export type Tone = 'ok' | 'warn' | 'bad' | 'muted';
 
 export interface Chip { key: string; label: string; value: string; tone: Tone }
 
-export function availabilityText(status: string, language: Language): string {
-  switch (status) {
-    case 'ok': return language === 'zh' ? '正常' : 'OK';
-    case 'unauthorized': return language === 'zh' ? '未授权' : 'Unauthorized';
-    case 'unavailable': return language === 'zh' ? '不可用' : 'Unavailable';
-    case 'corrupted': return language === 'zh' ? '已损坏' : 'Corrupted';
-    default: return translate(language, 'reason.default');
-  }
-}
-
-const REASONS: Record<string, MessageKey> = {
-  unpaired: 'reason.unpaired',
-  revoked: 'reason.revoked',
-  license_expired: 'reason.licenseExpired',
-  no_replica: 'reason.noReplica',
-  'integrity check failed': 'reason.corrupted',
-  'content integrity check failed': 'reason.corrupted',
-  out_of_grant: 'reason.outOfGrant',
-  not_found: 'reason.notFound',
+const AVAILABILITY: Record<AvailabilityStatus, MessageKey> = {
+  ok: 'status.available',
+  unauthorized: 'status.unauthorized',
+  unavailable: 'status.unavailable',
 };
 
-export function reasonText(reason: string | undefined, language: Language): string {
-  if (reason === undefined || reason === '') return translate(language, 'reason.default');
-  const key = REASONS[reason];
-  return key === undefined ? translate(language, 'reason.default') : translate(language, key);
+const CODES: Record<string, MessageKey> = {
+  UNAUTHORIZED: 'error.unauthorized',
+  NOT_FOUND: 'error.notFound',
+  INVALID_INPUT: 'error.invalidInput',
+  PROVIDER_UNAVAILABLE: 'error.providerUnavailable',
+  PROVIDER_TIMEOUT: 'error.providerTimeout',
+  REVIEW_REQUIRED: 'error.reviewRequired',
+  INTERNAL: 'error.internal',
+  RPC_FAILED: 'error.rpcFailed',
+};
+
+const STATES = {
+  active: 'state.active',
+  superseded: 'state.superseded',
+  unverified: 'state.unverified',
+} as const satisfies Record<UiMemoryDetail['state'], MessageKey>;
+
+export function availabilityText(status: AvailabilityStatus, language: Language): string {
+  return translate(language, AVAILABILITY[status]);
 }
 
+/** Server and RPC error codes stay visible; only the wording is localized. */
+export function codeText(code: string | undefined, language: Language): string {
+  if (code === undefined || code === '') return translate(language, 'error.unknown');
+  const key = CODES[code];
+  return translate(language, key ?? 'error.unknown');
+}
+
+export function stateText(state: UiMemoryDetail['state'], language: Language): string {
+  return translate(language, STATES[state]);
+}
+
+/** Absolute timestamps are shown to the second: two revisions can land in the same minute. */
 export function formatDateTime(iso: string, timeZone?: string): string {
   const time = Date.parse(iso);
   if (!Number.isFinite(time)) return '—';
   try {
-    return new Intl.DateTimeFormat('sv-SE', { dateStyle: 'short', timeStyle: 'short', ...(timeZone === undefined ? {} : { timeZone }) }).format(new Date(time));
-  } catch { return new Date(time).toISOString().slice(0, 16).replace('T', ' '); }
+    return new Intl.DateTimeFormat('sv-SE', { dateStyle: 'short', timeStyle: 'medium', ...(timeZone === undefined ? {} : { timeZone }) }).format(new Date(time));
+  } catch { return new Date(time).toISOString().slice(0, 19).replace('T', ' '); }
 }
 
 export function relativeTime(iso: string, now: number, language: Language): string {
   const time = Date.parse(iso);
   if (!Number.isFinite(time)) return '—';
   const delta = Math.max(0, now - time);
+  const seconds = Math.floor(delta / 1000);
+  if (seconds < 5) return translate(language, 'time.now');
+  if (seconds < 60) return translate(language, 'time.seconds', { count: seconds });
   const minutes = Math.floor(delta / 60_000);
-  if (minutes < 1) return translate(language, 'time.now');
   if (minutes < 60) return translate(language, 'time.minutes', { count: minutes });
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return translate(language, 'time.hours', { count: hours });
   return translate(language, 'time.days', { count: Math.floor(hours / 24) });
 }
 
-/** `*` is the operator's all-projects grant; it is shown as written, never expanded. */
-export function scopeText(projects: readonly string[], globalIncluded: boolean, language: Language): string {
-  const projectsText = projects.includes('*') ? (language === 'zh' ? '全部项目' : 'all projects') : projects.join(', ');
-  const globalText = globalIncluded ? (language === 'zh' ? '含全局' : 'with global') : (language === 'zh' ? '仅项目' : 'projects only');
-  return `${projectsText} · ${globalText}`;
-}
-
-export function grantChips(grant: UiGrantView | null, language: Language, now: number): Chip[] {
-  if (grant === null) return [{ key: 'paired', label: translate(language, 'status.title'), value: translate(language, 'status.unpaired'), tone: 'bad' }];
-  const expired = grant.expired || Date.parse(grant.expiresAt) <= now;
-  const state: Chip = grant.revoked
-    ? { key: 'revoked', label: translate(language, 'status.revoked'), value: '', tone: 'bad' }
-    : expired
-      ? { key: 'expired', label: translate(language, 'status.expired'), value: '', tone: 'bad' }
-      : { key: 'paired', label: translate(language, 'status.paired'), value: '', tone: 'ok' };
-  return [
-    state,
-    { key: 'scope', label: translate(language, 'status.scope'), value: scopeText(grant.projects, grant.globalIncluded, language), tone: 'muted' },
-    { key: 'expires', label: translate(language, 'status.expires'), value: formatDateTime(grant.expiresAt), tone: expired ? 'bad' : 'muted' },
-    { key: 'generation', label: translate(language, 'status.generation'), value: String(grant.generation), tone: 'muted' },
-  ];
-}
-
-export function replicaChips(replica: UiReplicaView | null, language: Language, now: number): Chip[] {
-  if (replica === null) return [{ key: 'replica', label: translate(language, 'status.replica'), value: translate(language, 'status.replicaMissing'), tone: 'warn' }];
-  if (replica.corrupted) return [{ key: 'replica', label: translate(language, 'status.replica'), value: translate(language, 'reason.corrupted'), tone: 'bad' }];
-  const stale = replica.stale || now - Date.parse(replica.dataTime) > 10 * 60_000;
-  return [
-    { key: 'replica', label: translate(language, 'status.replica'), value: translate(language, 'status.replicaAvailable'), tone: replica.available ? 'ok' : 'bad' },
-    { key: 'freshness', label: translate(language, 'status.replica'), value: stale ? translate(language, 'status.stale') : translate(language, 'status.fresh'), tone: stale ? 'warn' : 'ok' },
-    { key: 'seq', label: translate(language, 'status.seq'), value: String(replica.appliedSeq), tone: 'muted' },
-    { key: 'memories', label: translate(language, 'status.memories'), value: String(replica.memories), tone: 'muted' },
-    { key: 'revisions', label: translate(language, 'status.revisions'), value: String(replica.revisions), tone: 'muted' },
-    { key: 'pending', label: translate(language, 'status.pending'), value: String(replica.pendingContent), tone: replica.pendingContent > 0 ? 'warn' : 'muted' },
-  ];
-}
-
-export function statusChips(status: UiStatus | null, language: Language, now: number): Chip[] {
+/**
+ * One chip row for the page header: availability first, then the endpoint and Host identity the
+ * Host half is using. The token appears only as configured or not configured.
+ */
+export function statusChips(status: UiStatus | null, config: UiConfigView | null, language: Language, now: number): Chip[] {
   if (status === null) return [];
-  return [...grantChips(status.grant, language, now), ...replicaChips(status.replica, language, now)];
+  const chips: Chip[] = [
+    {
+      key: 'availability',
+      label: translate(language, 'status.title'),
+      value: availabilityText(status.status, language),
+      tone: status.status === 'ok' ? 'ok' : status.status === 'unauthorized' ? 'warn' : 'bad',
+    },
+    { key: 'server', label: translate(language, 'status.server'), value: status.serverUrl, tone: 'muted' },
+    { key: 'host', label: translate(language, 'status.host'), value: status.hostId, tone: 'muted' },
+  ];
+  if (config !== null) {
+    chips.push({
+      key: 'token',
+      label: translate(language, 'status.token'),
+      value: config.hasToken ? translate(language, 'status.tokenSet') : translate(language, 'status.tokenMissing'),
+      tone: config.hasToken ? 'ok' : 'bad',
+    });
+  }
+  if (status.version !== undefined) {
+    chips.push({ key: 'version', label: translate(language, 'status.version'), value: status.version, tone: 'muted' });
+  }
+  chips.push({ key: 'checked', label: translate(language, 'status.checked'), value: relativeTime(status.checkedAt, now, language), tone: 'muted' });
+  return chips;
+}
+
+/** The last View this host assembled, as the Server reported it. */
+export function injectionChip(injection: UiInjection | null, language: Language): Chip {
+  const label = translate(language, 'injection.label');
+  if (injection === null) return { key: 'injection', label, value: translate(language, 'injection.none'), tone: 'muted' };
+  const summary = translate(language, 'injection.summary', {
+    rules: injection.rulesInjected,
+    memories: injection.memoriesInjected,
+    tokens: injection.usedTokens,
+  });
+  return {
+    key: 'injection',
+    label,
+    value: injection.rulesOmitted === null ? summary : `${summary} · ${translate(language, 'injection.omitted')}`,
+    tone: injection.rulesOmitted === null ? 'ok' : 'warn',
+  };
 }
 
 export function listSummary(list: UiMemoryList | null, language: Language): string {
   if (list === null) return '';
-  if (list.status !== 'ok') return `${availabilityText(list.status, language)} · ${reasonText(list.reason, language)}`;
-  const base = translate(language, 'list.count', { count: list.returned });
-  return list.complete ? base : `${base} · ${translate(language, 'list.incomplete')}`;
+  return translate(language, 'list.count', { count: list.returned });
 }
 
 export function detailMeta(detail: UiMemoryDetail, language: Language): Array<{ key: string; label: string; value: string }> {
+  const current = detail.revisions.find(revision => revision.current);
   return [
-    { key: 'state', label: translate(language, 'detail.revision'), value: detail.state },
+    { key: 'state', label: translate(language, 'detail.state'), value: stateText(detail.state, language) },
+    { key: 'revision', label: translate(language, 'detail.revision'), value: current === undefined ? '—' : `#${current.number}` },
     { key: 'scope', label: translate(language, 'detail.project'), value: detail.scope === 'global' ? translate(language, 'detail.global') : detail.projectId ?? '—' },
     { key: 'applicability', label: translate(language, 'detail.applicability'), value: detail.applicability },
+    { key: 'published', label: translate(language, 'detail.published'), value: formatDateTime(detail.publishedAt) },
   ];
-}
-
-export function intentsSummary(intents: UiIntents | null, language: Language): string {
-  if (intents === null) return '';
-  return `${translate(language, 'intents.queued')} ${intents.queued} · ${translate(language, 'intents.isolated')} ${intents.isolated}`;
 }

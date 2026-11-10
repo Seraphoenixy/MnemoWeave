@@ -1,15 +1,17 @@
 /**
  * MnemoWeave DSH plugin — Host half.
  *
- * Registers one read-only RPC channel the client page calls. The Host, not the browser,
- * reaches the Bridge UI endpoint: the Bridge refuses browser origins and the UI token
- * stays in this process. Configuration comes from the Cordis entry (or the matching
- * MNEMOWEAVE_* environment variables); without a token the plugin stays inert and says so.
+ * Registers one editable RPC channel the client page calls. The Host, not the browser, reaches
+ * the MnemoWeave Server through the shared `packages/client` transport: the service token stays
+ * in this process and the Server identifies the caller by the `x-mnemoweave-host` header.
+ * Configuration comes from the Cordis entry (or the matching environment variables); without a
+ * usable token the plugin stays inert and says why on stderr, never aborting the DSH boot.
  */
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { BridgeUiClient } from './bridge-client.ts';
+import { MemoryClient } from '../../../../packages/client/src/index.ts';
 import { createRpcHandler } from './rpc.ts';
+import { MemorySource } from './memory-source.ts';
 import { BUNDLE_NAME, isHostArtifact, reloadBundle, shouldWatch, watchLib } from './hot-reload.ts';
 import type { PluginManagerLike } from './hot-reload.ts';
 import { isRecord, RPC_CHANNEL } from '../shared/contract.ts';
@@ -21,21 +23,22 @@ export const name = 'dsh-mnemo-weave/ui';
 // `cannot get property "webServer" without inject` and the entry fails.
 export const inject = ['connection', 'webServer'] as const;
 
-export const DEFAULT_BRIDGE_UI_URL = 'http://127.0.0.1:4319';
+export const DEFAULT_SERVER_URL = 'http://127.0.0.1:4317';
 export const MIN_TOKEN_LENGTH = 24;
+/** The Server scopes reads and events by this header; DSH is the identity when none is configured. */
+export const DEFAULT_HOST_ID = 'dsh';
+const LOOPBACK = /^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d{1,5})?\/?$/i;
 
 export interface Config {
-  bridgeUrl?: string;
+  serverUrl?: string;
   token?: string;
   hostId?: string;
-  timeoutMs?: number;
 }
 
 export interface ResolvedConfig {
-  bridgeUrl: string;
+  serverUrl: string;
   token: string | undefined;
-  hostId: string | undefined;
-  timeoutMs: number;
+  hostId: string;
 }
 
 function pickString(value: unknown): string | undefined {
@@ -45,20 +48,14 @@ function pickString(value: unknown): string | undefined {
 /** Entry config first, environment second: a profile can keep the token out of its patch file. */
 export function resolveConfig(config: unknown, env: NodeJS.ProcessEnv = process.env): ResolvedConfig {
   const record = isRecord(config) ? config : {};
-  const bridgeUrl = pickString(record['bridgeUrl']) ?? pickString(env.MNEMOWEAVE_BRIDGE_UI_URL) ?? DEFAULT_BRIDGE_UI_URL;
-  if (!/^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d{1,5})?\/?$/i.test(bridgeUrl)) {
-    throw new Error('dsh-mnemo-weave bridgeUrl must be a loopback http(s) URL');
+  const serverUrl = (pickString(record['serverUrl']) ?? DEFAULT_SERVER_URL).replace(/\/$/, '');
+  if (!LOOPBACK.test(serverUrl)) {
+    throw new Error('dsh-mnemo-weave serverUrl must be a loopback http(s) URL');
   }
-  if (bridgeUrl.startsWith('https://') && !bridgeUrl.includes('127.0.0.1') && !bridgeUrl.includes('localhost')) {
-    throw new Error('dsh-mnemo-weave bridgeUrl must be loopback');
-  }
-  const timeout = record['timeoutMs'];
-  const timeoutMs = typeof timeout === 'number' && Number.isFinite(timeout) ? Math.min(Math.max(Math.trunc(timeout), 250), 30_000) : 3_000;
   return {
-    bridgeUrl: bridgeUrl.replace(/\/$/, ''),
-    token: pickString(record['token']) ?? pickString(env.MNEMOWEAVE_BRIDGE_UI_TOKEN),
-    hostId: pickString(record['hostId']) ?? pickString(env.MNEMOWEAVE_BRIDGE_HOST_ID),
-    timeoutMs,
+    serverUrl,
+    token: pickString(record['token']) ?? pickString(env.MNEMOWEAVE_TOKEN),
+    hostId: pickString(record['hostId']) ?? pickString(env.MNEMOWEAVE_HOST_ID) ?? DEFAULT_HOST_ID,
   };
 }
 
@@ -118,10 +115,17 @@ export function apply(ctx: HostContext, config?: unknown): void {
     return;
   }
   if (resolved.token === undefined || resolved.token.length < MIN_TOKEN_LENGTH) {
-    warn('MNEMOWEAVE_BRIDGE_UI_TOKEN is missing or shorter than 24 characters; the memory page stays unavailable');
+    warn('MNEMOWEAVE_TOKEN is missing or shorter than 24 characters; the memory page stays unavailable');
     return;
   }
-  const client = new BridgeUiClient({ baseUrl: resolved.bridgeUrl, token: resolved.token, ...(resolved.hostId === undefined ? {} : { hostId: resolved.hostId }), timeoutMs: resolved.timeoutMs });
+  let client: MemoryClient;
+  try {
+    client = new MemoryClient({ baseUrl: resolved.serverUrl, token: resolved.token, hostId: resolved.hostId });
+  } catch (error) {
+    warn(`configuration rejected: ${String((error as Error).message).slice(0, 200)}`);
+    return;
+  }
+  const source = new MemorySource({ client, serverUrl: resolved.serverUrl, hasToken: true });
   ctx.effect(() => {
     const connection = ctx.connection;
     const webServer = ctx.get('webServer');
@@ -131,7 +135,7 @@ export function apply(ctx: HostContext, config?: unknown): void {
     const owner = ctx.extend === undefined ? ctx : ctx.extend({ webServer });
     const target = owner.connection;
     if (target === undefined) return;
-    const dispose = target.rpc.handle(RPC_CHANNEL, createRpcHandler(client));
+    const dispose = target.rpc.handle(RPC_CHANNEL, createRpcHandler(source));
     return () => { if (typeof dispose === 'function') (dispose as () => void)(); };
-  }, 'dsh-mnemo-weave: read channel');
+  }, 'dsh-mnemo-weave: memory channel');
 }

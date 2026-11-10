@@ -2,7 +2,7 @@
  * MnemoWeave DSH plugin — client half.
  *
  * Registers one sidebar entry and the page behind it. Everything the page shows comes
- * from the Host RPC channel, so the browser never holds the Bridge UI token.
+ * from the Host RPC channel, so the browser never holds the MnemoWeave service token.
  */
 import { MAIN_PANEL_ID, type ClientContext, type LocaleService } from './dsh-types.ts';
 import { MnemoWeaveIcon } from './icon.tsx';
@@ -12,7 +12,8 @@ import { ensureStyles } from './styles.ts';
 export const name = 'dsh-mnemo-weave';
 export const inject = ['slots', 'connection', 'layout', 'locale'] as const;
 
-const LABEL_ZH = 'MnemoWeave 记忆';
+// Sidebar entries are narrow: the Chinese label is kept to four characters.
+const LABEL_ZH = '记忆中枢';
 const LABEL_EN = 'MnemoWeave Memory';
 
 /** Reading a service the plugin did not inject throws in the client tree; this answers undefined instead. */

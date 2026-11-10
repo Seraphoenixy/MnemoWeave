@@ -1,4 +1,6 @@
 import { SqliteRuntime } from './runtime-store.ts';
+import { SqliteSyncLedger } from './sync-ledger.ts';
+import { SqliteMemoryStore } from './memory-store.ts';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, statSync, readFileSync, writeFileSync, renameSync, readdirSync, unlinkSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
@@ -7,6 +9,9 @@ import type { CandidateRepository } from '../../../core/application/src/index.ts
 import { Candidate, CandidateRequest, MnemoWeaveError, RememberInput } from '../../../core/contracts/src/index.ts';
 import type { CandidateRecord, RememberRequest, RetentionSweepReport } from '../../../core/contracts/src/index.ts';
 import { CANDIDATE_BODY_RETENTION_DAYS } from './events.ts';
+
+export * from './sync-ledger.ts';
+export * from './memory-store.ts';
 
 const DAY_MS = 86_400_000;
 /** Larger candidate bodies live in content-addressed files; metadata stays in SQLite. */
@@ -31,12 +36,9 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
   readonly catalog: SqliteMemoryCatalog;
   readonly events: SessionEventStore;
   readonly runtime: SqliteRuntime;
-  /** Ordered change stream (SYNC-P2): catalog mutations append here in the same transaction. */
-  private appendSync(op: string, entityId: string, payload: Record<string, unknown>): void {
-    const json = JSON.stringify(payload);
-    this.db.prepare('INSERT INTO sync_log(op,entity_id,payload_json,payload_hash,op_at) VALUES(?,?,?,?,?)')
-      .run(op, entityId, json, createHash('sha256').update(json).digest('hex'), new Date().toISOString());
-  }
+  readonly ledger: SqliteSyncLedger;
+  readonly memory: SqliteMemoryStore;
+  /** Ordered change stream (internal audit only): catalog mutations append here in the same transaction. */
   constructor(path: string, quota: { softBytes?: number; hardBytes?: number } = {}) {
     if (!isAbsolute(path)) throw new Error('Governance database path must be absolute');
     if (quota.softBytes !== undefined && quota.hardBytes !== undefined && quota.softBytes >= quota.hardBytes) throw new Error('Quota soft limit must be below the hard limit');
@@ -50,7 +52,7 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
     try {
       this.transaction(() => {
         const version = Number(this.db.prepare('PRAGMA user_version').get()!['user_version']);
-      if (version > 10) throw new Error('Unsupported governance schema version');
+      if (version > 12) throw new Error('Unsupported governance schema version');
         if (version === 0) {
           if (this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").get()) throw new Error('Refusing to initialize an unidentified existing database');
           this.db.exec(`
@@ -98,7 +100,6 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
         });
       }
       this.catalog = new SqliteMemoryCatalog(this.db, path, operation => this.transaction(operation));
-      this.catalog.setSyncHook((op, entityId, payload) => this.appendSync(op, entityId, payload));
       if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) === 5) {
         const destination = `${path}.pre-v6.${randomUUID()}.db`;
         this.db.prepare('VACUUM INTO ?').run(destination);
@@ -215,6 +216,48 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
           `);
         });
       }
+      if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) === 10) {
+        this.db.prepare('VACUUM INTO ?').run(`${path}.pre-v11.${randomUUID()}.db`);
+        this.transaction(() => {
+          if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) !== 10) return;
+          // v11: three-class memory tables plus the per-scope sync ledgers. Cursors are keyed
+          // by scope because a device may be granted only some projects; a global cursor would
+          // stall on gaps it cannot see, or skip other projects' unapplied changes.
+          this.db.exec(`
+            CREATE TABLE sync_state(scope TEXT PRIMARY KEY, cursor INTEGER NOT NULL, last_pull_at TEXT, last_error TEXT);
+            CREATE TABLE sync_outbox(change_id TEXT PRIMARY KEY, scope TEXT NOT NULL, entry_id TEXT NOT NULL, base_version INTEGER NOT NULL, operation TEXT NOT NULL, entry_json TEXT NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL, last_error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+            CREATE INDEX sync_outbox_state ON sync_outbox(state);
+            CREATE TABLE sync_inbox(scope TEXT NOT NULL, seq INTEGER NOT NULL, change_id TEXT NOT NULL, entry_id TEXT NOT NULL, version INTEGER NOT NULL, operation TEXT NOT NULL, entry_json TEXT NOT NULL, state TEXT NOT NULL, error TEXT, received_at TEXT NOT NULL, PRIMARY KEY(scope, seq));
+            CREATE TABLE formal_map(entry_id TEXT NOT NULL, version INTEGER NOT NULL, provider_id TEXT, content_hash TEXT NOT NULL, state TEXT NOT NULL, applied_at TEXT, PRIMARY KEY(entry_id, version));
+            CREATE TABLE runtime_rules(entry_id TEXT PRIMARY KEY, body TEXT NOT NULL, scope TEXT NOT NULL, project_id TEXT, enabled INTEGER NOT NULL, version INTEGER NOT NULL, withdrawn_at TEXT, updated_at TEXT NOT NULL);
+            CREATE TABLE project_archives(entry_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL, source TEXT NOT NULL, verification TEXT NOT NULL, evidence TEXT NOT NULL, version INTEGER NOT NULL, withdrawn_at TEXT, updated_at TEXT NOT NULL);
+            CREATE TABLE project_bindings(project_id TEXT PRIMARY KEY, workspace_path TEXT NOT NULL, updated_at TEXT NOT NULL);
+            CREATE TABLE runtime_injections(id TEXT PRIMARY KEY, host_id TEXT NOT NULL, session_id TEXT NOT NULL, outcome_json TEXT NOT NULL, created_ms INTEGER NOT NULL);
+            CREATE INDEX runtime_injections_created ON runtime_injections(created_ms);
+            DROP TABLE IF EXISTS sync_log;
+            DROP TABLE IF EXISTS sync_grants;
+            DROP TABLE IF EXISTS sync_license_state;
+            PRAGMA user_version=11;
+          `);
+        });
+      }
+      if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) === 11) {
+        this.db.prepare('VACUUM INTO ?').run(`${path}.pre-v12.${randomUUID()}.db`);
+        this.transaction(() => {
+          if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) !== 11) return;
+          // v12: confirmed entry versions, independent of the formal Provider mapping. Rules,
+          // archives and formal memories all carry a remote-assigned version; a local write
+          // uses the last confirmed version as its base, so the ledger no longer guesses.
+          this.db.exec(`
+            CREATE TABLE entry_versions(entry_id TEXT PRIMARY KEY, version INTEGER NOT NULL, updated_at TEXT NOT NULL);
+            INSERT INTO entry_versions(entry_id, version, updated_at)
+              SELECT entry_id, MAX(version), COALESCE(MAX(applied_at), strftime('%Y-%m-%dT%H:%M:%fZ','now')) FROM formal_map GROUP BY entry_id;
+            PRAGMA user_version=12;
+          `);
+        });
+      }
+      this.ledger = new SqliteSyncLedger(this.db, operation => this.transaction(operation));
+      this.memory = new SqliteMemoryStore(this.db, operation => this.transaction(operation), this.catalog);
       this.runtime = new SqliteRuntime(this.db, operation => this.transaction(operation), request => this.submit(request), (hostId, event, candidateId) => { this.events.record(hostId, event, true); this.events.linkEvidence(event.eventId, hostId, candidateId); });
       this.events = new SessionEventStore(this.db, operation => this.transaction(operation));
       this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;');
@@ -518,6 +561,10 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
       this.quotaSoftLogged = true;
       process.stderr.write(`${JSON.stringify({ event: 'quota_soft_exceeded', usedBytes, softBytes: this.quotaSoftBytes })}${String.fromCharCode(10)}`);
     }
+  }
+  /** Synced version of a logical memory, used as the edit base version. */
+  entryVersion(memoryId: string): number {
+    return this.memory.entryVersion(memoryId);
   }
   storageStatus(): { usedBytes: number; state: 'ok' | 'soft' | 'hard'; softBytes?: number; hardBytes?: number } {
     const usedBytes = this.databaseBytes();

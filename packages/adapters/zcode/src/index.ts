@@ -45,16 +45,14 @@ const HookInput = z.object({
 export type ZCodeHookInput = z.infer<typeof HookInput>;
 
 export interface HandlerOptions {
-  /** Absolute server base URL for intent intake (/v1/sync/intents). */
+  /** Server base URL for event intake (/v1/events) and injection (/v1/inject). */
   serverUrl: string;
   token: string;
   hostId: string;
   projectId?: string;
-  bridgeUrl?: string;
-  bridgeToken?: string;
   /** Monotonic foreground deadline for the additionalContext assembly (HOST-06). */
   deadlineMs?: number;
-  /** Async recall used to build the injected context; wired to Bridge/Server recall. */
+  /** Async recall used to build the injected context; wired to the Server. */
   recallAndAssemble: (query: string | null, context?: InjectionContext) => Promise<{ text: string; viewId: string } | undefined>;
 }
 
@@ -91,13 +89,13 @@ export function normalizeHookEvent(input: ZCodeHookInput, receivedAt: string): H
 }
 
 export async function forwardEvent(options: HandlerOptions, event: HostEventRecord): Promise<void> {
-  const response = await fetch(options.bridgeUrl ? `${options.bridgeUrl}/v1/events` : `${options.serverUrl}/v1/sync/intents`, {
+  const response = await fetch(`${options.serverUrl}/v1/events`, {
     method: 'POST',
-    headers: { authorization: `Bearer ${options.bridgeUrl ? options.bridgeToken ?? options.token : options.token}`, 'x-mnemoweave-host': options.hostId, 'content-type': 'application/json' },
-    body: JSON.stringify(options.bridgeUrl ? event : { intentId: event.eventId, kind: 'event', payload: event }),
+    headers: { authorization: `Bearer ${options.token}`, 'x-mnemoweave-host': options.hostId, 'content-type': 'application/json' },
+    body: JSON.stringify(event),
     signal: AbortSignal.timeout(Math.min(800, options.deadlineMs ?? 2000)),
   });
-  if (!response.ok) throw new Error(`intent intake failed: HTTP ${response.status}`);
+  if (!response.ok) throw new Error(`event intake failed: HTTP ${response.status}`);
 }
 
 /**

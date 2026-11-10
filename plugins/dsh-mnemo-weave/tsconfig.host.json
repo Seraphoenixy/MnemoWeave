@@ -9,9 +9,7 @@
     "exactOptionalPropertyTypes": true,
     "verbatimModuleSyntax": true,
     "rewriteRelativeImportExtensions": true,
-    "rootDir": "src",
-    "outDir": "lib",
-    "declaration": false,
+    "noEmit": true,
     "skipLibCheck": true
   },
   "include": ["src/ui/**/*.ts", "src/shared/**/*.ts"]

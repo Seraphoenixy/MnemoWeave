@@ -1,4 +1,4 @@
-# MnemoWeave Server — Linux systemd user unit (WP8; no Docker per ADR-018/026).
+# MnemoWeave Server — Linux systemd user unit (native deployment; no Docker).
 # Install: cp to ~/.config/systemd/user/ && systemctl --user daemon-reload
 # Run:     systemctl --user enable --now mnemoweave
 # Logs:    journalctl --user -u mnemoweave (stderr diagnostics; journald rotation applies)

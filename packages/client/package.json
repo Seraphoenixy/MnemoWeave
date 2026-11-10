@@ -1,0 +1,6 @@
+{
+  "name": "@mnemoweave/client",
+  "private": true,
+  "type": "module",
+  "description": "Shared Host client for the MnemoWeave Server: one HTTP contract used by the DSH, ChatGPT and ZCode plugins."
+}

@@ -17,7 +17,14 @@ test('Business Remember cannot bypass candidate review', async () => {
 });
 
 function catalogStub(visible: string[]) {
-  return { catalog: { visibleProviderIds: () => visible, get: () => { throw new Error('not used'); }, getConflict: () => { throw new Error('not used'); } } };
+  return {
+    catalog: {
+      visibleProviderIds: () => visible,
+      currentMemoryIds: (providerId: string) => (visible.includes(providerId) ? [`logical-${providerId}`] : []),
+      get: () => { throw new Error('not used'); },
+      getConflict: () => { throw new Error('not used'); },
+    },
+  };
 }
 
 test('Default recall filters before pagination and keeps expanding until the requested page is filled', async () => {

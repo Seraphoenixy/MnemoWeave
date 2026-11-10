@@ -155,7 +155,7 @@ test('Critical pinned overflow maps to budget_exceeded, never to a truncated vie
 });
 
 test('Adapter descriptors keep unverified hosts out of the acceptance claim', () => {
-  const descriptor = unverifiedDescriptor('DSH', '0.2.2-rc.1', '0.1.0', 'docs/implementation/host-integration-evidence.md');
+  const descriptor = unverifiedDescriptor('DSH', '0.2.2-rc.1', '0.1.0', 'docs/host-acceptance.md');
   validateDescriptor(descriptor);
   assert.equal(descriptor.gatesMet, false, 'unverified capabilities cannot pass the HOST-02 gate');
   const proven = unverifiedDescriptor('ZCode', 'unknown', '0.1.0', 'evidence', new Date().toISOString());
@@ -166,7 +166,7 @@ test('Adapter descriptors keep unverified hosts out of the acceptance claim', ()
   validateDescriptor(proven);
   assert.equal(proven.gatesMet, true);
   assert.throws(() => {
-    const bad = unverifiedDescriptor('Codex', '1.0', '0.1.0', 'evidence', new Date().toISOString());
+    const bad = unverifiedDescriptor('ChatGPT', '1.0', '0.1.0', 'evidence', new Date().toISOString());
     bad.capabilities.context_injection = { status: 'supported', evidence: 'evidence', verifiedAt: null };
     validateDescriptor(bad);
   }, /verification date/);

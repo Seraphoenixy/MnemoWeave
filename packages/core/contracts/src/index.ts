@@ -1,5 +1,8 @@
 import { PinInput, RuntimeContextInput } from './runtime.ts';
+import { SyncRefreshOutput, SyncStatusOutput } from './sync.ts';
 import { z } from 'zod';
+
+export * from './sync.ts';
 
 export const RecallInput = z.object({
   query: z.string().trim().min(1).max(2000),
@@ -11,7 +14,24 @@ export const ProviderHealth = z.object({ ready: z.literal(true), version: z.lite
 export type RecallRequest = z.infer<typeof RecallInput>;
 export type RecallResult = z.infer<typeof RecallOutput>;
 export type Health = z.infer<typeof ProviderHealth>;
-export type ErrorCode = 'INVALID_INPUT' | 'UNAUTHORIZED' | 'PROVIDER_UNAVAILABLE' | 'PROVIDER_PROTOCOL' | 'PROVIDER_INTEGRITY' | 'PROVIDER_TIMEOUT' | 'UNSUPPORTED_VERSION' | 'REVIEW_REQUIRED' | 'NOT_FOUND' | 'IDEMPOTENCY_CONFLICT' | 'INVALID_STATE' | 'VIEW_BUDGET_EXCEEDED' | 'QUOTA_EXCEEDED' | 'INTERNAL';
+export type ErrorCode = 'INVALID_INPUT' | 'UNAUTHORIZED' | 'PROVIDER_UNAVAILABLE' | 'PROVIDER_PROTOCOL' | 'PROVIDER_INTEGRITY' | 'PROVIDER_TIMEOUT' | 'UNSUPPORTED_VERSION' | 'REVIEW_REQUIRED' | 'NOT_FOUND' | 'IDEMPOTENCY_CONFLICT' | 'INVALID_STATE' | 'VIEW_BUDGET_EXCEEDED' | 'QUOTA_EXCEEDED' | 'INTERNAL'
+  | 'VERSION_CONFLICT' | 'CHANGE_ID_REUSED' | 'CHANGE_ID_EXPIRED' | 'SNAPSHOT_REQUIRED' | 'DEVICE_REVOKED' | 'SCOPE_FORBIDDEN' | 'SYNC_UNAVAILABLE' | 'SYNC_QUEUED' | 'SYNC_OUTCOME_UNKNOWN' | 'RULE_BUDGET_EXCEEDED' | 'NEEDS_REVIEW';
+
+const CONFLICT_CODES: readonly ErrorCode[] = [
+  'REVIEW_REQUIRED', 'IDEMPOTENCY_CONFLICT', 'INVALID_STATE', 'VIEW_BUDGET_EXCEEDED', 'QUOTA_EXCEEDED',
+  'VERSION_CONFLICT', 'CHANGE_ID_REUSED', 'CHANGE_ID_EXPIRED', 'SNAPSHOT_REQUIRED',
+  'SYNC_QUEUED', 'SYNC_OUTCOME_UNKNOWN', 'RULE_BUDGET_EXCEEDED', 'NEEDS_REVIEW',
+];
+
+/** HTTP status for an error code; every HTTP surface uses this one mapping. */
+export function statusForCode(code: ErrorCode): number {
+  return code === 'UNAUTHORIZED' || code === 'DEVICE_REVOKED' ? 401
+    : code === 'SCOPE_FORBIDDEN' ? 403
+    : code === 'INVALID_INPUT' ? 400
+    : code === 'NOT_FOUND' ? 404
+    : CONFLICT_CODES.includes(code) ? 409
+    : 503;
+}
 export class MnemoWeaveError extends Error {
   readonly code: ErrorCode;
   constructor(code: ErrorCode) { super(code); this.name = 'MnemoWeaveError'; this.code = code; }
@@ -100,7 +120,77 @@ export const MemoryDescriptor = z.object({
   conflicts:z.array(ConflictDescriptor).default([]),
 });
 export const MemoryIdInput = z.object({ memoryId: z.uuid(), revisionId: z.uuid().optional() }).strict();
-export const PublishedMemoryOutput = MemoryDescriptor.extend({ selectedRevisionId: z.uuid(),selectedRevision:RevisionDescriptor, content: z.string() });
+/** One entry of the client-facing memory list; content comes from the authoritative Provider. */
+export const MemoryListItem = z.object({
+  memoryId: z.uuid(), revisionId: z.uuid(), providerMemoryId: z.string().min(1),
+  scope: z.enum(['project', 'global']), projectId: z.string().optional(),
+  applicability: z.string(), publishedAt: z.iso.datetime(), content: z.string(),
+  entryVersion: z.number().int().nonnegative(),
+}).strict();
+export const MemoryListQuery = z.object({
+  query: z.string().trim().max(500).optional(),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+}).strict();
+export const MemoryList = z.object({ items: z.array(MemoryListItem) }).strict();
+export type MemoryListItemRecord = z.infer<typeof MemoryListItem>;
+export type MemoryListRecord = z.infer<typeof MemoryList>;
+
+// ── Runtime rules and project archives (operator write surface) ──
+export const RuleCreate = z.object({
+  scope: z.enum(['global', 'project']),
+  projectId: z.string().trim().min(1).max(200).optional(),
+  body: z.string().trim().min(1).max(4000),
+  enabled: z.boolean().default(true),
+}).strict().refine(value => value.scope === 'global' ? value.projectId === undefined : value.projectId !== undefined, 'Project-scoped rules require projectId');
+export const RuleEdit = z.object({
+  body: z.string().trim().min(1).max(4000).optional(),
+  enabled: z.boolean().optional(),
+}).strict().refine(value => value.body !== undefined || value.enabled !== undefined, 'Rule edit requires body or enabled');
+export const RuleRecord = z.object({
+  entryId: z.uuid(),
+  scope: z.enum(['global', 'project']),
+  projectId: z.string().nullable(),
+  body: z.string().min(1),
+  enabled: z.boolean(),
+  version: z.number().int().positive(),
+  withdrawnAt: z.iso.datetime().nullable(),
+}).strict();
+export const RuleList = z.object({ items: z.array(RuleRecord) }).strict();
+export const ArchiveCreate = z.object({
+  projectId: z.string().trim().min(1).max(200),
+  title: z.string().trim().min(1).max(200),
+  body: z.string().trim().min(1).max(8000),
+  source: z.enum(['session', 'tool', 'user']),
+  verification: z.enum(['verified', 'open', 'refuted']),
+  evidence: z.string().trim().min(1).max(2000),
+}).strict();
+export const ArchiveRecord = z.object({
+  entryId: z.uuid(), projectId: z.string().min(1), title: z.string().min(1), body: z.string().min(1),
+  source: z.enum(['session', 'tool', 'user']), verification: z.enum(['verified', 'open', 'refuted']),
+  evidence: z.string().min(1), version: z.number().int().positive(), withdrawnAt: z.iso.datetime().nullable(),
+}).strict();
+export type RuleCreateInput = z.infer<typeof RuleCreate>;
+export type RuleEditInput = z.infer<typeof RuleEdit>;
+export type RuleRecordValue = z.infer<typeof RuleRecord>;
+export type RuleListRecord = z.infer<typeof RuleList>;
+export const ArchiveList = z.object({ items: z.array(ArchiveRecord) }).strict();
+export type ArchiveCreateInput = z.infer<typeof ArchiveCreate>;
+export type ArchiveRecordValue = z.infer<typeof ArchiveRecord>;
+export type ArchiveListRecord = z.infer<typeof ArchiveList>;
+export type MemoryEditRecord = z.infer<typeof MemoryEditOutput>;
+/** Direct user edit: appends an immutable revision to an existing memory without a review round. */
+export const MemoryEditInput = z.object({
+  content: z.string().refine(value => value.trim().length > 0 && Buffer.byteLength(value, 'utf8') <= 8000, 'Content must contain 1–8000 UTF-8 bytes'),
+  reason: z.string().trim().min(1).max(4000).optional(),
+  /** Base version read from the list/detail API; the server never fills it in. */
+  entryVersion: z.number().int().nonnegative(),
+}).strict();
+export const MemoryEditOutput = z.object({
+  memoryId: z.uuid(), revisionId: z.uuid(), providerMemoryId: z.string().min(1),
+  contentHash: z.string().regex(/^[a-f0-9]{64}$/),
+  entryVersion: z.number().int().positive(),
+}).strict();
+export const PublishedMemoryOutput = MemoryDescriptor.extend({ selectedRevisionId: z.uuid(),selectedRevision:RevisionDescriptor, content: z.string(), entryVersion: z.number().int().nonnegative() });
 export type MemoryCatalogRecord = z.infer<typeof MemoryDescriptor>;
 export const ExecutionReceipt = z.discriminatedUnion('status', [
   z.object({ ...ExecutionBase, status: z.literal('persisted'), providerMemoryId: z.string().min(1), providerAction: z.enum(['added', 'skipped']), reconciled: z.boolean(), contentHash: z.string().regex(/^[a-f0-9]{64}$/) }),
@@ -162,7 +252,7 @@ export const HumanReviewInput = z.object({
 export const RetryInput = z.object({ candidateId: z.uuid(), reason: z.string().trim().min(1).max(4000), confirmNoActiveWrite: z.literal(true) }).strict();
 export const CancelVersionInput=RetryInput;
 
-// ── View, ReadGrant and rerank contracts (ADR-013/014/024, VIEW-01/02, RECALL-01/02) ──
+// ── View, ReadGrant and rerank contracts (VIEW-01/02, RECALL-01/02) ──
 /** Server-issued offline read authorization; expiry and generation watermark enforce revocation. */
 export const ReadGrant = z.object({
   grantId: z.uuid(), hostId: z.string().min(1),
@@ -179,6 +269,9 @@ export const ViewMemory = z.object({
   content: z.string(), excerpt: z.boolean(), score: z.number().finite().optional(),
   sourceReference: z.string().min(1),
 }).strict();
+export const ViewRule = z.object({
+  entryId: z.uuid(), version: z.number().int().positive(), body: z.string().min(1),
+}).strict();
 export const ViewRerank = z.object({
   status: z.enum(['not_requested', 'applied', 'unavailable', 'failed']),
   reason: z.string().min(1), route: z.string().optional(),
@@ -194,12 +287,26 @@ export const View = z.object({
   guidance: z.string().optional(),
   workingContext: z.array(z.object({ eventId: z.string(), text: z.string(), kind: z.enum(['user', 'task', 'tool']) }).strict()).optional(),
   runtime: z.object({ sessionId: z.string(), task: z.string().nullable(), capture: z.string(), revision: z.number() }).optional(),
+  // Runtime rules are injected whole or not at all; never truncated to fit.
+  rules: z.array(ViewRule).optional(),
+  rulesBudget: z.object({ limitTokens: z.number().int().positive(), usedTokens: z.number().int().nonnegative(), exceeded: z.boolean() }).strict().optional(),
   // Logical memory UUID when attributed; the Provider memory id when a mid-assembly state
   // change removed the logical mapping.
-  excluded: z.array(z.object({ memoryId: z.string().min(1), reason: z.enum(['not_visible', 'superseded', 'budget', 'grant_scope']) }).strict()),
+  excluded: z.array(z.object({ memoryId: z.string().min(1), reason: z.enum(['not_visible', 'superseded', 'budget', 'grant_scope', 'unregistered']) }).strict()),
   complete: z.boolean(), rerank: ViewRerank,
 }).strict();
 export type ViewRecord = z.infer<typeof View>;
+/** What one injection actually delivered; the operator surface reads the latest row. */
+export const InjectionReport = z.object({
+  id: z.uuid(), hostId: z.string().min(1), sessionId: z.string().min(1),
+  rulesInjected: z.number().int().nonnegative(),
+  rulesOmitted: z.enum(['budget_exceeded']).nullable(),
+  memoriesInjected: z.number().int().nonnegative(),
+  usedTokens: z.number().int().nonnegative(),
+  createdAt: z.iso.datetime(),
+}).strict();
+export type InjectionReportRecord = z.infer<typeof InjectionReport>;
+export type ViewRuleRecord = z.infer<typeof ViewRule>;
 /** One View delivery request; identity comes from the paired Host header, never from the body. */
 export const ViewRequest = z.object({
   query: z.string().trim().min(1).max(2000).optional(),
@@ -259,11 +366,6 @@ export const openapi = {
 };
 
 Object.assign(openapi.paths, {
-  '/v1/memories/{memoryId}': { get: {
-    description: 'Read selected/current published version from authoritative Provider and check content hash.',
-    parameters: [{ name: 'memoryId', in: 'path', required: true, schema: z.toJSONSchema(z.uuid()) }, { name: 'revisionId', in: 'query', schema: z.toJSONSchema(z.uuid()) }],
-    responses: { '200': { description: 'Published metadata and verified Provider text', content: jsonContent(PublishedMemoryOutput) }, '404': { description: 'Memory/revision not found' }, '503': { description: 'Provider missing or content integrity mismatch' } },
-  } },
   '/v1/view': { post: {
     description: 'Assemble one immutable View for the paired Host. Grant, revocation, publication state and token budget are checked before delivery; identity comes from the x-mnemoweave-host header, never from the body.',
     parameters: [{ name: 'x-mnemoweave-host', in: 'header', required: true, schema: z.toJSONSchema(z.string().min(1)) }],
@@ -326,42 +428,41 @@ Object.assign(openapi.paths, {
     requestBody: { required: true, content: jsonContent(CancelVersionInput) },
     responses: { '200': { description: 'Operation cancelled; candidate rejected', content: jsonContent(Candidate) }, '401': { description: 'Operator credential required' }, '409': { description: 'Operation already published, invoking or verified' } },
   } },
-  '/v1/sync/changes': { get: {
-    description: 'Bridge sync: ordered incremental window after ?since=<seq>; identity from the paired host header.',
-    parameters: [{ name: 'since', in: 'query', required: true, schema: { type: 'integer', minimum: -1 } }],
-    responses: { '200': { description: 'Ordered change batch with cursor window bounds' }, '401': { description: 'Unpaired host or bad token' } },
+  '/v1/memories': { get: {
+    description: 'List published memories with their current Provider text; optional space-separated query filters the list.',
+    parameters: [{ name: 'query', in: 'query', schema: z.toJSONSchema(z.string().max(500)) }, { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 200 } }],
+    responses: { '200': { description: 'Memory list', content: jsonContent(MemoryList) }, '401': { description: 'Unauthorized' }, '503': { description: 'Provider unavailable' } },
   } },
-  '/v1/sync/snapshot': { get: {
-    description: 'Bridge sync: curated snapshot SQLite file (replica-scope only) with an embedded SHA-256 manifest.',
-    responses: { '200': { description: 'Snapshot file bytes; x-sync-latest-seq header carries the cursor' }, '401': { description: 'Unpaired host or bad token' } },
-  } },
-  '/v1/sync/verify': { get: {
-    description: 'Bridge sync: per-memory partition summaries for the 72-hour full verification.',
-    responses: { '200': { description: 'Partition summaries' }, '401': { description: 'Unpaired host or bad token' } },
-  } },
-  '/v1/sync/watermark': { get: {
-    description: 'Bridge sync: revocation watermark and host revocation state (AUTH-02).',
-    responses: { '200': { description: 'Watermark and revocation state' }, '401': { description: 'Unpaired host or bad token' } },
-  } },
-  '/v1/sync/grant': {
+  '/v1/memories/{memoryId}': {
     get: {
-      description: 'Bridge pairing: fetch the issued grant for this host; pairing itself is an operator action (AUTH-04).',
-      responses: { '200': { description: 'Issued grant' }, '401': { description: 'Unpaired host or bad token' }, '404': { description: 'No grant issued yet' } },
+      description: 'Read selected/current published version from authoritative Provider and check content hash.',
+      parameters: [{ name: 'memoryId', in: 'path', required: true, schema: z.toJSONSchema(z.uuid()) }, { name: 'revisionId', in: 'query', schema: z.toJSONSchema(z.uuid()) }],
+      responses: { '200': { description: 'Published metadata and verified Provider text', content: jsonContent(PublishedMemoryOutput) }, '404': { description: 'Memory/revision not found' }, '503': { description: 'Provider missing or content integrity mismatch' } },
     },
-    post: {
-      description: 'Operator-only pairing: issue a per-host read grant (AUTH-04/05).',
-      security: [{ operator: [] }],
-      responses: { '200': { description: 'Issued grant' }, '401': { description: 'Operator credential required' } },
+    patch: {
+      description: 'User edit: append an immutable revision with the new text, supersede the previous Provider memory and move the current pointer. No review round is inserted; the edit is recorded as an operator review decision.',
+      parameters: [{ name: 'memoryId', in: 'path', required: true, schema: z.toJSONSchema(z.uuid()) }],
+      requestBody: { required: true, content: jsonContent(MemoryEditInput) },
+      responses: { '200': { description: 'New revision published', content: jsonContent(MemoryEditOutput) }, '400': { description: 'Invalid input' }, '404': { description: 'Memory not found' }, '409': { description: 'Memory is superseded or unverified' }, '503': { description: 'Provider unavailable or content mismatch' } },
     },
   },
-  '/v1/sync/revoke': { post: {
-    description: 'Operator-only revocation: stops reads immediately; replica and intents are kept (AUTH-02).',
-    security: [{ operator: [] }],
-    responses: { '200': { description: 'Revocation applied' }, '401': { description: 'Operator credential required' } },
+  '/v1/inject': { post: {
+    description: 'One-call Host injection: assemble the immutable View for a session. Identity comes from the x-mnemoweave-host header.',
+    parameters: [{ name: 'x-mnemoweave-host', in: 'header', required: true, schema: z.toJSONSchema(z.string().min(1)) }],
+    requestBody: { required: true, content: jsonContent(ViewRequest) },
+    responses: { '200': { description: 'Immutable View', content: jsonContent(View) }, '401': { description: 'Unauthorized' }, '409': { description: 'Budget exceeded or View unavailable' }, '503': { description: 'Provider unavailable' } },
   } },
-  '/v1/sync/intents': { post: {
-    description: 'Bridge offline intent intake: the server re-validates identity and review; remember/version/relation intents become candidates, never direct writes (AUTH-03).',
-    responses: { '200': { description: 'Accepted (with reference) or isolated' }, '401': { description: 'Unpaired host or bad token' } },
+  '/v1/events': { post: {
+    description: 'Host event intake: normalizes and persists one event with idempotent replay.',
+    parameters: [{ name: 'x-mnemoweave-host', in: 'header', required: true, schema: z.toJSONSchema(z.string().min(1)) }],
+    requestBody: { required: true, content: jsonContent(HostEvent) },
+    responses: { '200': { description: 'Stored, replayed or skipped event id' }, '400': { description: 'Invalid event' }, '409': { description: 'Same event id with different payload' } },
+  } },
+  '/v1/session/close': { post: {
+    description: 'Close one Host session so late results no longer bind to it.',
+    parameters: [{ name: 'x-mnemoweave-host', in: 'header', required: true, schema: z.toJSONSchema(z.string().min(1)) }],
+    requestBody: { required: true, content: jsonContent(z.object({ sessionId: z.string().min(1).max(256) }).strict()) },
+    responses: { '200': { description: 'Session closed' }, '400': { description: 'Invalid input' } },
   } },
 });
 Object.assign(openapi.components.securitySchemes, { operator: { type: 'http', scheme: 'bearer', description: 'Independent operator token; never pass to model Host' } });
@@ -371,5 +472,58 @@ export * from './runtime.ts';
 Object.assign(openapi.paths, {
   '/v1/runtime/context': { post: { description: 'Host-scoped bounded provisional working context; never formal memory.', requestBody: { required: true, content: jsonContent(RuntimeContextInput) }, responses: { '200': { description: 'Runtime context, resident pin references and capture status' }, '401': { description: 'Invalid Host or scope' } } } },
   '/v1/runtime/pins': { post: { description: 'Operator-only persistent Global/Project/Host/Session pin configuration.', requestBody: { required: true, content: jsonContent(PinInput) }, responses: { '200': { description: 'Updated' }, '401': { description: 'Operator required' } } } },
+  '/v1/sync/status': { get: {
+    description: 'View of this local Server\'s sync state with the remote sync Server, per scope: cursor, last pull, last error, pending, unknown and unapplied counts. Served to the operator and, read-only, to a Host that names itself.',
+    security: [{ operator: [] }, { bearer: [] }],
+    responses: { '200': { description: 'Local sync state', content: jsonContent(SyncStatusOutput) }, '401': { description: 'Operator credential or Host header required' } },
+  } },
+  '/v1/sync/refresh': { post: {
+    description: 'Manual sync pass: resolve unknown submissions, push the outbox, pull and apply each readable scope. Overlapping passes are skipped rather than queued. The operator and a Host that names itself may trigger it.',
+    security: [{ operator: [] }, { bearer: [] }],
+    responses: { '200': { description: 'Pass result', content: jsonContent(SyncRefreshOutput) }, '401': { description: 'Operator credential or Host header required' } },
+  } },
+  '/v1/injections/latest': { get: {
+    description: 'Operator-only last injection result: rules delivered, whether the rule block was omitted for budget, memories delivered and estimated tokens. 404 means no injection happened yet.',
+    security: [{ operator: [] }],
+    responses: { '200': { description: 'Last injection', content: jsonContent(InjectionReport) }, '401': { description: 'Operator credential required' }, '404': { description: 'No injection yet' } },
+  } },
+  '/v1/rules': {
+    get: {
+      description: 'Rule list. An operator narrows by scope (global, project or all); a Host that names itself receives every rule across all projects. Disabled rules are listed, withdrawn ones are not.',
+      parameters: [{ name: 'scope', in: 'query', schema: z.toJSONSchema(z.enum(['global', 'project', 'all'])) }, { name: 'projectId', in: 'query', schema: z.toJSONSchema(z.string().min(1)) }],
+      security: [{ operator: [] }, { bearer: [] }],
+      responses: { '200': { description: 'Rules', content: jsonContent(RuleList) }, '400': { description: 'Invalid scope' }, '401': { description: 'Operator credential or Host header required' } },
+    },
+    post: {
+      description: 'Operator-only rule creation. Rejects with RULE_BUDGET_EXCEEDED when the applicable rules no longer fit the rule budget; a truncated rule is never stored.',
+      security: [{ operator: [] }],
+      requestBody: { required: true, content: jsonContent(RuleCreate) },
+      responses: { '201': { description: 'Created rule', content: jsonContent(RuleRecord) }, '400': { description: 'Invalid input' }, '401': { description: 'Operator credential required' }, '409': { description: 'RULE_BUDGET_EXCEEDED' } },
+    },
+  },
+  '/v1/rules/{ruleId}': { patch: {
+    description: 'Operator-only rule edit; appends a version and re-checks the rule budget.',
+    parameters: [{ name: 'ruleId', in: 'path', required: true, schema: z.toJSONSchema(z.uuid()) }],
+    security: [{ operator: [] }],
+    requestBody: { required: true, content: jsonContent(RuleEdit) },
+    responses: { '200': { description: 'Updated rule', content: jsonContent(RuleRecord) }, '400': { description: 'Invalid input' }, '401': { description: 'Operator credential required' }, '404': { description: 'Rule not found' }, '409': { description: 'RULE_BUDGET_EXCEEDED' } },
+  } },
+  '/v1/archives': {
+    get: {
+      description: 'Project archive read for the operator or a Host that names itself. Without projectId every project is returned; withdrawn entries appear only when asked.',
+      parameters: [
+        { name: 'projectId', in: 'query', required: false, schema: z.toJSONSchema(z.string().min(1).max(200)) },
+        { name: 'includeWithdrawn', in: 'query', required: false, schema: z.toJSONSchema(z.boolean()) },
+      ],
+      security: [{ operator: [] }, { bearer: [] }],
+      responses: { '200': { description: 'Archives', content: jsonContent(ArchiveList) }, '400': { description: 'Invalid input' }, '401': { description: 'Operator credential or Host header required' } },
+    },
+    post: {
+      description: 'Operator-only project archive write; model output cannot reach this endpoint.',
+      security: [{ operator: [] }],
+      requestBody: { required: true, content: jsonContent(ArchiveCreate) },
+      responses: { '201': { description: 'Created archive', content: jsonContent(ArchiveRecord) }, '400': { description: 'Invalid input' }, '401': { description: 'Operator credential required' } },
+    },
+  },
   '/v1/runtime/projects': { post: { description: 'Operator-only explicit project registration; IDs are never inferred from paths.', requestBody: { required: true, content: jsonContent(z.object({ projectId: z.string().min(1).max(200) }).strict()) }, responses: { '200': { description: 'Registered' }, '401': { description: 'Operator required' } } } },
 });

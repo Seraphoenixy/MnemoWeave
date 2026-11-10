@@ -1,4 +1,4 @@
-/** Adapter capability declaration (host-integration.md §5). */
+/** Adapter capability declaration (see docs/host-acceptance.md). */
 
 export type CapabilityKey =
   | 'tool_calls' | 'session_start' | 'message_events' | 'tool_results'
@@ -9,7 +9,7 @@ export type CapabilityStatus = 'supported' | 'unsupported' | 'unverified';
 export interface AdapterCapability { status: CapabilityStatus; evidence: string; verifiedAt: string | null }
 
 export interface AdapterDescriptor {
-  hostProduct: 'DSH' | 'Codex' | 'ChatGPT' | 'ZCode';
+  hostProduct: 'DSH' | 'ChatGPT' | 'ZCode';
   hostVersion: string;
   adapterVersion: string;
   capabilities: Record<CapabilityKey, AdapterCapability>;
@@ -22,7 +22,7 @@ const REQUIRED: readonly CapabilityKey[] = ['tool_calls', 'session_start', 'mess
 /**
  * Every declared capability carries its status and evidence; `supported` requires a
  * verification date. Adapters must not claim collection or injection they cannot prove
- * (host-integration.md §5 constraints) — unverified defaults keep that honest.
+ * (docs/host-acceptance.md) — unverified defaults keep that honest.
  */
 export function unverifiedDescriptor(hostProduct: AdapterDescriptor['hostProduct'], hostVersion: string, adapterVersion: string, evidenceLink: string, verifiedAt: string | null = null): AdapterDescriptor {
   const capabilities = Object.fromEntries(REQUIRED.map(key => [key, { status: 'unverified', evidence: evidenceLink, verifiedAt }])) as Record<CapabilityKey, AdapterCapability>;

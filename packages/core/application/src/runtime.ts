@@ -45,7 +45,7 @@ export class MemoryRuntime {
       working.unshift({ ...entry, text }); remaining -= estimateTokens(text) + 20;
     }
     const extra = estimateTokens(CAPTURE_GUIDANCE) + estimateTokens(task ?? '') + 40 + (workingBudget - remaining);
-    const view = View.parse(await registry.compile({ plan: () => ({ steps: [{ sourceId: 'formal', capability: 'authorized-view' }] }) }).execute({ grant, ...(query ? { query } : {}), pinned: [...context.pins, ...(input.pinned ?? [])].sort((a, b) => Number(b.tier === 'critical') - Number(a.tier === 'critical')), ...(input.rerank !== undefined ? { rerank: input.rerank } : {}), budgetTokens: budget, reserveTokens: extra }, grant));
+    const view = View.parse(await registry.compile({ plan: () => ({ steps: [{ sourceId: 'formal', capability: 'authorized-view' }] }) }).execute({ grant, ...(query ? { query } : {}), ...(input.projectId ? { projectId: input.projectId } : {}), pinned: [...context.pins, ...(input.pinned ?? [])].sort((a, b) => Number(b.tier === 'critical') - Number(a.tier === 'critical')), ...(input.rerank !== undefined ? { rerank: input.rerank } : {}), budgetTokens: budget, reserveTokens: extra }, grant));
     const current = this.repository.context(grant.hostId, sessionId);
     if (current.closed || current.revision !== context.revision) throw new MnemoWeaveError('INVALID_STATE');
     assertGrant(grant);

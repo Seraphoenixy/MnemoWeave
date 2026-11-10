@@ -1,0 +1,21 @@
+[Unit]
+Description=MnemoWeave remote sync Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mnemoweave
+Group=mnemoweave
+EnvironmentFile=/etc/mnemoweave/sync.env
+ExecStart=/usr/bin/node /opt/mnemoweave/dist/apps/sync-server/src/main.js
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/mnemoweave-sync
+
+[Install]
+WantedBy=multi-user.target

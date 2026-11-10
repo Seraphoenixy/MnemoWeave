@@ -1,4 +1,4 @@
-import { testHostHeaders, pairTestHost, TEST_OPERATOR } from '../support/server.ts';
+import { testHostHeaders, awaitServerReady, TEST_OPERATOR } from '../support/server.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir,mkdtemp } from 'node:fs/promises';
@@ -8,10 +8,11 @@ import type { CandidateRecord } from '../../packages/core/contracts/src/index.ts
 import { startServer,stopProcess,until } from '../support/server.ts';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
+import { mnemonBinary } from './mnemon-binary.ts';
 
 test('Real Provider: logical revisions, stale bases, independent supersession and scope coexistence', { timeout:60000 },async()=>{
   await mkdir('work/e2e',{recursive:true}); const root=await mkdtemp(resolve('work/e2e/versions-'));
-  const env={MNEMON_BINARY:process.env.MNEMON_BINARY??resolve('work/tools/mnemon/mnemon.exe'),MNEMON_DATA_DIR:join(root,'provider'),MNEMON_STORE:'versions',MNEMOWEAVE_STATE_DIR:join(root,'state'),MNEMOWEAVE_PORT:'0',MNEMOWEAVE_TOKEN:'version-host-token-0123456789',MNEMOWEAVE_OPERATOR_TOKEN:'version-operator-token-987654321'};
+  const env={MNEMON_BINARY:mnemonBinary(),MNEMON_DATA_DIR:join(root,'provider'),MNEMON_STORE:'versions',MNEMOWEAVE_STATE_DIR:join(root,'state'),MNEMOWEAVE_PORT:'0',MNEMOWEAVE_TOKEN:'version-host-token-0123456789',MNEMOWEAVE_OPERATOR_TOKEN:'version-operator-token-987654321'};
   let server=await startServer(env);
   let client:Client|undefined;
   const headers=testHostHeaders(env.MNEMOWEAVE_TOKEN);

@@ -2,22 +2,42 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { normalizeLanguage, translate } from '../../plugins/dsh-mnemo-weave/src/client/i18n.ts';
 import {
-  availabilityText, detailMeta, formatDateTime, grantChips, intentsSummary, listSummary,
-  reasonText, relativeTime, scopeText, statusChips, type Chip,
+  availabilityText, codeText, detailMeta, formatDateTime, injectionChip, listSummary, relativeTime,
+  stateText, statusChips, type Chip,
 } from '../../plugins/dsh-mnemo-weave/src/client/view-model.ts';
-import type { UiGrantView, UiIntents, UiMemoryDetail, UiMemoryList, UiReplicaView, UiStatus } from '../../plugins/dsh-mnemo-weave/src/shared/contract.ts';
+import type { UiConfigView, UiInjection, UiMemoryDetail, UiMemoryList, UiStatus } from '../../plugins/dsh-mnemo-weave/src/shared/contract.ts';
 
 const NOW = Date.parse('2026-11-09T03:00:00.000Z');
 
-const grant = (overrides: Partial<UiGrantView> = {}): UiGrantView => ({
-  grantId: '11111111-1111-4111-8111-111111111111', projects: ['proj-a'], globalIncluded: false,
-  issuedAt: '2026-11-09T02:00:00.000Z', expiresAt: '2026-11-09T04:00:00.000Z', generation: 3,
-  expired: false, revoked: false, ...overrides,
+const status = (overrides: Partial<UiStatus> = {}): UiStatus => ({
+  status: 'ok', serverUrl: 'http://127.0.0.1:4317', hostId: 'dsh',
+  checkedAt: '2026-11-09T02:59:30.000Z', version: '0.2.13', ...overrides,
 });
 
-const replica = (overrides: Partial<UiReplicaView> = {}): UiReplicaView => ({
-  available: true, corrupted: false, appliedSeq: 42, generation: 1, dataTime: '2026-11-09T02:59:00.000Z',
-  verifiedAt: null, stale: false, pendingContent: 0, memories: 7, revisions: 9, ...overrides,
+const config: UiConfigView = { serverUrl: 'http://127.0.0.1:4317', hostId: 'dsh', hasToken: true };
+
+const detail = (overrides: Partial<UiMemoryDetail> = {}): UiMemoryDetail => ({
+  memoryId: '11111111-1111-4111-8111-111111111111',
+  revisionId: '22222222-2222-4222-8222-222222222222',
+  providerMemoryId: 'provider-1',
+  scope: 'project',
+  projectId: 'proj-a',
+  applicability: 'release',
+  state: 'active',
+  content: 'x',
+  publishedAt: '2026-11-09T02:00:00.000Z',
+  entryVersion: 0,
+  revisions: [
+    {
+      revisionId: '22222222-2222-4222-8222-222222222222', number: 2,
+      publishedAt: '2026-11-09T02:00:00.000Z', effectiveAt: '2026-11-09T02:00:00.000Z', current: true,
+    },
+    {
+      revisionId: '33333333-3333-4333-8333-333333333333', number: 1,
+      publishedAt: '2026-11-08T02:00:00.000Z', effectiveAt: '2026-11-08T02:00:00.000Z', current: false,
+    },
+  ],
+  ...overrides,
 });
 
 test('localized text falls back to language and interpolates counts', () => {
@@ -30,64 +50,90 @@ test('localized text falls back to language and interpolates counts', () => {
 });
 
 test('relative time and timestamps degrade to a dash for invalid input', () => {
-  assert.equal(relativeTime('2026-11-09T02:59:30.000Z', NOW, 'en'), 'just now');
+  assert.equal(relativeTime('2026-11-09T02:59:59.000Z', NOW, 'en'), 'just now');
+  assert.equal(relativeTime('2026-11-09T02:59:30.000Z', NOW, 'en'), '30 s ago');
   assert.equal(relativeTime('2026-11-09T02:30:00.000Z', NOW, 'en'), '30 min ago');
   assert.equal(relativeTime('2026-11-09T00:00:00.000Z', NOW, 'zh'), '3 小时前');
   assert.equal(relativeTime('2026-11-07T00:00:00.000Z', NOW, 'en'), '2 d ago');
   assert.equal(relativeTime('not-a-date', NOW, 'en'), '—');
   assert.equal(formatDateTime('not-a-date'), '—');
-  assert.match(formatDateTime('2026-11-09T03:04:00.000Z'), /^2026-11-0[89] \d{2}:04$/);
+  assert.match(formatDateTime('2026-11-09T03:04:00.000Z'), /^2026-11-0[89] \d{2}:04:00$/);
+  assert.equal(relativeTime('2026-11-09T02:59:30.000Z', NOW, 'zh'), '30 秒前');
+  assert.equal(relativeTime('2026-11-09T02:59:30.000Z', NOW, 'en'), '30 s ago');
 });
 
-test('grant and replica chips state the availability rather than hiding it', () => {
-  const healthy: Chip[] = statusChips({ paired: true, grant: grant(), replica: replica() } as UiStatus, 'en', NOW);
-  assert.deepEqual(healthy.map(chip => chip.key), ['paired', 'scope', 'expires', 'generation', 'replica', 'freshness', 'seq', 'memories', 'revisions', 'pending']);
-  assert.equal(healthy[0]?.tone, 'ok');
-  assert.equal(healthy.find(chip => chip.key === 'freshness')?.tone, 'ok');
+test('status chips name availability, endpoint, host and token state without the token value', () => {
+  const chips: Chip[] = statusChips(status(), config, 'en', NOW);
+  assert.deepEqual(chips.map(chip => chip.key), ['availability', 'server', 'host', 'token', 'version', 'checked']);
+  assert.equal(chips[0]?.value, 'Available');
+  assert.equal(chips[0]?.tone, 'ok');
+  assert.equal(chips.find(chip => chip.key === 'server')?.value, 'http://127.0.0.1:4317');
+  assert.equal(chips.find(chip => chip.key === 'host')?.value, 'dsh');
+  assert.equal(chips.find(chip => chip.key === 'token')?.value, 'Configured');
+  assert.equal(chips.find(chip => chip.key === 'checked')?.value, '30 s ago');
 
-  const revoked = grantChips(grant({ revoked: true }), 'zh', NOW);
-  assert.equal(revoked[0]?.label, '已撤权');
-  assert.equal(revoked[0]?.tone, 'bad');
+  const unauthorized = statusChips(status({ status: 'unauthorized', reason: 'UNAUTHORIZED' }), config, 'zh', NOW);
+  assert.equal(unauthorized[0]?.value, '未授权');
+  assert.equal(unauthorized[0]?.tone, 'warn');
 
-  const expired = grantChips(grant({ expiresAt: '2026-11-09T01:00:00.000Z' }), 'en', NOW);
-  assert.equal(expired[0]?.label, 'Grant expired');
-  assert.equal(expired[0]?.tone, 'bad');
-
-  assert.equal(grantChips(null, 'en', NOW)[0]?.tone, 'bad');
-  const staleReplica = grantChips(null, 'en', NOW).concat([]).length;
-  assert.equal(staleReplica, 1);
-
-  const chips = statusChips({ paired: true, grant: grant(), replica: replica({ stale: true, pendingContent: 2 }) } as UiStatus, 'en', NOW);
-  assert.equal(chips.find(chip => chip.key === 'freshness')?.tone, 'warn');
-  assert.equal(chips.find(chip => chip.key === 'pending')?.tone, 'warn');
-  const corrupted = statusChips({ paired: true, grant: grant(), replica: replica({ corrupted: true, available: false }) } as UiStatus, 'en', NOW);
-  assert.equal(corrupted.find(chip => chip.key === 'replica')?.tone, 'bad');
+  const withoutVersion: UiStatus = {
+    status: 'unavailable', reason: 'PROVIDER_UNAVAILABLE', serverUrl: 'http://127.0.0.1:4317',
+    hostId: 'dsh', checkedAt: '2026-11-09T02:59:30.000Z',
+  };
+  const unavailable = statusChips(withoutVersion, { ...config, hasToken: false }, 'zh', NOW);
+  assert.deepEqual(unavailable.map(chip => chip.key), ['availability', 'server', 'host', 'token', 'checked']);
+  assert.equal(unavailable[0]?.tone, 'bad');
+  assert.equal(unavailable.find(chip => chip.key === 'token')?.value, '未配置');
+  assert.equal(statusChips(null, config, 'en', NOW).length, 0);
 });
 
-test('scope, availability and list summaries name the reason', () => {
-  assert.equal(scopeText(['*'], true, 'zh'), '全部项目 · 含全局');
-  assert.equal(scopeText(['a', 'b'], false, 'en'), 'a, b · projects only');
-  assert.equal(availabilityText('corrupted', 'en'), 'Corrupted');
-  assert.equal(reasonText('out_of_grant', 'zh'), '超出当前授权范围');
-  assert.equal(reasonText('something-new', 'en'), 'Unavailable');
+test('error codes stay visible while their wording is localized', () => {
+  assert.equal(codeText('NOT_FOUND', 'zh'), '未找到该记忆');
+  assert.equal(codeText('UNAUTHORIZED', 'en'), 'The service token was rejected');
+  assert.equal(codeText('PROVIDER_TIMEOUT', 'en'), 'The request timed out');
+  assert.equal(codeText('SOMETHING_NEW', 'en'), 'Unknown error');
+  assert.equal(codeText(undefined, 'zh'), '未知错误');
+  assert.equal(availabilityText('unavailable', 'zh'), '不可用');
+  assert.equal(stateText('superseded', 'en'), 'Superseded');
+  assert.equal(stateText('unverified', 'zh'), '未验证');
+});
 
-  const ok: UiMemoryList = { status: 'ok', query: null, scope: null, projectId: null, total: 2, returned: 2, complete: true, dataTime: null, items: [] };
+test('the list summary counts what the Server returned', () => {
+  const ok: UiMemoryList = { query: null, limit: 50, returned: 2, items: [] };
   assert.equal(listSummary(ok, 'en'), '2 items');
-  assert.equal(listSummary({ ...ok, complete: false }, 'en'), '2 items · Some text has not synced yet');
-  assert.equal(listSummary({ ...ok, status: 'unauthorized', reason: 'revoked' }, 'zh'), '未授权 · 授权已被撤销');
+  assert.equal(listSummary({ ...ok, returned: 0 }, 'zh'), '0 条');
   assert.equal(listSummary(null, 'en'), '');
 });
 
-test('intent and detail metadata stay bounded and readable', () => {
-  const intents: UiIntents = { status: 'ok', queued: 2, isolated: 1, items: [] };
-  assert.equal(intentsSummary(intents, 'en'), 'Queued 2 · Isolated 1');
-  assert.equal(intentsSummary(null, 'zh'), '');
-  const detail = {
-    status: 'ok', memoryId: 'm', revisionId: 'r', state: 'active', scope: 'project', projectId: 'proj-a',
-    applicability: 'release', content: 'x', revisions: [], relations: [],
-  } as UiMemoryDetail;
-  assert.deepEqual(detailMeta(detail, 'en').map(meta => meta.value), ['active', 'proj-a', 'release']);
-  const { projectId: _project, ...globalFields } = detail;
-  const global: UiMemoryDetail = { ...globalFields, scope: 'global' };
-  assert.equal(detailMeta(global, 'zh')[1]?.value, '全局');
+test('detail metadata names state, current revision, scope, applicability and publication time', () => {
+  const meta = detailMeta(detail(), 'en');
+  assert.deepEqual(meta.map(item => item.key), ['state', 'revision', 'scope', 'applicability', 'published']);
+  assert.deepEqual(meta.slice(0, 4).map(item => item.value), ['Active', '#2', 'proj-a', 'release']);
+  assert.equal(meta[4]?.value, formatDateTime('2026-11-09T02:00:00.000Z'));
+
+  const { projectId: _project, ...globalFields } = detail({ scope: 'global' });
+  assert.equal(detailMeta(globalFields as UiMemoryDetail, 'zh')[2]?.value, '全局');
+  assert.equal(detailMeta(detail({ state: 'superseded' }), 'zh')[0]?.value, '已被取代');
+  assert.equal(detailMeta(detail({ revisions: [] }), 'en')[1]?.value, '—');
+});
+
+test('the injection chip names the last View and flags a budget omission', () => {
+  const injection: UiInjection = {
+    id: '33333333-3333-4333-8333-333333333333', sessionId: 's-1',
+    rulesInjected: 2, rulesOmitted: null, memoriesInjected: 3, usedTokens: 700,
+    createdAt: '2026-11-09T02:50:00.000Z',
+  };
+  const ok = injectionChip(injection, 'zh');
+  assert.equal(ok.key, 'injection');
+  assert.equal(ok.tone, 'ok');
+  assert.match(ok.value, /准则 2 条/);
+  assert.match(ok.value, /记忆 3 条/);
+
+  const omitted = injectionChip({ ...injection, rulesOmitted: 'budget_exceeded' }, 'en');
+  assert.equal(omitted.tone, 'warn');
+  assert.match(omitted.value, /budget exceeded/);
+
+  const none = injectionChip(null, 'zh');
+  assert.equal(none.tone, 'muted');
+  assert.equal(none.value, '尚无注入记录');
 });

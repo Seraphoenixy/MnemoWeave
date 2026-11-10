@@ -1,7 +1,7 @@
 {
   "name": "dsh-mnemo-weave",
   "version": "0.1.0",
-  "description": "MnemoWeave memory orchestration for DeepSeek Harness: prompt-time View injection (skeleton) and the read-only memory page.",
+  "description": "MnemoWeave memory orchestration for DeepSeek Harness: prompt-time View injection (skeleton) and the editable memory page.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {

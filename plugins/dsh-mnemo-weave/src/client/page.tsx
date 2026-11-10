@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { UiConfigView, UiIntents, UiMemoryDetail, UiMemoryList, UiMemorySummary, UiRevision, UiStatus } from '../shared/contract.ts';
+import type { UiArchive, UiConfigView, UiInjection, UiMemoryDetail, UiMemoryList, UiMemorySummary, UiRule, UiStatus, UiSyncPass, UiSyncStatus } from '../shared/contract.ts';
 import { createApi, RpcFailure } from './api.ts';
 import type { ClientConnection, LocaleService } from './dsh-types.ts';
 import { normalizeLanguage, translate, type Language } from './i18n.ts';
 import { ensureStyles } from './styles.ts';
+import { ArchivesPanel, OverviewPanel, RuntimePanel, SyncPanel, TAB_KEYS, TAB_ORDER, type Tab } from './panels.tsx';
 import {
-  availabilityText, detailMeta, formatDateTime, intentsSummary, listSummary, reasonText,
-  relativeTime, statusChips, type Chip, type Tone,
+  availabilityText, codeText, detailMeta, formatDateTime, injectionChip, listSummary, relativeTime,
+  statusChips, type Chip, type Tone,
 } from './view-model.ts';
 
 export interface MemoryPageProps {
@@ -14,7 +15,7 @@ export interface MemoryPageProps {
   locale?: LocaleService;
 }
 
-type ScopeFilter = 'all' | 'project' | 'global';
+const LIST_LIMIT = 50;
 
 function useLanguage(locale: LocaleService | undefined): Language {
   const read = (): Language => {
@@ -31,8 +32,9 @@ function useLanguage(locale: LocaleService | undefined): Language {
   return language;
 }
 
-function messageOf(error: unknown): string {
-  if (error instanceof RpcFailure) return `${error.message} (${error.code})`;
+/** The Server code is shown as written; only the wording around it is localized. */
+function failureText(error: unknown, language: Language): string {
+  if (error instanceof RpcFailure) return `${codeText(error.code, language)} (${error.code})`;
   return error instanceof Error ? error.message : String(error);
 }
 
@@ -51,17 +53,16 @@ function ChipRow({ chips, ariaLabel }: { chips: Chip[]; ariaLabel: string }): JS
 
 function MemoryRow({ item, active, language, now, onSelect }: { item: UiMemorySummary; active: boolean; language: Language; now: number; onSelect(id: string): void }): JSX.Element {
   const scope = item.scope === 'global' ? translate(language, 'detail.global') : item.projectId ?? '—';
+  const firstLine = item.content.split('\n')[0] ?? item.memoryId;
   return (
     <li>
       <button type="button" className="mwui-item" data-active={active ? 'true' : 'false'} onClick={() => onSelect(item.memoryId)}>
-        <span className="mwui-item-title">{item.excerpt.split('\n')[0] ?? item.memoryId}</span>
-        <span className="mwui-item-excerpt">{item.excerpt}</span>
+        <span className="mwui-item-title">{firstLine === '' ? item.memoryId : firstLine}</span>
+        <span className="mwui-item-excerpt">{item.content}</span>
         <span className="mwui-item-meta">
           <span>{scope}</span>
           <span>·</span>
-          <span>{translate(language, 'detail.revision')} {item.revisionNumber}</span>
-          <span>·</span>
-          <span>{relativeTime(item.publishedAt, now, language)}</span>
+          <span>{translate(language, 'detail.published')} {relativeTime(item.publishedAt, now, language)}</span>
         </span>
       </button>
     </li>
@@ -71,23 +72,21 @@ function MemoryRow({ item, active, language, now, onSelect }: { item: UiMemorySu
 interface DetailProps {
   detail: UiMemoryDetail;
   language: Language;
-  revision: UiRevision | null;
-  revisionBusy: boolean;
+  editing: boolean;
+  draft: string;
+  reason: string;
+  saving: boolean;
   copied: boolean;
-  onSelectRevision(revisionId: string): void;
+  onChangeDraft(value: string): void;
+  onChangeReason(value: string): void;
+  onBeginEdit(): void;
+  onCancel(): void;
+  onSave(): void;
   onCopyId(): void;
 }
 
 function DetailView(props: DetailProps): JSX.Element {
-  const { detail, language, revision, revisionBusy, copied } = props;
-  if (detail.status !== 'ok') {
-    return (
-      <div className="mwui-empty">
-        <div>{availabilityText(detail.status, language)}</div>
-        <div>{reasonText(detail.reason, language)}</div>
-      </div>
-    );
-  }
+  const { detail, language, editing, draft, reason, saving, copied } = props;
   return (
     <div className="mwui-detail">
       <div className="mwui-detail-head">
@@ -106,104 +105,132 @@ function DetailView(props: DetailProps): JSX.Element {
           ))}
         </div>
       </div>
+
       <div>
-        <h4 className="mwui-section-title">{translate(language, 'detail.content')}</h4>
-        <div className="mwui-content">{detail.content ?? '—'}</div>
+        <h4 className="mwui-section-title">{translate(language, editing ? 'detail.editTitle' : 'detail.content')}</h4>
+        {editing
+          ? (
+            <div className="mwui-edit">
+              <textarea
+                className="mwui-input mwui-textarea"
+                rows={10}
+                value={draft}
+                aria-label={translate(language, 'detail.content')}
+                onChange={event => props.onChangeDraft(event.target.value)}
+              />
+              <input
+                className="mwui-input"
+                type="text"
+                value={reason}
+                placeholder={translate(language, 'detail.reasonPlaceholder')}
+                aria-label={translate(language, 'detail.reason')}
+                onChange={event => props.onChangeReason(event.target.value)}
+              />
+              <div className="mwui-edit-hint" data-tone={draft.trim() === '' ? 'warn' : 'muted'}>
+                {draft.trim() === '' ? translate(language, 'detail.emptyContent') : translate(language, 'detail.editHint')}
+              </div>
+              <div className="mwui-edit-actions">
+                <button type="button" className="mwui-button" data-variant="primary" onClick={props.onSave} disabled={saving || draft.trim() === ''}>
+                  {saving ? translate(language, 'detail.saving') : translate(language, 'detail.save')}
+                </button>
+                <button type="button" className="mwui-button" onClick={props.onCancel} disabled={saving}>
+                  {translate(language, 'detail.cancel')}
+                </button>
+              </div>
+            </div>
+          )
+          : (
+            <div className="mwui-edit">
+              <div className="mwui-content">{detail.content === '' ? '—' : detail.content}</div>
+              <div className="mwui-edit-actions">
+                <button type="button" className="mwui-button" data-variant="primary" onClick={props.onBeginEdit}>
+                  {translate(language, 'detail.edit')}
+                </button>
+              </div>
+            </div>
+          )}
       </div>
+
       <div>
         <h4 className="mwui-section-title">{translate(language, 'detail.revisions')}</h4>
         <ul className="mwui-sublist">
           {detail.revisions.map(item => (
-            <li key={item.revisionId}>
-              <button
-                type="button"
-                className="mwui-subrow-btn"
-                data-active={revision?.revisionId === item.revisionId ? 'true' : 'false'}
-                onClick={() => props.onSelectRevision(item.revisionId)}
-              >
-                <span className="mwui-subrow-main">#{item.number}{item.current ? ` · ${translate(language, 'detail.current')}` : ''}</span>
-                <span>{formatDateTime(item.publishedAt)}</span>
-                <span className="mwui-subrow-tail mwui-mono">{item.revisionId.slice(0, 8)}</span>
-              </button>
+            <li key={item.revisionId} className="mwui-subrow">
+              <span className="mwui-subrow-main">#{item.number}{item.current ? ` · ${translate(language, 'detail.current')}` : ''}</span>
+              <span>{formatDateTime(item.publishedAt)}</span>
+              <span className="mwui-subrow-tail mwui-mono">{item.revisionId.slice(0, 8)}</span>
             </li>
           ))}
         </ul>
-      </div>
-      <div>
-        <h4 className="mwui-section-title">{translate(language, 'detail.history')}</h4>
-        {revisionBusy
-          ? <div className="mwui-empty">{translate(language, 'detail.historyLoading')}</div>
-          : revision === null
-            ? <div className="mwui-empty">{translate(language, 'detail.historyHint')}</div>
-            : revision.status !== 'ok'
-              ? <div className="mwui-empty">{availabilityText(revision.status, language)} · {reasonText(revision.reason, language)}</div>
-              : (
-                <div className="mwui-revision">
-                  <div className="mwui-subrow">
-                    <span className="mwui-subrow-main">#{revision.number}{revision.current ? ` · ${translate(language, 'detail.current')}` : ''}</span>
-                    <span>{formatDateTime(revision.publishedAt)}</span>
-                    <span className="mwui-subrow-tail mwui-mono">{revision.revisionId.slice(0, 8)}</span>
-                  </div>
-                  <div className="mwui-content">{revision.content ?? '—'}</div>
-                </div>
-              )}
-      </div>
-      <div>
-        <h4 className="mwui-section-title">{translate(language, 'detail.relations')}</h4>
-        {detail.relations.length === 0
-          ? <div className="mwui-empty">{translate(language, 'detail.noRelations')}</div>
-          : (
-            <ul className="mwui-sublist">
-              {detail.relations.map(relation => (
-                <li key={relation.id} className="mwui-subrow">
-                  <span className="mwui-subrow-main">{relation.kind}</span>
-                  <span>{relation.reason}</span>
-                  <span className="mwui-subrow-tail mwui-mono">{relation.targetMemoryId.slice(0, 8)}</span>
-                </li>
-              ))}
-            </ul>
-          )}
       </div>
     </div>
   );
 }
 
-/** The MnemoWeave page: status, searchable memories, their detail and revision history, all read-only. */
+/** The MnemoWeave page: availability, searchable memories, one memory's detail and its edit entry. */
 export function MemoryPage(props: MemoryPageProps): JSX.Element {
   const { connection, locale } = props;
   const api = useMemo(() => createApi(connection), [connection]);
   const language = useLanguage(locale);
   const [status, setStatus] = useState<UiStatus | null>(null);
+  const [config, setConfig] = useState<UiConfigView | null>(null);
+  const [injection, setInjection] = useState<UiInjection | null>(null);
+  const [tab, setTab] = useState<Tab>('overview');
+  const [rules, setRules] = useState<UiRule[] | null | undefined>(undefined);
+  const [archives, setArchives] = useState<UiArchive[] | null | undefined>(undefined);
+  const [sync, setSync] = useState<UiSyncStatus | null | undefined>(undefined);
+  const [rulesError, setRulesError] = useState<string | null>(null);
+  const [archivesError, setArchivesError] = useState<string | null>(null);
+  const [syncError, setSyncError] = useState<string | null>(null);
+  const [syncPass, setSyncPass] = useState<UiSyncPass | null>(null);
+  const [ruleId, setRuleId] = useState<string | null>(null);
+  const [archiveId, setArchiveId] = useState<string | null>(null);
   const [list, setList] = useState<UiMemoryList | null>(null);
   const [detail, setDetail] = useState<UiMemoryDetail | null>(null);
-  const [revision, setRevision] = useState<UiRevision | null>(null);
-  const [revisionId, setRevisionId] = useState<string | null>(null);
-  const [revisionBusy, setRevisionBusy] = useState(false);
-  const [intents, setIntents] = useState<UiIntents | null>(null);
-  const [config, setConfig] = useState<UiConfigView | null>(null);
   const [query, setQuery] = useState('');
-  const [scope, setScope] = useState<ScopeFilter>('all');
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
+  const [reason, setReason] = useState('');
+  const [saving, setSaving] = useState(false);
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const listRequest = useRef<AbortController | null>(null);
 
   useEffect(() => { ensureStyles(); }, []);
 
   const loadStatus = useCallback(async (signal?: AbortSignal): Promise<void> => {
-    const [nextStatus, nextIntents, nextConfig] = await Promise.all([api.status(signal), api.intents(signal), api.config(signal)]);
+    // The injection report is informational: a host that never injected, or a Server that
+    // cannot answer, must not turn the whole status row into an error.
+    const settle = async <T,>(promise: Promise<T>): Promise<{ value?: T; error?: string }> => {
+      try { return { value: await promise }; } catch (error) { return { error: error instanceof RpcFailure ? error.code : 'RPC_FAILED' }; }
+    };
+    const [nextStatus, nextConfig, nextInjection, nextRules, nextArchives, nextSync] = await Promise.all([
+      api.status(signal),
+      api.config(signal),
+      api.injection(signal).catch(() => null),
+      settle(api.rules(signal)),
+      settle(api.archives(signal)),
+      settle(api.sync(signal)),
+    ]);
     setStatus(nextStatus);
-    setIntents(nextIntents);
     setConfig(nextConfig);
+    setInjection(nextInjection);
+    setRules(nextRules.value ?? null);
+    setRulesError(nextRules.error ?? null);
+    setArchives(nextArchives.value ?? null);
+    setArchivesError(nextArchives.error ?? null);
+    setSync(nextSync.value ?? null);
+    setSyncError(nextSync.error ?? null);
   }, [api]);
 
-  const loadList = useCallback(async (text: string, scopeFilter: ScopeFilter, signal?: AbortSignal): Promise<void> => {
+  const loadList = useCallback(async (text: string, signal?: AbortSignal): Promise<void> => {
     setList(await api.memories({
       ...(text.trim() === '' ? {} : { query: text.trim() }),
-      ...(scopeFilter === 'all' ? {} : { scope: scopeFilter }),
-      limit: 100,
+      limit: LIST_LIMIT,
     }, signal));
   }, [api]);
 
@@ -211,16 +238,16 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     setDetail(await api.memory(memoryId, signal));
   }, [api]);
 
-  // Initial read: status, queue and the newest memories; the page loads only when opened.
+  // Initial read: availability and the newest memories; the page loads only when opened.
   useEffect(() => {
     const controller = new AbortController();
     setBusy(true);
     setError(null);
     void (async () => {
       try {
-        await Promise.all([loadStatus(controller.signal), loadList('', 'all', controller.signal)]);
+        await Promise.all([loadStatus(controller.signal), loadList('', controller.signal)]);
       } catch (failure) {
-        if (!controller.signal.aborted) setError(messageOf(failure));
+        if (!controller.signal.aborted) setError(failureText(failure, language));
       } finally {
         if (!controller.signal.aborted) { setBusy(false); setNow(Date.now()); }
       }
@@ -228,7 +255,7 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     return () => controller.abort();
   }, [loadStatus, loadList]);
 
-  // Debounced search and scope switch; an in-flight search is cancelled so results cannot arrive out of order.
+  // Debounced search; an in-flight search is cancelled so results cannot arrive out of order.
   const firstSearch = useRef(true);
   useEffect(() => {
     if (firstSearch.current) { firstSearch.current = false; return; }
@@ -239,65 +266,102 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
       void (async () => {
         try {
           setError(null);
-          await loadList(query, scope, controller.signal);
+          await loadList(query, controller.signal);
         } catch (failure) {
-          if (!controller.signal.aborted) setError(messageOf(failure));
+          if (!controller.signal.aborted) setError(failureText(failure, language));
         }
       })();
     }, 280);
     return () => { clearTimeout(timer); controller.abort(); };
-  }, [query, scope, loadList]);
+  }, [query, loadList, language]);
 
   useEffect(() => {
     if (selectedId === null) return;
     const controller = new AbortController();
-    setRevision(null);
-    setRevisionId(null);
+    setEditing(false);
+    setDraft('');
+    setReason('');
+    setNotice(null);
     void (async () => {
       try {
         setError(null);
         await loadDetail(selectedId, controller.signal);
       } catch (failure) {
-        if (!controller.signal.aborted) setError(messageOf(failure));
+        if (!controller.signal.aborted) setError(failureText(failure, language));
       }
     })();
     return () => controller.abort();
-  }, [selectedId, loadDetail]);
-
-  useEffect(() => {
-    if (detail === null || revisionId === null) return;
-    const controller = new AbortController();
-    setRevisionBusy(true);
-    void (async () => {
-      try {
-        setError(null);
-        setRevision(await api.revision(detail.memoryId, revisionId, controller.signal));
-      } catch (failure) {
-        if (!controller.signal.aborted) setError(messageOf(failure));
-      } finally {
-        if (!controller.signal.aborted) setRevisionBusy(false);
-      }
-    })();
-    return () => controller.abort();
-  }, [api, detail, revisionId]);
+  }, [selectedId, loadDetail, language]);
 
   const refresh = useCallback((): void => {
     const controller = new AbortController();
     setBusy(true);
     setError(null);
+    setNotice(null);
     void (async () => {
       try {
         await Promise.all([
           loadStatus(controller.signal),
-          loadList(query, scope, controller.signal),
+          loadList(query, controller.signal),
           ...(selectedId === null ? [] : [loadDetail(selectedId, controller.signal)]),
         ]);
         setNow(Date.now());
       } catch (failure) {
-        setError(messageOf(failure));
+        setError(failureText(failure, language));
       } finally { setBusy(false); }
     })();
-  }, [loadStatus, loadList, loadDetail, query, scope, selectedId]);
+  }, [loadStatus, loadList, loadDetail, query, selectedId, language]);
+
+  const beginEdit = useCallback((): void => {
+    if (detail === null) return;
+    setEditing(true);
+    setDraft(detail.content);
+    setReason('');
+    setError(null);
+    setNotice(null);
+  }, [detail]);
+
+  const cancelEdit = useCallback((): void => {
+    setEditing(false);
+    setDraft('');
+    setReason('');
+  }, []);
+
+  // Save writes through the Host RPC; on success both the edited detail and the list are re-read.
+  const save = useCallback(async (): Promise<void> => {
+    if (detail === null || saving) return;
+    if (draft.trim() === '') {
+      setError(translate(language, 'detail.emptyContent'));
+      return;
+    }
+    const controller = new AbortController();
+    setSaving(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await api.edit({
+        memoryId: detail.memoryId,
+        content: draft,
+        entryVersion: detail.entryVersion,
+        ...(reason.trim() === '' ? {} : { reason: reason.trim() }),
+      }, controller.signal);
+      setEditing(false);
+      setDraft('');
+      setReason('');
+      await Promise.all([loadDetail(detail.memoryId, controller.signal), loadList(query, controller.signal)]);
+      setNotice(translate(language, 'detail.saved'));
+      setNow(Date.now());
+    } catch (failure) {
+      if (!controller.signal.aborted) setError(failureText(failure, language));
+    } finally {
+      setSaving(false);
+    }
+  }, [api, detail, draft, reason, saving, language, loadDetail, loadList, query]);
+
+  const retry = useCallback((): void => {
+    if (detail !== null && editing) void save();
+    else refresh();
+  }, [detail, editing, save, refresh]);
 
   const copyId = useCallback((): void => {
     if (detail === null || typeof navigator === 'undefined' || navigator.clipboard === undefined) return;
@@ -307,8 +371,30 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     }).catch(() => undefined);
   }, [detail]);
 
-  const chips = useMemo(() => statusChips(status, language, now), [status, language, now]);
-  const availability = status === null ? null : status.grant === null ? 'unpaired' : status.grant.revoked ? 'revoked' : status.grant.expired ? 'expired' : null;
+  const chips = useMemo(() => [...statusChips(status, config, language, now), ...(status === null ? [] : [injectionChip(injection, language)])], [status, config, injection, language, now]);
+
+  const sizeOf = (value: unknown): number | null => Array.isArray(value) ? value.length : null;
+  const counts: Record<Tab, number | null> = {
+    overview: null,
+    memories: list === null ? null : list.items.length,
+    runtime: sizeOf(rules),
+    archives: sizeOf(archives),
+    sync: sync === null || sync === undefined ? null : sizeOf(sync.scopes),
+  };
+
+  const refreshSync = useCallback(async (): Promise<void> => {
+    setBusy(true);
+    try {
+      setSyncPass(await api.syncRefresh());
+      setSync(await api.sync().catch(() => null));
+      setSyncError(null);
+      setNotice(translate(language, 'sync.pass'));
+    } catch (failure) {
+      setError(failureText(failure, language));
+    } finally {
+      setBusy(false);
+    }
+  }, [api, language]);
 
   return (
     <div className="mwui-root">
@@ -321,7 +407,7 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
           </p>
         </div>
         <div className="mwui-actions">
-          <button type="button" className="mwui-button" onClick={refresh} disabled={busy}>
+          <button type="button" className="mwui-button" onClick={refresh} disabled={busy || saving}>
             {busy ? <span className="mwui-loading" /> : null}
             {busy ? translate(language, 'toolbar.loading') : translate(language, 'toolbar.refresh')}
           </button>
@@ -331,20 +417,37 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
       {error === null ? null : (
         <div className="mwui-banner" data-tone="bad" role="alert">
           <span className="mwui-banner-text">{translate(language, 'state.error')}: {error}</span>
-          <button type="button" className="mwui-button" onClick={refresh}>{translate(language, 'toolbar.retry')}</button>
+          <button type="button" className="mwui-button" onClick={retry}>{translate(language, 'toolbar.retry')}</button>
         </div>
       )}
 
-      {availability === null || status === null ? null : (
-        <div className="mwui-banner" data-tone="warn" role="status">
+      {notice === null ? null : (
+        <div className="mwui-banner" data-tone="ok" role="status">
+          <span className="mwui-banner-text">{notice}</span>
+        </div>
+      )}
+
+      {status === null || status.status === 'ok' ? null : (
+        <div className="mwui-banner" data-tone={status.status === 'unauthorized' ? 'warn' : 'bad'} role="status">
           <span className="mwui-banner-text">
-            {availability === 'unpaired' ? reasonText('unpaired', language) : availability === 'revoked' ? reasonText('revoked', language) : reasonText('license_expired', language)}
+            {availabilityText(status.status, language)}
+            {status.reason === undefined ? '' : ` · ${codeText(status.reason, language)} (${status.reason})`}
           </span>
         </div>
       )}
 
       <ChipRow chips={chips} ariaLabel={translate(language, 'status.title')} />
 
+      <nav className="mwui-tabs" aria-label={translate(language, 'tabs.label')}>
+        {TAB_ORDER.map(id => (
+          <button key={id} type="button" className="mwui-tab" data-active={tab === id ? 'true' : 'false'} onClick={() => setTab(id)}>
+            {translate(language, TAB_KEYS[id])}
+            {counts[id] === null ? '' : ` ${counts[id]}`}
+          </button>
+        ))}
+      </nav>
+
+      {tab === 'memories' ? (
       <div className="mwui-body">
         <section className="mwui-pane" aria-label={translate(language, 'list.title')}>
           <div className="mwui-pane-header">
@@ -360,23 +463,13 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
               aria-label={translate(language, 'search.placeholder')}
               onChange={event => setQuery(event.target.value)}
             />
-            <select
-              className="mwui-input mwui-select"
-              value={scope}
-              aria-label={translate(language, 'filter.scope')}
-              onChange={event => setScope(event.target.value as ScopeFilter)}
-            >
-              <option value="all">{translate(language, 'filter.all')}</option>
-              <option value="project">{translate(language, 'filter.project')}</option>
-              <option value="global">{translate(language, 'filter.global')}</option>
-            </select>
             {query === '' ? null : (
               <button type="button" className="mwui-button" onClick={() => setQuery('')}>{translate(language, 'search.clear')}</button>
             )}
           </div>
           <ul className="mwui-list">
-            {list === null || list.status !== 'ok'
-              ? <li className="mwui-empty">{list === null ? translate(language, 'list.loading') : `${availabilityText(list.status, language)} · ${reasonText(list.reason, language)}`}</li>
+            {list === null
+              ? <li className="mwui-empty">{translate(language, 'list.loading')}</li>
               : list.items.length === 0
                 ? <li className="mwui-empty">{translate(language, 'list.empty')}</li>
                 : list.items.map(item => (
@@ -402,43 +495,35 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
               <DetailView
                 detail={detail}
                 language={language}
-                revision={revision}
-                revisionBusy={revisionBusy}
+                editing={editing}
+                draft={draft}
+                reason={reason}
+                saving={saving}
                 copied={copied}
-                onSelectRevision={setRevisionId}
+                onChangeDraft={setDraft}
+                onChangeReason={setReason}
+                onBeginEdit={beginEdit}
+                onCancel={cancelEdit}
+                onSave={() => { void save(); }}
                 onCopyId={copyId}
               />
             )}
         </section>
       </div>
-
-      <section className="mwui-intents" aria-label={translate(language, 'intents.title')}>
-        <div className="mwui-pane-header" style={{ border: 'none', background: 'transparent', padding: 0 }}>
-          <span className="mwui-pane-title">{translate(language, 'intents.title')}</span>
-          <span className="mwui-pane-count">{intentsSummary(intents, language)}</span>
-        </div>
-        {intents === null || intents.items.length === 0
-          ? <div className="mwui-intent">{translate(language, 'intents.empty')}</div>
-          : intents.items.slice(-6).map(intent => (
-            <div key={intent.intentId} className="mwui-intent">
-              <span className="mwui-intent-kind">{intent.kind}</span>
-              <span>{intent.state}</span>
-              {intent.sessionId === undefined ? null : <span>{translate(language, 'intents.session')} {intent.sessionId}</span>}
-              <span className="mwui-mono">{formatDateTime(intent.createdAt)}</span>
-            </div>
-          ))}
-      </section>
+      ) : tab === 'overview' ? (
+        <OverviewPanel status={status} config={config} injection={injection} memories={list} rules={rules} archives={archives} sync={sync} language={language} now={now} onOpen={setTab} />
+      ) : tab === 'runtime' ? (
+        <RuntimePanel rules={rules} error={rulesError} selected={ruleId} language={language} onSelect={setRuleId} />
+      ) : tab === 'archives' ? (
+        <ArchivesPanel archives={archives} error={archivesError} selected={archiveId} language={language} onSelect={setArchiveId} />
+      ) : (
+        <SyncPanel sync={sync} error={syncError} pass={syncPass} language={language} busy={busy} onRefresh={() => { void refreshSync(); }} />
+      )}
 
       <footer className="mwui-footer">
         <span>{translate(language, 'footer.note')}</span>
         <span className="mwui-spacer" />
-        {config === null ? null : (
-          <span className="mwui-mono" title={config.bridgeUrl}>
-            {translate(language, 'footer.bridge')}: {config.bridgeUrl}
-            {config.hostId === null ? '' : ` · ${config.hostId}`}
-          </span>
-        )}
-        <span>{status === null ? '' : relativeTime(status.generatedAt, now, language)}</span>
+        {config === null ? null : <span className="mwui-mono">{config.serverUrl}</span>}
       </footer>
     </div>
   );

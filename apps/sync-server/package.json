@@ -1,0 +1,12 @@
+{
+  "name": "@mnemoweave/sync-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@mnemoweave/application": "workspace:*",
+    "@mnemoweave/contracts": "workspace:*",
+    "@mnemoweave/protocols-sync-http": "workspace:*",
+    "@mnemoweave/sync-store": "workspace:*"
+  }
+}

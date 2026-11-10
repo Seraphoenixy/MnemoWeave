@@ -1,4 +1,6 @@
-import type { RpcResult, UiConfigView, UiIntents, UiMemoryDetail, UiMemoryList, UiRevision, UiStatus } from '../shared/contract.ts';
+import type {
+  RpcResult, UiArchive, UiConfigView, UiEditInput, UiEditResult, UiInjection, UiMemoryDetail, UiMemoryList, UiRule, UiStatus, UiSyncPass, UiSyncStatus,
+} from '../shared/contract.ts';
 import { RPC_CHANNEL } from '../shared/contract.ts';
 import type { ClientConnection } from './dsh-types.ts';
 
@@ -16,7 +18,7 @@ function unwrap<T>(result: RpcResult<T>): T {
   return result.value;
 }
 
-/** Every read the page makes goes through the Host; the page never sees the Bridge token. */
+/** Every read and the edit call go through the Host; the page never sees the Server token. */
 export function createApi(connection: ClientConnection) {
   const call = async <T>(endpoint: string, payload: unknown, signal?: AbortSignal): Promise<T> => {
     const result = signal === undefined
@@ -27,10 +29,14 @@ export function createApi(connection: ClientConnection) {
   return {
     status: (signal?: AbortSignal): Promise<UiStatus> => call<UiStatus>('status', {}, signal),
     config: (signal?: AbortSignal): Promise<UiConfigView> => call<UiConfigView>('config', {}, signal),
-    memories: (input: { query?: string | undefined; limit?: number | undefined; scope?: 'project' | 'global' | undefined; projectId?: string | undefined }, signal?: AbortSignal): Promise<UiMemoryList> => call<UiMemoryList>('memories', input, signal),
+    memories: (input: { query?: string; limit: number }, signal?: AbortSignal): Promise<UiMemoryList> => call<UiMemoryList>('memories', input, signal),
     memory: (memoryId: string, signal?: AbortSignal): Promise<UiMemoryDetail> => call<UiMemoryDetail>('memory', { memoryId }, signal),
-    revision: (memoryId: string, revisionId: string, signal?: AbortSignal): Promise<UiRevision> => call<UiRevision>('revision', { memoryId, revisionId }, signal),
-    intents: (signal?: AbortSignal): Promise<UiIntents> => call<UiIntents>('intents', {}, signal),
+    edit: (input: UiEditInput, signal?: AbortSignal): Promise<UiEditResult> => call<UiEditResult>('edit', input, signal),
+    injection: (signal?: AbortSignal): Promise<UiInjection | null> => call<UiInjection | null>('injection', {}, signal),
+    rules: (signal?: AbortSignal): Promise<UiRule[]> => call<UiRule[]>('rules', {}, signal),
+    archives: (signal?: AbortSignal): Promise<UiArchive[]> => call<UiArchive[]>('archives', {}, signal),
+    sync: (signal?: AbortSignal): Promise<UiSyncStatus> => call<UiSyncStatus>('sync', {}, signal),
+    syncRefresh: (signal?: AbortSignal): Promise<UiSyncPass> => call<UiSyncPass>('syncRefresh', {}, signal),
   };
 }
 

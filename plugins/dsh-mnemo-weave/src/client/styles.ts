@@ -73,6 +73,12 @@ export const CSS = `
 .mwui-subrow-btn[data-active="true"]{background:var(--mwui-surface);box-shadow:inset 0 0 0 1px var(--mwui-accent)}
 .mwui-subrow-btn .mwui-subrow-main{font-weight:600}
 .mwui-subrow-btn .mwui-subrow-tail{margin-left:auto}
+.mwui-edit{display:flex;flex-direction:column;gap:8px}
+.mwui-textarea{min-height:140px;resize:vertical;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;
+  font-size:12px;line-height:1.6}
+.mwui-edit-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.mwui-edit-hint{color:var(--mwui-muted);font-size:11.5px}
+.mwui-edit-hint[data-tone="warn"]{color:rgb(210,153,34)}
 .mwui-revision{display:flex;flex-direction:column;gap:8px}
 .mwui-footer{display:flex;align-items:center;gap:10px;color:var(--mwui-muted);font-size:11px}
 .mwui-footer .mwui-spacer{flex:1}
@@ -83,6 +89,27 @@ export const CSS = `
   border-top-color:var(--mwui-accent);animation:mwui-spin .8s linear infinite;vertical-align:-1px;margin-right:6px}
 @keyframes mwui-spin{to{transform:rotate(360deg)}}
 .mwui-sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);border:0}
+.mwui-tabs{display:flex;gap:4px;flex-wrap:wrap;padding:2px;border:1px solid var(--mwui-border);border-radius:10px;background:var(--mwui-surface)}
+.mwui-tab{appearance:none;border:1px solid transparent;background:transparent;color:inherit;font:inherit;font-size:12px;
+  padding:5px 12px;border-radius:8px;cursor:pointer;white-space:nowrap}
+.mwui-tab:hover{background:var(--mwui-hover, rgba(127,127,127,.12))}
+.mwui-tab[data-active="true"]{border-color:var(--mwui-accent);font-weight:650}
+.mwui-page{display:flex;flex-direction:column;gap:12px;flex:1;min-height:0;overflow:auto}
+.mwui-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.mwui-card{display:flex;flex-direction:column;gap:2px;border:1px solid var(--mwui-border);border-radius:12px;padding:10px 12px;background:var(--mwui-surface)}
+.mwui-card-label{font-size:11.5px;color:var(--mwui-muted)}
+.mwui-card-value{font-size:22px;font-weight:650;line-height:1.15}
+.mwui-card-hint{font-size:11px;color:var(--mwui-muted)}
+.mwui-pane-body{display:flex;flex-direction:column;gap:6px;padding:10px 12px}
+.mwui-kv{display:flex;gap:10px;align-items:baseline;justify-content:space-between;font-size:12px}
+.mwui-kv>span:first-child{color:var(--mwui-muted)}
+.mwui-kv[data-tone="ok"]>span:last-child{color:rgb(63,185,80)}
+.mwui-kv[data-tone="warn"]>span:last-child{color:rgb(210,153,34)}
+.mwui-muted{color:var(--mwui-muted)}
+.mwui-table{width:100%;border-collapse:collapse;font-size:11.5px}
+.mwui-table th{text-align:left;font-weight:600;color:var(--mwui-muted);padding:4px 8px;border-bottom:1px solid var(--mwui-border);white-space:nowrap}
+.mwui-table td{padding:4px 8px;border-bottom:1px dashed var(--mwui-border);vertical-align:top}
+.mwui-table td[data-tone="warn"]{color:rgb(210,153,34);font-weight:600}
 `;
 
 /** Inject the stylesheet once per document; a second client instance reuses the same tag. */

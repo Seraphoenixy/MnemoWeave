@@ -1,7 +1,7 @@
 import { mayRead } from './access.ts';
 import { randomUUID } from 'node:crypto';
 import { MnemoWeaveError, ReadGrant, RerankOutput, View } from '../../contracts/src/index.ts';
-import type { ReadGrantRecord, ViewRecord } from '../../contracts/src/index.ts';
+import type { ReadGrantRecord, ViewRecord, ViewRuleRecord } from '../../contracts/src/index.ts';
 import type { MemoryCatalogReader } from './catalog-ports.ts';
 import type { RerankGateway } from './workflow-ports.ts';
 
@@ -12,6 +12,7 @@ import type { RerankGateway } from './workflow-ports.ts';
 export interface ViewSource {
   readonly catalogReader?: MemoryCatalogReader | undefined;
   recall(input: { query: string; limit: number }): Promise<{ memories: { id: string; content: string; score?: number | undefined }[]; complete?: boolean | undefined }>;
+  recallDetailed?(input: { query: string; limit: number }): Promise<{ memories: { id: string; content: string; score?: number | undefined }[]; complete?: boolean | undefined; unregistered: string[] }>;
   readMemory(input: { memoryId: string; revisionId?: string }): Promise<{ content: string }>;
 }
 
@@ -21,6 +22,8 @@ export interface ViewSource {
  */
 export function estimateTokens(text: string): number { return Math.ceil(Buffer.byteLength(text, 'utf8') / 3); }
 export const DEFAULT_INJECTION_BUDGET_TOKENS = 4096;
+/** Rules are injected whole or not at all; this budget rejects enabling, it never truncates. */
+export const RULE_BUDGET_TOKENS = 1024;
 /** Reserved for envelope metadata (ids, scope note, budget block) on top of memory content. */
 export const ENVELOPE_RESERVE_TOKENS = 96;
 /** Minimum excerpt budget for a normal pinned memory; below this it is excluded as budget. */
@@ -45,7 +48,7 @@ export function deepFreezeView<T>(view: T): T {
 }
 
 /**
- * Assembles an immutable View (ADR-013 B): structured, generation-stamped, never mutated
+ * Assembles an immutable View: structured, generation-stamped, never mutated
  * after delivery. Grant, publication state and budget are all re-checked right before the
  * View is returned; rerank results are bound to a generation and stale ones are rejected.
  */
@@ -54,11 +57,13 @@ export class ViewAssembler {
   private readonly reranker: RerankGateway | undefined;
   private readonly revocations: GrantRevocationSource | undefined;
   private readonly budgetTokens: number;
+  private readonly rules: ((input: { projectId?: string }) => ViewRuleRecord[]) | undefined;
   private generation: number;
-  constructor(app: ViewSource, options: { reranker?: RerankGateway; revocations?: GrantRevocationSource; budgetTokens?: number; generation?: number } = {}) {
+  constructor(app: ViewSource, options: { reranker?: RerankGateway; revocations?: GrantRevocationSource; budgetTokens?: number; generation?: number; rules?: (input: { projectId?: string }) => ViewRuleRecord[] } = {}) {
     if (!app.catalogReader) throw new Error('View assembly requires the publication catalog');
     this.app = app; this.reranker = options.reranker; this.revocations = options.revocations;
     this.budgetTokens = options.budgetTokens ?? DEFAULT_INJECTION_BUDGET_TOKENS;
+    this.rules = options.rules;
     this.generation = options.generation ?? 0;
   }
   async assemble(input: {
@@ -73,8 +78,20 @@ export class ViewAssembler {
     if (input.projectId && !grant.projects.includes('*') && !grant.projects.includes(input.projectId)) throw new MnemoWeaveError('UNAUTHORIZED');
     const generation = this.generation++;
     const query = input.query;
-    const recall = query ? await this.app.recall({ query, limit: input.limit ?? 10 }) : { memories: [], complete: true };
+    // Rules are read before assembly and delivered whole; exceeding the rule budget omits
+    // the block entirely instead of trimming a rule.
+    const ruleRows = this.rules?.(input) ?? [];
+    const ruleUsed = ruleRows.reduce((sum, rule) => sum + estimateTokens(rule.body) + 8, 0);
+    const rulesExceeded = ruleUsed > RULE_BUDGET_TOKENS;
+    const rules = rulesExceeded ? [] : ruleRows;
+    const recall = query
+      ? (this.app.recallDetailed
+        ? await this.app.recallDetailed({ query, limit: input.limit ?? 10 })
+        : { ...(await this.app.recall({ query, limit: input.limit ?? 10 })), unregistered: [] as string[] })
+      : { memories: [] as { id: string; content: string; score?: number }[], complete: true, unregistered: [] as string[] };
     const excluded: ViewRecord['excluded'] = [];
+    // A Provider hit this machine never published is reported, not silently dropped.
+    for (const providerId of recall.unregistered ?? []) excluded.push({ memoryId: providerId, reason: 'unregistered' });
     // Dynamic candidates: visible per the catalog; version state re-checked again before delivery.
     let dynamic = recall.memories.filter(memory => this.app.catalogReader!.currentMemoryIds(memory.id).some(id => {
       const descriptor = this.safeDescriptor(id);
@@ -109,7 +126,7 @@ export class ViewAssembler {
         }
       }
     }
-    // Pinned tiers (ADR-024 R18-4): critical stays complete, normal becomes a traceable excerpt.
+    // Pinned tiers: critical stays complete, normal becomes a traceable excerpt.
     const pinned: ViewRecord['memories'] = [];
     const seenPinned = new Set<string>();
     for (const item of input.pinned ?? []) {
@@ -150,7 +167,9 @@ export class ViewAssembler {
     const pinnedIds = new Set(pinned.map(entry => entry.memoryId));
     for (const memory of dynamic) {
       const logicalIds = this.app.catalogReader!.currentMemoryIds(memory.id);
-      if (!logicalIds.length) { excluded.push({ memoryId: memory.id, reason: 'not_visible' }); continue; }
+      // The Provider answered with an id this machine never registered: it is not hidden
+      // by state or grant, it was never published here.
+      if (!logicalIds.length) { excluded.push({ memoryId: memory.id, reason: 'unregistered' }); continue; }
       for (const logicalId of logicalIds) {
         if (pinnedIds.has(logicalId)) continue;
         const descriptor = this.safeDescriptor(logicalId);
@@ -177,18 +196,20 @@ export class ViewAssembler {
     }
     // Delivery checks: grant may have been revoked or expired while content was assembled.
     this.checkGrant(grant);
-    const usedTokens = memories.reduce((sum, entry) => sum + usedFor(entry), 0) + envelopeReserve;
+    const usedTokens = memories.reduce((sum, entry) => sum + usedFor(entry), 0) + envelopeReserve + (rulesExceeded ? 0 : ruleUsed);
     const view = View.parse({
       viewId: randomUUID(), generation, createdAt: new Date().toISOString(),
       grantId: grant.grantId, query: query ?? null,
       scopeNote: { projects: [...grant.projects], globalIncluded: grant.globalIncluded },
       budget: { limitTokens: budgetTokens, usedTokens, estimator: 'utf8-bytes-3', estimated: true, envelopeReserveTokens: envelopeReserve },
       memories,
+      ...(rules.length > 0 ? { rules } : {}),
+      ...(ruleRows.length > 0 ? { rulesBudget: { limitTokens: RULE_BUDGET_TOKENS, usedTokens: ruleUsed, exceeded: rulesExceeded } } : {}),
       excluded,
       complete: excluded.every(item => item.reason !== 'budget') && recall.complete !== false,
       rerank: rerankStatus,
     });
-    // ADR-013 R7-3: the delivered View is deeply frozen; any change requires a new assembly generation.
+    // The delivered View is deeply frozen; any change requires a new assembly generation.
     return deepFreezeView(view);
   }
   /** Late results may never rewrite a delivered view: the generation binding must match exactly. */

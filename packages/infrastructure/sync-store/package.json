@@ -1,0 +1,7 @@
+{
+  "name": "@mnemoweave/sync-store",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": { "@mnemoweave/application": "workspace:*", "@mnemoweave/contracts": "workspace:*" }
+}

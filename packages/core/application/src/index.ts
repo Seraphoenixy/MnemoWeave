@@ -1,4 +1,9 @@
 import { mayRead, assertGrant } from './access.ts';
+
+export * from './sync.ts';
+export * from './sync-apply.ts';
+export * from './rules.ts';
+export * from './local-write.ts';
 import type { ReadGrantRecord } from '../../contracts/src/index.ts';
 import { MnemoWeaveError, RecallInput, RecallOutput, ProviderHealth, RememberInput, CandidateIdInput, HumanReviewInput, RetryInput, MemoryIdInput, PublishedMemoryOutput,ConflictResolutionInput,ConflictIdInput,CancelVersionInput, ReviewCompleteInput, ReviewDueItem, ReviewDueOutput } from '../../contracts/src/index.ts';
 import type {ConflictResolutionRequest} from '../../contracts/src/index.ts';
@@ -19,6 +24,8 @@ export interface CandidateRepository {
   submit(request: RememberRequest): CandidateRecord;
   get(candidateId: string): CandidateRecord;
   readonly catalog?: MemoryCatalogReader;
+  /** Synced version of a logical memory; absent when sync has never applied it (version 0). */
+  entryVersion?(memoryId: string): number;
 }
 export interface ReviewRepository extends CandidateRepository, WorkflowRepository {
   amend(id: string, request: RememberRequest, actor: string, reason: string): CandidateRecord;
@@ -38,6 +45,16 @@ export class MemoryApplication {
   get catalogReader(): MemoryCatalogReader | undefined { return this.candidates?.catalog; }
   async health(): Promise<Health> { return ProviderHealth.parse(await this.provider.health()); }
   async recall(input: unknown, grant?: ReadGrantRecord): Promise<RecallResult> {
+    const { unregistered: _unregistered, ...result } = await this.recallDetailed(input, grant);
+    return result;
+  }
+
+  /**
+   * Recall plus the Provider ids this machine never published. The View reports them as
+   * `excluded: 'unregistered'` instead of dropping them silently; `/v1/recall` keeps the
+   * wire shape and does not expose the extra list.
+   */
+  async recallDetailed(input: unknown, grant?: ReadGrantRecord): Promise<RecallResult & { unregistered: string[] }> {
     if (grant) assertGrant(grant);
     const request = RecallInput.parse(input);
     if (this.candidates?.catalog) {
@@ -46,6 +63,7 @@ export class MemoryApplication {
       // pool can no longer push matching results out of a fixed 100-record fetch.
       const catalog = this.candidates.catalog;
       const visible = new Set(catalog.visibleProviderIds().filter(id => !grant || catalog.currentMemoryIds(id).some(logicalId => mayRead(grant, catalog.get(logicalId)))));
+      const unmatched = new Set<string>();
       const page = 100;
       const maxWindow = 1000;
       const selected: RecallResult['memories'] = [];
@@ -57,7 +75,8 @@ export class MemoryApplication {
         exhausted = raw.memories.length < window;
         for (const memory of raw.memories) {
           if (selected.length >= request.limit) break;
-          if (!visible.has(memory.id) || picked.has(memory.id)) continue;
+          if (!visible.has(memory.id)) { if (catalog.currentMemoryIds(memory.id).length === 0) unmatched.add(memory.id); continue; }
+          if (picked.has(memory.id)) continue;
           picked.add(memory.id);
           selected.push(memory);
         }
@@ -65,10 +84,10 @@ export class MemoryApplication {
       }
       if (grant) assertGrant(grant);
       const authorized = selected.filter(memory => !grant || catalog.currentMemoryIds(memory.id).some(id => { const descriptor = catalog.get(id); return descriptor.state === 'active' && mayRead(grant, descriptor); }));
-      return RecallOutput.parse({ memories: authorized, complete: exhausted });
+      return { ...RecallOutput.parse({ memories: authorized, complete: exhausted }), unregistered: [...unmatched] };
     }
     if (grant) throw new MnemoWeaveError('REVIEW_REQUIRED');
-    return RecallOutput.parse(await this.provider.recall(request));
+    return { ...RecallOutput.parse(await this.provider.recall(request)), unregistered: [] };
   }
   async remember(input: unknown, grant?: ReadGrantRecord): Promise<CandidateRecord> {
     if (!this.candidates) throw new MnemoWeaveError('REVIEW_REQUIRED');
@@ -96,7 +115,7 @@ export class MemoryApplication {
     if (actual.id !== revision.providerMemoryId || createHash('sha256').update(actual.content).digest('hex') !== revision.contentHash) throw new MnemoWeaveError('PROVIDER_INTEGRITY');
     if (grant) assertGrant(grant);
     const visible = grant ? { ...descriptor, revisions: descriptor.revisions.filter(item => mayRead(grant, item)), relations: descriptor.relations.filter(item => [item.sourceMemoryId, item.targetMemoryId].every(id => mayRead(grant, this.candidates!.catalog!.get(id)))), conflicts: descriptor.conflicts.filter(item => mayRead(grant, this.candidates!.get(item.candidateId).request)) } : descriptor;
-    return PublishedMemoryOutput.parse({ ...visible, selectedRevisionId: revisionId,selectedRevision:revision, content: actual.content });
+    return PublishedMemoryOutput.parse({ ...visible, selectedRevisionId: revisionId,selectedRevision:revision, content: actual.content, entryVersion: this.candidates.entryVersion?.(request.memoryId) ?? 0 });
   }
   async readConflict(input:unknown, grant?: ReadGrantRecord){
     if(!this.candidates?.catalog)throw new MnemoWeaveError('REVIEW_REQUIRED');

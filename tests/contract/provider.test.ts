@@ -47,3 +47,29 @@ test('Bounded reconciliation never treats a truncated wildcard query as proof of
   const provider = new MnemonCliProvider({ binary: process.execPath, dataDir: resolve('work/test-contract'), store: 'acceptance', runner: async args => args[0] === '--version' ? 'mnemon version 0.2.13' : JSON.stringify(rows) });
   assert.deepEqual(await provider.inspectExact('%'), { matches: [], complete: false });
 });
+test('Sync Remember passes the change identity as source and bypasses duplicate detection', async () => {
+  const calls: string[][] = [];
+  const changeId = '11111111-1111-4111-8111-111111111111';
+  const provider = new MnemonCliProvider({ binary: process.execPath, dataDir: resolve('work/test-contract'), store: 'acceptance', runner: async args => {
+    calls.push(args);
+    return args[0] === '--version' ? 'mnemon version 0.2.13' : '{"id":"native-1","action":"added"}';
+  } });
+  assert.deepEqual(await provider.syncRemember('跨机写入', changeId, 2), { id: 'native-1', action: 'added', replacedId: null });
+  assert.deepEqual(calls[1], ['--data-dir', resolve('work/test-contract'), '--store', 'acceptance', 'remember', '--source', `mnemoweave:${changeId}:2`, '--no-diff', '--', '跨机写入']);
+  await assert.rejects(provider.syncRemember('x', 'not-a-uuid', 2), (error: unknown) => error instanceof MnemoWeaveError && error.code === 'INVALID_INPUT');
+  await assert.rejects(provider.syncRemember('x'.repeat(8001), changeId, 1), (error: unknown) => error instanceof MnemoWeaveError && error.code === 'INVALID_INPUT');
+});
+test('Forget and related read back native state without inventing edges', async () => {
+  const calls: string[][] = [];
+  const provider = new MnemonCliProvider({ binary: process.execPath, dataDir: resolve('work/test-contract'), store: 'acceptance', runner: async args => {
+    calls.push(args);
+    if (args[0] === '--version') return 'mnemon version 0.2.13';
+    return args.includes('forget') ? '{"id":"native-1","status":"deleted"}' : JSON.stringify([{ id: 'native-old', content: '旧版本', depth: 1, via_edge_type: 'supersedes' }]);
+  } });
+  assert.deepEqual(await provider.forget('native-1'), { id: 'native-1', status: 'deleted' });
+  assert.deepEqual(calls[1], ['--data-dir', resolve('work/test-contract'), '--store', 'acceptance', 'forget', 'native-1']);
+  assert.deepEqual(await provider.related('native-1', 'supersedes', 1), [{ id: 'native-old', content: '旧版本', depth: 1, viaEdgeType: 'supersedes' }]);
+  assert.deepEqual(calls[3], ['--data-dir', resolve('work/test-contract'), '--store', 'acceptance', 'related', 'native-1', '--edge', 'supersedes', '--depth', '1']);
+  await assert.rejects(provider.related('native-1', 'unknown' as never), (error: unknown) => error instanceof MnemoWeaveError && error.code === 'INVALID_INPUT');
+  await assert.rejects(provider.related('native-1', 'semantic', 6), (error: unknown) => error instanceof MnemoWeaveError && error.code === 'INVALID_INPUT');
+});

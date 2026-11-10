@@ -1,15 +1,27 @@
-import { PinInput, RuntimeContextInput } from '../../../core/contracts/src/index.ts';
-import type { RuntimeContext, PinRecord } from '../../../core/contracts/src/index.ts';
+import { PinInput, RuntimeContextInput, RuleCreate, RuleEdit } from '../../../core/contracts/src/index.ts';
+import type { MemoryListRecord, MemoryEditRecord, RuntimeContext, PinRecord } from '../../../core/contracts/src/index.ts';
 import { createServer } from 'node:http';
-import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import type { MemoryApplication } from '../../../core/application/src/index.ts';
-import { MnemoWeaveError, openapi, publicError } from '../../../core/contracts/src/index.ts';
-import type { ErrorCode, ReadGrantRecord, StorageStatusRecord, ViewRecord } from '../../../core/contracts/src/index.ts';
-import type { PartitionSummary, SyncChange } from '../../../infrastructure/governance/src/sync-source.ts';
+import { MnemoWeaveError, openapi, publicError, statusForCode } from '../../../core/contracts/src/index.ts';
+import type { ArchiveCreateInput, ArchiveListRecord, ArchiveRecordValue, InjectionReportRecord, RuleCreateInput, RuleEditInput, RuleListRecord, RuleRecordValue, StorageStatusRecord, SyncRefreshValue, SyncStatusValue, ViewRecord } from '../../../core/contracts/src/index.ts';
+
+/** A host may declare its project once per request; the body may repeat it but not contradict it. */
+const PROJECT_HEADER = 'x-mnemoweave-project';
+function withProjectHeader(headers: Record<string, string | string[] | undefined>, input: unknown): unknown {
+  const raw = headers[PROJECT_HEADER];
+  const declared = (Array.isArray(raw) ? raw[0] : raw)?.trim();
+  if (!declared) return input;
+  if (declared.length > 200) throw new MnemoWeaveError('INVALID_INPUT');
+  if (typeof input !== 'object' || input === null) return input;
+  const body = input as Record<string, unknown>;
+  const current = body['projectId'];
+  if (current !== undefined && current !== declared) throw new MnemoWeaveError('INVALID_INPUT');
+  return { ...body, projectId: declared };
+}
 
 /** Single source of truth for the served routes; the OpenAPI document must mirror this list. */
-export const httpRoutes: ReadonlyArray<{ method: 'GET' | 'POST'; path: string }> = [
+export const httpRoutes: ReadonlyArray<{ method: 'GET' | 'POST' | 'PATCH'; path: string }> = [
   { method: 'POST', path: '/v1/runtime/context' },
   { method: 'POST', path: '/v1/runtime/pins' },
   { method: 'POST', path: '/v1/runtime/projects' },
@@ -19,64 +31,62 @@ export const httpRoutes: ReadonlyArray<{ method: 'GET' | 'POST'; path: string }>
   { method: 'GET', path: '/v1/storage' },
   { method: 'GET', path: '/v1/reviews/due' },
   { method: 'GET', path: '/v1/candidates/{candidateId}' },
+  { method: 'GET', path: '/v1/memories' },
   { method: 'GET', path: '/v1/memories/{memoryId}' },
   { method: 'GET', path: '/v1/conflicts/{caseId}' },
   { method: 'POST', path: '/v1/recall' },
   { method: 'POST', path: '/v1/view' },
+  { method: 'POST', path: '/v1/inject' },
+  { method: 'POST', path: '/v1/events' },
+  { method: 'POST', path: '/v1/session/close' },
   { method: 'POST', path: '/v1/remember' },
   { method: 'POST', path: '/v1/review' },
   { method: 'POST', path: '/v1/retry' },
   { method: 'POST', path: '/v1/conflicts/resolve' },
   { method: 'POST', path: '/v1/versions/cancel' },
   { method: 'POST', path: '/v1/reviews/complete' },
-  { method: 'GET', path: '/v1/sync/changes' },
-  { method: 'GET', path: '/v1/sync/snapshot' },
-  { method: 'GET', path: '/v1/sync/verify' },
-  { method: 'GET', path: '/v1/sync/watermark' },
-  { method: 'GET', path: '/v1/sync/grant' },
-  { method: 'POST', path: '/v1/sync/grant' },
-  { method: 'POST', path: '/v1/sync/revoke' },
-  { method: 'POST', path: '/v1/sync/intents' },
+  { method: 'PATCH', path: '/v1/memories/{memoryId}' },
+  { method: 'GET', path: '/v1/sync/status' },
+  { method: 'POST', path: '/v1/sync/refresh' },
+  { method: 'GET', path: '/v1/injections/latest' },
+  { method: 'GET', path: '/v1/rules' },
+  { method: 'POST', path: '/v1/rules' },
+  { method: 'PATCH', path: '/v1/rules/{ruleId}' },
+  { method: 'GET', path: '/v1/archives' },
+  { method: 'POST', path: '/v1/archives' },
 ];
 
 /** Error code → HTTP status mapping from the contract error model. */
-export function statusForCode(code: ErrorCode): number {
-  return code === 'UNAUTHORIZED' ? 401
-    : code === 'INVALID_INPUT' ? 400
-    : code === 'NOT_FOUND' ? 404
-    : ['REVIEW_REQUIRED', 'IDEMPOTENCY_CONFLICT', 'INVALID_STATE', 'VIEW_BUDGET_EXCEEDED', 'QUOTA_EXCEEDED'].includes(code) ? 409
-    : 503;
-}
+export { statusForCode };
 
 /**
- * Server-side sync transport (WP6/WP7 wiring). The Bridge reaches the ordered change
- * stream, curated snapshots, partition summaries, pairing grants and intent intake here.
+ * Everything a Host client reaches over HTTP. Hosts authenticate with the service token and
+ * name themselves through `x-mnemoweave-host`; there is no local replica and no pairing.
  */
-export interface SyncHttpEndpoints {
-  currentGrant(hostId: string): ReadGrantRecord | undefined;
-  issueGrant(hostId: string, projects: string[], globalIncluded: boolean, ttlMs?: number): Promise<ReadGrantRecord>;
-  revoke(hostId: string, global: boolean): Promise<void>;
-  isRevoked(hostId: string): Promise<boolean>;
-  watermark(): number;
-  scoped?: boolean;
-  requireHostCredential?: boolean;
-  changes(sinceSeq: number, hostId?: string): Promise<{ changes: SyncChange[]; windowOldestSeq: number; latestSeq: number }>;
-  snapshot(hostId?: string): Promise<{ path: string; latestSeq: number }>;
-  partitionSummaries(hostId?: string): Promise<PartitionSummary[]>;
-  submitIntent(hostId: string, intent: { intentId: string; kind: string; payload: Record<string, unknown>; baselineRef: string | undefined }): Promise<{ status: 'accepted' | 'isolated'; reference?: string }>;
-}
-
-export interface RuntimeHttpEndpoints {
+export interface ClientHttpEndpoints {
+  view(hostId: string, input: unknown): Promise<ViewRecord>;
   context(hostId: string, input: ReturnType<typeof RuntimeContextInput.parse>): RuntimeContext;
   pin(input: PinRecord): void;
   register(projectId: string): void;
+  closeSession(hostId: string, sessionId: string): void;
+  events(hostId: string, input: unknown): { status: 'stored' | 'replayed' | 'skipped'; eventId: string };
+  memories(query: { query?: string; limit: number }): Promise<MemoryListRecord>;
+  editMemory(memoryId: string, input: { content: string; reason?: string; entryVersion: number }): Promise<MemoryEditRecord>;
+  /** Operator diagnostics; absent when sync is not configured. */
+  syncStatus?(): Promise<SyncStatusValue>;
+  syncRefresh?(): Promise<SyncRefreshValue>;
+  /** Last injection result, or null before any injection happened. */
+  lastInjection?(hostId?: string, sessionId?: string): Promise<InjectionReportRecord | null>;
+  rules?(query: { scope: 'global' | 'project' | 'all'; projectId?: string }): Promise<RuleListRecord>;
+  archives?(query: { projectId?: string; includeWithdrawn?: boolean }): Promise<ArchiveListRecord>;
+  createRule?(input: RuleCreateInput): Promise<RuleRecordValue>;
+  editRule?(ruleId: string, input: RuleEditInput): Promise<RuleRecordValue>;
+  createArchive?(input: ArchiveCreateInput): Promise<ArchiveRecordValue>;
 }
 
-/** Per-Host credentials are derived only at the Server; never give its master token to a Host. */
-export function hostCredential(masterToken: string, hostId: string): string {
-  return createHmac('sha256', masterToken).update(`mnemoweave-host:${hostId}`).digest('base64url');
-}
-export function createHttpServer(app: MemoryApplication, token: string, operatorToken?: string, sync?: SyncHttpEndpoints, view?: (hostId: string, input: unknown) => Promise<ViewRecord>, storage?: () => StorageStatusRecord, runtime?: RuntimeHttpEndpoints) {
+const OPERATOR_ROUTES = new Set(['/v1/review', '/v1/retry', '/v1/conflicts/resolve', '/v1/versions/cancel', '/v1/reviews/complete', '/v1/runtime/pins', '/v1/runtime/projects', '/v1/reviews/due']);
+
+export function createHttpServer(app: MemoryApplication, token: string, operatorToken?: string, client?: ClientHttpEndpoints, storage?: () => StorageStatusRecord) {
   if (token.length < 24) throw new Error('MNEMOWEAVE_TOKEN must contain at least 24 characters');
   if (operatorToken !== undefined && (operatorToken.length < 24 || operatorToken === token)) throw new Error('Independent operator token required');
   const expected = Buffer.from(`Bearer ${token}`);
@@ -87,34 +97,17 @@ export function createHttpServer(app: MemoryApplication, token: string, operator
       res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-trace-id': traceId });
       res.end(JSON.stringify(value));
     };
-    const replyBinary = (status: number, body: Buffer, headers: Record<string, string>) => {
-      res.writeHead(status, { 'content-type': 'application/octet-stream', 'cache-control': 'no-store', 'x-trace-id': traceId, ...headers });
-      res.end(body);
-    };
     try {
       const actual = Buffer.from(req.headers.authorization ?? '');
       const isOperator = !!operatorExpected && actual.length === operatorExpected.length && timingSafeEqual(actual, operatorExpected);
-      const claimedHost = req.headers['x-mnemoweave-host'];
-      const hostExpected = sync?.requireHostCredential && typeof claimedHost === 'string' && sync.currentGrant(claimedHost) ? Buffer.from(`Bearer ${hostCredential(token, claimedHost)}`) : undefined;
-      const isHost = !!hostExpected && actual.length === hostExpected.length && timingSafeEqual(actual, hostExpected);
-      if (!isOperator && !isHost && (actual.length !== expected.length || !timingSafeEqual(actual, expected))) throw new MnemoWeaveError('UNAUTHORIZED');
+      if (!isOperator && (actual.length !== expected.length || !timingSafeEqual(actual, expected))) throw new MnemoWeaveError('UNAUTHORIZED');
       if (req.headers.origin) throw new MnemoWeaveError('UNAUTHORIZED');
-      const requestGrant = async (write = false): Promise<ReadGrantRecord | undefined> => {
-        if (isOperator || !sync) return undefined;
-        if (sync.requireHostCredential && !isHost) throw new MnemoWeaveError('UNAUTHORIZED');
+      const requireHost = (): string => {
         const host = req.headers['x-mnemoweave-host'];
-        const grant = typeof host === 'string' ? sync.currentGrant(host) : undefined;
-        if (!grant || await sync.isRevoked(grant.hostId) || grant.generation < sync.watermark() || !write && Date.parse(grant.expiresAt) <= Date.now()) throw new MnemoWeaveError('UNAUTHORIZED');
-        return grant;
+        if (typeof host !== 'string' || !host.trim()) throw new MnemoWeaveError('UNAUTHORIZED');
+        return host;
       };
 
-      const withRead = async <T>(operation: (grant: ReadGrantRecord | undefined) => Promise<T>): Promise<T> => {
-        const grant = await requestGrant();
-        const result = await operation(grant);
-        const final = await requestGrant();
-        if (grant?.grantId !== final?.grantId) throw new MnemoWeaveError('UNAUTHORIZED');
-        return result;
-      };
       if (req.method === 'GET' && req.url === '/health/live') return reply(200, { live: true });
       if (req.method === 'GET' && req.url === '/health/ready') return reply(200, await app.health());
       if (req.method === 'GET' && req.url === '/openapi.json') return reply(200, openapi);
@@ -122,126 +115,132 @@ export function createHttpServer(app: MemoryApplication, token: string, operator
         if (!storage) throw new MnemoWeaveError('REVIEW_REQUIRED');
         return reply(200, storage());
       }
+      if (req.method === 'GET' && req.url === '/v1/sync/status') {
+        if (!isOperator) requireHost();
+        if (!client?.syncStatus) throw new MnemoWeaveError('REVIEW_REQUIRED');
+        return reply(200, await client.syncStatus());
+      }
+      if (req.method === 'POST' && req.url === '/v1/sync/refresh') {
+        if (!isOperator) requireHost();
+        if (!client?.syncRefresh) throw new MnemoWeaveError('REVIEW_REQUIRED');
+        return reply(200, await client.syncRefresh());
+      }
+      if (req.method === 'GET' && req.url !== undefined && (req.url === '/v1/injections/latest' || req.url.startsWith('/v1/injections/latest?'))) {
+        if (!client?.lastInjection) throw new MnemoWeaveError('REVIEW_REQUIRED');
+        const params = new URL(req.url, 'http://localhost').searchParams;
+        const sessionId = params.get('sessionId')?.trim() || undefined;
+        if (sessionId !== undefined && sessionId.length > 200) throw new MnemoWeaveError('INVALID_INPUT');
+        // An operator reads the newest report across hosts; a host reads only its own rows.
+        const report = await client.lastInjection(isOperator ? undefined : requireHost(), sessionId);
+        if (!report) throw new MnemoWeaveError('NOT_FOUND');
+        return reply(200, report);
+      }
+      if (req.method === 'GET' && req.url !== undefined && (req.url === '/v1/rules' || req.url.startsWith('/v1/rules?'))) {
+        if (!client?.rules) throw new MnemoWeaveError('REVIEW_REQUIRED');
+        const params = new URL(req.url, 'http://localhost').searchParams;
+        const scope = params.get('scope') ?? (isOperator ? 'global' : 'all');
+        if (scope !== 'global' && scope !== 'project' && scope !== 'all') throw new MnemoWeaveError('INVALID_INPUT');
+        const projectId = params.get('projectId')?.trim() || undefined;
+        if (scope === 'project' && !projectId) throw new MnemoWeaveError('INVALID_INPUT');
+        // An operator may narrow by scope or project; a host reads every rule.
+        if (!isOperator) requireHost();
+        return reply(200, await client.rules({ scope, ...(projectId ? { projectId } : {}) }));
+      }
+      if (req.method === 'POST' && req.url === '/v1/rules') {
+        if (!isOperator) throw new MnemoWeaveError('UNAUTHORIZED');
+        if (!client?.createRule) throw new MnemoWeaveError('REVIEW_REQUIRED');
+        return reply(201, await client.createRule(RuleCreate.parse(await readJson(req))));
+      }
+      const ruleMatch = /^\/v1\/rules\/([a-f0-9-]+)$/.exec(req.url ?? '');
+      if (req.method === 'PATCH' && ruleMatch) {
+        if (!isOperator) throw new MnemoWeaveError('UNAUTHORIZED');
+        if (!client?.editRule) throw new MnemoWeaveError('REVIEW_REQUIRED');
+        return reply(200, await client.editRule(ruleMatch[1]!, RuleEdit.parse(await readJson(req))));
+      }
+      if (req.method === 'GET' && req.url !== undefined && (req.url === '/v1/archives' || req.url.startsWith('/v1/archives?'))) {
+        if (!client?.archives) throw new MnemoWeaveError('REVIEW_REQUIRED');
+        const params = new URL(req.url, 'http://localhost').searchParams;
+        const projectId = params.get('projectId')?.trim() || undefined;
+        if (projectId !== undefined && projectId.length > 200) throw new MnemoWeaveError('INVALID_INPUT');
+        const rawWithdrawn = params.get('includeWithdrawn');
+        if (rawWithdrawn !== null && rawWithdrawn !== 'true' && rawWithdrawn !== 'false') throw new MnemoWeaveError('INVALID_INPUT');
+        // Without a project the read covers every project; hosts must still identify themselves.
+        if (!isOperator) requireHost();
+        return reply(200, await client.archives({ ...(projectId ? { projectId } : {}), includeWithdrawn: rawWithdrawn === 'true' }));
+      }
+      if (req.method === 'POST' && req.url === '/v1/archives') {
+        if (!isOperator) throw new MnemoWeaveError('UNAUTHORIZED');
+        if (!client?.createArchive) throw new MnemoWeaveError('REVIEW_REQUIRED');
+        return reply(201, await client.createArchive(await readJson(req) as ArchiveCreateInput));
+      }
       if (req.method === 'GET' && req.url === '/v1/reviews/due') {
         if (!isOperator) throw new MnemoWeaveError('UNAUTHORIZED');
         return reply(200, await app.reviewDue());
       }
       const candidateMatch = /^\/v1\/candidates\/([a-f0-9-]+)$/.exec(req.url ?? '');
-      if (req.method === 'GET' && candidateMatch) return reply(200, await withRead(grant => app.candidateStatus({ candidateId: candidateMatch[1] }, grant)));
+      if (req.method === 'GET' && candidateMatch) return reply(200, await app.candidateStatus({ candidateId: candidateMatch[1] }));
+      if (req.method === 'GET' && req.url !== undefined && req.url.startsWith('/v1/memories?')) {
+        if (!client) throw new MnemoWeaveError('REVIEW_REQUIRED');
+        const params = new URL(req.url, 'http://localhost').searchParams;
+        const query = params.get('query')?.trim();
+        const rawLimit = params.get('limit');
+        const limit = rawLimit === null ? 50 : Number(rawLimit);
+        if (!Number.isInteger(limit) || limit < 1 || limit > 200 || query !== undefined && query.length > 500) throw new MnemoWeaveError('INVALID_INPUT');
+        return reply(200, await client.memories({ ...(query ? { query } : {}), limit }));
+      }
+      if (req.method === 'GET' && req.url === '/v1/memories') {
+        if (!client) throw new MnemoWeaveError('REVIEW_REQUIRED');
+        return reply(200, await client.memories({ limit: 50 }));
+      }
       const memoryMatch = /^\/v1\/memories\/([a-f0-9-]+)(?:\?revisionId=([a-f0-9-]+))?$/.exec(req.url ?? '');
-      if (req.method === 'GET' && memoryMatch) return reply(200, await withRead(grant => app.readMemory({ memoryId: memoryMatch[1], ...(memoryMatch[2] ? { revisionId: memoryMatch[2] } : {}) }, grant)));
-      const conflictMatch=/^\/v1\/conflicts\/([a-f0-9-]+)$/.exec(req.url??'');
-      if(req.method==='GET'&&conflictMatch)return reply(200,await withRead(grant => app.readConflict({caseId:conflictMatch[1]}, grant)));
-      // ── Sync transport (host identity comes from the paired grant, never the payload) ──
-      const syncMatch = /^\/v1\/sync\/(changes|snapshot|verify|watermark|grant)$/.exec(req.url?.split('?')[0] ?? '');
-      if (syncMatch && sync) {
-        if (sync.requireHostCredential && !isHost && !isOperator) throw new MnemoWeaveError('UNAUTHORIZED');
-        const hostId = req.headers['x-mnemoweave-host'];
-        const pairedHost = typeof hostId === 'string' && sync.currentGrant(hostId) !== undefined ? hostId : undefined;
-        if (req.method === 'GET') {
-          if (!pairedHost) throw new MnemoWeaveError('UNAUTHORIZED');
-          const initialGrantId = sync.currentGrant(pairedHost)!.grantId;
-          const authorizeData = async (): Promise<void> => {
-            const grant = sync.currentGrant(pairedHost);
-            if (!grant || grant.grantId !== initialGrantId || await sync.isRevoked(pairedHost) || Date.parse(grant.expiresAt) <= Date.now() || grant.generation < sync.watermark()) throw new MnemoWeaveError('UNAUTHORIZED');
-            // Project identities are not yet persisted: partial replicas must fail closed.
-            if (!sync.scoped && (!grant.projects.includes('*') || !grant.globalIncluded)) throw new MnemoWeaveError('UNAUTHORIZED');
-          };
-          if (['changes', 'snapshot', 'verify'].includes(syncMatch[1]!)) await authorizeData();
-          if (syncMatch[1] === 'changes') {
-            const since = Number(new URL(req.url ?? '/', 'http://localhost').searchParams.get('since') ?? '-1');
-            if (!Number.isInteger(since) || since < -1) throw new MnemoWeaveError('INVALID_INPUT');
-            const changes = await sync.changes(since, pairedHost);
-            await authorizeData();
-            return reply(200, changes);
-          }
-          if (syncMatch[1] === 'verify') {
-            const summaries = await sync.partitionSummaries(pairedHost);
-            await authorizeData();
-            return reply(200, summaries);
-          }
-          if (syncMatch[1] === 'watermark') return reply(200, { watermark: sync.watermark(), revoked: await sync.isRevoked(pairedHost) });
-          if (syncMatch[1] === 'grant') {
-            const grant = sync.currentGrant(pairedHost);
-            if (!grant) return reply(404, { code: 'NOT_FOUND' });
-            return reply(200, grant);
-          }
-          const served = await sync.snapshot(pairedHost);
-          const body = await readFile(served.path);
-          await authorizeData();
-          return replyBinary(200, body, { 'x-sync-latest-seq': String(served.latestSeq) });
-        }
+      if (req.method === 'GET' && memoryMatch) return reply(200, await app.readMemory({ memoryId: memoryMatch[1], ...(memoryMatch[2] ? { revisionId: memoryMatch[2] } : {}) }));
+      const editMatch = /^\/v1\/memories\/([a-f0-9-]+)$/.exec(req.url ?? '');
+      if (req.method === 'PATCH' && editMatch) {
+        if (!client) throw new MnemoWeaveError('REVIEW_REQUIRED');
+        const body = await readJson(req);
+        return reply(200, await client.editMemory(editMatch[1]!, body as { content: string; reason?: string; entryVersion: number }));
       }
-      const operatorRoute = ['/v1/review', '/v1/retry','/v1/conflicts/resolve','/v1/versions/cancel','/v1/reviews/complete','/v1/runtime/pins','/v1/runtime/projects'].includes(req.url ?? '');
-      if (operatorRoute && !isOperator) throw new MnemoWeaveError('UNAUTHORIZED');
-      const syncPostRoute = req.method === 'POST' && /^\/v1\/sync\/(grant|revoke|intents)$/.test(req.url ?? '');
-      if (!syncPostRoute && (req.method !== 'POST' || !['/v1/runtime/context', '/v1/runtime/pins', '/v1/runtime/projects', '/v1/recall', '/v1/view', '/v1/remember', '/v1/review', '/v1/retry','/v1/conflicts/resolve','/v1/versions/cancel','/v1/reviews/complete'].includes(req.url ?? ''))) return reply(404, { code: 'NOT_FOUND' });
-      if (!req.headers['content-type']?.startsWith('application/json')) throw new MnemoWeaveError('INVALID_INPUT');
-      const chunks: Buffer[] = [];
-      let size = 0;
-      for await (const chunk of req) {
-        const bytes = Buffer.from(chunk as Uint8Array); size += bytes.length;
-        if (size > 256000) throw new MnemoWeaveError('INVALID_INPUT');
-        chunks.push(bytes);
+      const conflictMatch = /^\/v1\/conflicts\/([a-f0-9-]+)$/.exec(req.url ?? '');
+      if (req.method === 'GET' && conflictMatch) return reply(200, await app.readConflict({ caseId: conflictMatch[1] }));
+
+      if (!httpRoutes.some(route => route.method === req.method && route.path === req.url)) {
+        const known = httpRoutes.some(route => route.method === req.method && route.path.startsWith('/v1/memories/') && req.url?.startsWith('/v1/memories/'));
+        if (!known) return reply(404, { code: 'NOT_FOUND' });
       }
-      let input: unknown;
-      try { input = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw new MnemoWeaveError('INVALID_INPUT'); }
+      if (req.method === 'GET') throw new MnemoWeaveError('INVALID_INPUT');
+      if (OPERATOR_ROUTES.has(req.url ?? '') && !isOperator) throw new MnemoWeaveError('UNAUTHORIZED');
+      const input = await readJson(req);
       if (req.url?.startsWith('/v1/runtime/')) {
-        if (!runtime) throw new MnemoWeaveError('REVIEW_REQUIRED');
-        if (req.url === '/v1/runtime/pins') { runtime.pin(PinInput.parse(input)); return reply(200, { updated: true }); }
+        if (!client) throw new MnemoWeaveError('REVIEW_REQUIRED');
+        if (req.url === '/v1/runtime/pins') { client.pin(PinInput.parse(input)); return reply(200, { updated: true }); }
         if (req.url === '/v1/runtime/projects') {
           const id = (input as Record<string, unknown>)?.['projectId'];
           if (typeof id !== 'string') throw new MnemoWeaveError('INVALID_INPUT');
-          runtime.register(id); return reply(200, { registered: true });
+          client.register(id); return reply(200, { registered: true });
         }
-        const grant = await requestGrant();
-        const host = grant?.hostId ?? req.headers['x-mnemoweave-host'];
-        if (typeof host !== 'string') throw new MnemoWeaveError('UNAUTHORIZED');
-        const contextInput = RuntimeContextInput.parse(input);
-        if (grant && contextInput.projectId && !grant.projects.includes('*') && !grant.projects.includes(contextInput.projectId)) throw new MnemoWeaveError('UNAUTHORIZED');
-        return reply(200, runtime.context(host, contextInput));
+        return reply(200, client.context(requireHost(), RuntimeContextInput.parse(withProjectHeader(req.headers, input))));
       }
       if (req.url === '/v1/review') return reply(200, await app.humanReview(input, 'local-operator'));
       if (req.url === '/v1/retry') return reply(202, await app.retryWrite(input, 'local-operator'));
-      if(req.url==='/v1/conflicts/resolve')return reply(200,await app.resolveConflict(input,'local-operator'));
-      if(req.url==='/v1/versions/cancel')return reply(200,await app.cancelVersion(input,'local-operator'));
-      if(req.url==='/v1/reviews/complete')return reply(200,await app.completeReview(input,'local-operator'));
-      if (sync && syncPostRoute) {
-        const body = input as Record<string, unknown>;
-        if (req.url === '/v1/sync/grant') {
-          if (!isOperator) throw new MnemoWeaveError('UNAUTHORIZED');
-          const hostId = body['hostId'];
-          if (typeof hostId !== 'string' || !hostId.trim()) throw new MnemoWeaveError('INVALID_INPUT');
-          const projects = Array.isArray(body['projects']) ? body['projects'].filter(item => typeof item === 'string') : [];
-          const grant = await sync.issueGrant(hostId, projects, body['globalIncluded'] === true, typeof body['ttlMs'] === 'number' ? body['ttlMs'] : undefined);
-          return reply(200, { ...grant, credential: hostCredential(token, hostId) });
-        }
-        if (req.url === '/v1/sync/revoke') {
-          if (!isOperator) throw new MnemoWeaveError('UNAUTHORIZED');
-          const hostId = body['hostId'];
-          if (typeof hostId !== 'string' || !hostId.trim()) throw new MnemoWeaveError('INVALID_INPUT');
-          await sync.revoke(hostId, body['global'] === true);
-          return reply(200, { revoked: true });
-        }
-        // Intent intake: identity from the paired grant, never from the payload.
-        if (sync.requireHostCredential && !isHost && !isOperator) throw new MnemoWeaveError('UNAUTHORIZED');
-        const hostId = req.headers['x-mnemoweave-host'];
-        if (typeof hostId !== 'string' || !hostId.trim() || !sync.currentGrant(hostId)) throw new MnemoWeaveError('UNAUTHORIZED');
-        const intentId = body['intentId'];
-        const kind = body['kind'];
-        if (typeof intentId !== 'string' || !intentId.trim() || typeof kind !== 'string' || !['remember', 'event', 'version_intent', 'relation_intent'].includes(kind)) throw new MnemoWeaveError('INVALID_INPUT');
-        if (body['payload'] === undefined || body['payload'] === null || typeof body['payload'] !== 'object') throw new MnemoWeaveError('INVALID_INPUT');
-        const baselineRef = typeof body['baselineRef'] === 'string' ? body['baselineRef'] : undefined;
-        return reply(200, await sync.submitIntent(hostId, { intentId, kind, payload: body['payload'] as Record<string, unknown>, baselineRef }));
+      if (req.url === '/v1/conflicts/resolve') return reply(200, await app.resolveConflict(input, 'local-operator'));
+      if (req.url === '/v1/versions/cancel') return reply(200, await app.cancelVersion(input, 'local-operator'));
+      if (req.url === '/v1/reviews/complete') return reply(200, await app.completeReview(input, 'local-operator'));
+      if (req.url === '/v1/inject' || req.url === '/v1/view') {
+        if (!client) throw new MnemoWeaveError('REVIEW_REQUIRED');
+        return reply(200, await client.view(requireHost(), withProjectHeader(req.headers, input)));
       }
-      if (req.url === '/v1/view') {
-        await requestGrant();
-        if (!view) throw new MnemoWeaveError('REVIEW_REQUIRED');
-        const host = req.headers['x-mnemoweave-host'];
-        if (typeof host !== 'string' || !host.trim()) throw new MnemoWeaveError('UNAUTHORIZED');
-        return reply(200, await view(host, input));
+      if (req.url === '/v1/events') {
+        if (!client) throw new MnemoWeaveError('REVIEW_REQUIRED');
+        return reply(200, client.events(requireHost(), withProjectHeader(req.headers, input)));
       }
-      return req.url === '/v1/recall' ? reply(200, await withRead(grant => app.recall(input, grant))) : reply(202, await app.remember(input, await requestGrant(true)));
+      if (req.url === '/v1/session/close') {
+        if (!client) throw new MnemoWeaveError('REVIEW_REQUIRED');
+        const sessionId = (input as Record<string, unknown>)?.['sessionId'];
+        if (typeof sessionId !== 'string' || !sessionId.trim()) throw new MnemoWeaveError('INVALID_INPUT');
+        client.closeSession(requireHost(), sessionId);
+        return reply(200, { closed: true });
+      }
+      return req.url === '/v1/recall' ? reply(200, await app.recall(input)) : reply(202, await app.remember(input));
     } catch (error) {
       const result = publicError(error);
       const status = statusForCode(result.code);
@@ -249,4 +248,16 @@ export function createHttpServer(app: MemoryApplication, token: string, operator
       reply(status, { ...result, traceId });
     }
   });
+}
+
+async function readJson(req: import('node:http').IncomingMessage): Promise<unknown> {
+  if (!req.headers['content-type']?.startsWith('application/json')) throw new MnemoWeaveError('INVALID_INPUT');
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req) {
+    const bytes = Buffer.from(chunk as Uint8Array); size += bytes.length;
+    if (size > 256000) throw new MnemoWeaveError('INVALID_INPUT');
+    chunks.push(bytes);
+  }
+  try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw new MnemoWeaveError('INVALID_INPUT'); }
 }

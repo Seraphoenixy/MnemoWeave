@@ -1,132 +1,100 @@
 # MnemoWeave
 
-MnemoWeave 是独立的 AI Agent 记忆编排系统。正式记忆正文、原生实体关系与检索由 Mnemon 提供；MnemoWeave 负责候选审核、可靠写入、逻辑版本与冲突治理、多 Host 接入，以及 Bridge 本地副本与同步。
+MnemoWeave 是独立的 AI Agent 记忆编排系统。正式记忆正文、原生实体关系与检索由 Mnemon 提供；MnemoWeave 负责候选审核、可靠写入、逻辑版本与冲突治理、多 Host 接入。
 
-TypeScript Workspace Monorepo，模块化单体，原生部署。HTTP 承载 Application Core，默认 stdio MCP 代理到唯一 Server：提交候选 → 规则与语义审核 → 异常人工处理 → Transactional Outbox → 官方 Mnemon 0.2.13 CLI → 内容核对与正式回执。候选、审核与写入进度可跨进程重启恢复。
+架构是**三台开发机各一个本机 Server + 本机 Mnemon，另有一台远端同步 Server**：每台机器上的宿主插件内含共享客户端库（`packages/client`），直接用服务令牌访问本机 Server，并用 `x-mnemoweave-host` 头标识自己；共享写入由远端确认版本，注入与召回走本机。没有本地 Bridge 或代理进程，同步凭据只在本机 Server 环境里。协议见 [docs/sync.md](docs/sync.md)；同步已接通（契约、远端存储与 HTTP 服务、本机账本与应用流水线、准则/档案/编辑的远端确认），未配置 `MNEMOWEAVE_SYNC_*` 时退化为纯本机直连。
 
-当前进度（2026-11-09）：
+TypeScript Workspace Monorepo，模块化单体，原生部署（不使用 Docker）。HTTP 承载 Application Core，stdio MCP 也代理到同一 Server：提交候选 → 规则与语义审核 → 异常人工处理 → Transactional Outbox → 官方 Mnemon 0.2.13 CLI → 内容核对与正式回执。候选、审核与写入进度可跨进程重启恢复。
 
-- 运行时记忆主链路已补齐：持久化 Pinned、会话工作上下文、任务投影、主动记录指引、事件提炼候选与审核边界。
-- 正式写入、Revision/冲突、授权 Recall、按范围同步和共享多 Host Bridge 有程序化验证；未把接口存在或测试数量当成 Host 行为验收。
-- 当前 Host 目标为 DSH、ChatGPT 桌面、ZCode。ZCode 与 ChatGPT 本地钩子进程端到端可运行；真实桌面会话、DSH SDK 接入尚未验收，首版未完成。Codex CLI 仅保留历史代码。
-- 详细结果、已知限制和后续工作见 `docs/implementation/current-handoff.md`，运行时设计见 `docs/implementation/runtime-memory.md`。
+## 文档
 
-文档入口：
-
-- 实现规格与交接：`docs/implementation/README.md`，当前状态见 `docs/implementation/current-handoff.md`。
-- 架构基线：`docs/architecture/overview.md`；ADR：`docs/adr/README.md`。
-- Provider 核查：`docs/research/mnemon-capability-matrix.md`；参考项目评估：`docs/research/dsh-mnemon-architecture-analysis.md`。
+| 文档 | 内容 |
+|---|---|
+| [docs/architecture.md](docs/architecture.md) | 系统组成、包边界、数据所有权、部署、安全、已固定的设计决策 |
+| [docs/implementation.md](docs/implementation.md) | HTTP/MCP/Provider 契约、治理库 schema v10、状态机、配置项 |
+| [docs/sync.md](docs/sync.md) | 三机同步：条目模型、版本与变更规则、端点、故障恢复（已实现；未完成项见 `docs/status.md`） |
+| [docs/dsh-ui.md](docs/dsh-ui.md) | DSH 记忆界面（可查看与编辑） |
+| [docs/host-acceptance.md](docs/host-acceptance.md) | ZCode / ChatGPT / DSH 接入与验收 |
+| [docs/status.md](docs/status.md) | 最近一次验证结果、未验收项、未决事项、下一步 |
 
 ## 本机运行
 
-前提：Node.js 24、pnpm 11.18.0、Mnemon 0.2.13。本机已验证的二进制位于 `work/tools/mnemon/mnemon.exe`，下载来源和 SHA256 见能力矩阵。`work` 是忽略目录，不随 Git 提交；换机需要重新从官方 release 获取并校验。
-
-在 PowerShell 中：
+前提：Node.js 24、pnpm 11.18.0、Mnemon 0.2.13。`MNEMON_BINARY` 可省略：默认先找 `work/tools/mnemon/mnemon.exe`，再找 npm 全局包内的 `mnemon.exe`，最后才用 PATH 上的 `mnemon`；Windows 上 PATH 里的 `mnemon` 是 `.cmd` 包装，`execFile` 无法直接启动，因此 E2E 优先使用原生可执行文件。`work/` 为忽略目录，不随 Git 提交。
 
 ```powershell
-Set-Location D:\projects\MnemoWeave
-pnpm.cmd install --frozen-lockfile
-pnpm.cmd typecheck
-pnpm.cmd build
-pnpm.cmd test
-pnpm.cmd test:e2e
+Set-Location D:/project/MnemoWeave
+pnpm.cmd install --frozen-lockfile   # 依赖装在项目内 work/pnpm-store（见根 .npmrc）
+node node_modules/typescript/bin/tsc --noEmit
+node node_modules/typescript/bin/tsc
+node --test tests/unit/*.test.ts tests/contract/*.test.ts
+node --test tests/e2e/*.test.ts      # 需要可用的 Mnemon CLI
 
-$env:MNEMON_BINARY='D:\projects\MnemoWeave\work\tools\mnemon\mnemon.exe'
-$env:MNEMON_DATA_DIR='D:\projects\MnemoWeave\work\dev-memory'
+$env:MNEMON_DATA_DIR='D:/project/MnemoWeave/work/dev-memory'
 $env:MNEMON_STORE='development'
-$env:MNEMOWEAVE_STATE_DIR='D:\projects\MnemoWeave\work\dev-state'
+$env:MNEMOWEAVE_STATE_DIR='D:/project/MnemoWeave/work/dev-state'
 $env:MNEMOWEAVE_TOKEN=[Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
 $env:MNEMOWEAVE_OPERATOR_TOKEN=[Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
 node apps/server/src/main.ts
 ```
 
-默认仅监听 `127.0.0.1:4317`，所有 HTTP 请求要求 `Authorization: Bearer <MNEMOWEAVE_TOKEN>`。
+默认仅监听 `127.0.0.1:4317`，除 `/health/live` 外所有 HTTP 请求要求 `Authorization: Bearer <MNEMOWEAVE_TOKEN>`。
 
-- `GET /health/live`、`GET /health/ready`、`GET /v1/storage`、`GET /openapi.json`
-- `POST /v1/recall`、`POST /v1/view`、`POST /v1/remember`
-- `GET /v1/candidates/{id}`、`GET /v1/memories/{memoryId}?revisionId=`、`GET /v1/conflicts/{caseId}`
-- operator：`POST /v1/review`、`POST /v1/retry`、`POST /v1/conflicts/resolve`、`POST /v1/versions/cancel`
-- 同步：`GET /v1/sync/{changes,snapshot,verify,watermark,grant}`、`POST /v1/sync/{grant,revoke,intents}`；Host 身份由配对授权确定，不接受请求体自报。
+- 读：`POST /v1/recall`、`POST /v1/view`、`GET /v1/memories`、`GET /v1/memories/{memoryId}`、`GET /v1/candidates/{id}`、`GET /v1/conflicts/{caseId}`、`GET /v1/storage`、`GET /v1/reviews/due`、`GET /openapi.json`
+- 宿主：`POST /v1/inject`、`POST /v1/events`、`POST /v1/session/close`、`POST /v1/runtime/context`
+- 写：`POST /v1/remember`（只提交候选）、`PATCH /v1/memories/{memoryId}`（用户直接编辑，追加 Revision）
+- operator：`POST /v1/review`、`/v1/retry`、`/v1/conflicts/resolve`、`/v1/versions/cancel`、`/v1/reviews/complete`、`/v1/runtime/pins`、`/v1/runtime/projects`
 
-未配置候选存储时 `POST /v1/remember` 返回 409 `REVIEW_REQUIRED`。`/openapi.json` 与实际路由逐条对应，包含冲突读取、冲突裁定、版本取消与同步端点。
+完整端点表见 [docs/implementation.md](docs/implementation.md#2-http-端点)。
 
-MCP 使用同样的 `MNEMON_BINARY` / `MNEMON_DATA_DIR` / `MNEMON_STORE` 环境变量，启动 `node apps/server/src/mcp-main.ts`；工具为 `recall`、`provider_health`，启用候选后另有 `read_memory`、`remember`、`candidate_status`、`read_conflict`。stdio 继承启动者权限，不作为远端服务。日志仅 stderr；stdout 留给 MCP。
+## 宿主客户端
 
-## 候选记忆提交
+三个插件共用 `packages/client`：
+
+```ts
+import { MemoryClient, clientFromEnv, renderView } from './packages/client/src/index.ts';
+
+const client = clientFromEnv();                       // MNEMOWEAVE_SERVER / MNEMOWEAVE_TOKEN / MNEMOWEAVE_HOST_ID
+const view = await client.inject({ sessionId, query }, 2_000);
+const list = await client.listMemories({ limit: 50 });
+await client.editMemory(memoryId, { content: '修正后的正文', reason: '用户更正' });
+```
+
+客户端强制 loopback URL、令牌至少 24 字符、注入超时默认 2 秒；网络失败返回 `{ ok: false, error }`，不抛异常给宿主回合。
+
+## MCP
+
+`node apps/server/src/mcp-main.ts`，stdio，服务名 `mnemoweave`。默认代理到唯一 Server（`MNEMOWEAVE_SERVER`，默认 `http://127.0.0.1:4317`）；`MNEMOWEAVE_MCP_MODE=standalone` 时进程内直连并关闭 Worker。
+
+工具：`recall`、`provider_health`；启用候选存储后另有 `remember`、`candidate_status`、`read_memory`、`read_conflict`；配置运行时后另有 `runtime_context`、`memory_view`。MCP 不提供审核/重试工具，也不接受模型自报 `sessionId`。日志只写 stderr，stdout 留给 MCP。
+
+## 候选、审核与写入
 
 `MNEMOWEAVE_STATE_DIR` 保存 MnemoWeave 自有治理数据，与 Mnemon 存储分离；HTTP 与 MCP 使用同一目录即可共享候选。
 
-- HTTP：`POST /v1/remember` 返回 202 和 `pending_review` 候选、提交回执；`GET /v1/candidates/{candidateId}` 查询。
-- MCP：`remember` 只提交候选，正式写入由审核后的后台流程执行。
-- 重复 `idempotencyKey` 且相同输入返回原候选/回执；同键不同输入返回 `IDEMPOTENCY_CONFLICT`。
-- 候选内容不可变；改动内容需另建候选。
-- 按 ADR-015 自动审核为主、异常转人工；没有配置模型或模型失败也转人工，不默认通过。不能用 `approved` 字段绕过。
+- 重复 `idempotencyKey` 且输入相同返回原候选与回执；同键不同输入返回 `IDEMPOTENCY_CONFLICT`。候选内容不可变，改动需另建候选。
+- 自动审核以规则为主、模型为辅；未配置模型、模型失败、证据未验证、重要架构知识、Global 晋升、带变更意图或存在冲突时一律转人工。不能用 `approved` 字段绕过。
+- 后台 Worker 默认随 Server 进程启动；多进程共享同一治理库时靠 SQLite 租约串行调度。`MNEMOWEAVE_WORKER=off` 仅用于诊断。
+- 模型由 Model Gateway 显式配置（`MNEMOWEAVE_MODEL_URL` / `_MODEL` / `_MODEL_KEY`），非本地端点必须 HTTPS；`MNEMOWEAVE_BACKUP_MODEL_*` 仅在 temporary/unavailable/timeout 时最多切换一次。
+- 人工入口只走 HTTP，使用独立 `MNEMOWEAVE_OPERATOR_TOKEN`，不得与普通令牌相同，也不得进入 Host 环境。
+- 只有 `persisted` 且有正式成功回执才表示 Provider 写入已核对；`approved` 只表示排队。写入前可确定的故障最多三次退避重试（指数增长，封顶 15 分钟）；已发起写入后结果未知时只对账，不盲目重发。
+- 写入进程固定 `MNEMON_MAX_INSIGHTS=0` 关闭 Mnemon 自动容量清理；请使用本项目专用 Store，外部原生客户端仍可能改动同一 Store。
 
-请求示例（完整 Schema 见 `/openapi.json`）：
-
-```json
-{
-  "idempotencyKey": "project-fact-0001",
-  "content": "示例候选知识，需要审核后才能进入正式记忆。",
-  "knowledgeType": "Practice",
-  "scope": "project",
-  "projectId": "registered-project-id",
-  "tags": ["example"],
-  "provenance": {
-    "source": "working-model",
-    "sourceReference": "session:example",
-    "evidence": ["待审核的来源说明"],
-    "verificationStatus": "unverified",
-    "confidence": 0.5,
-    "applicability": "示例项目",
-    "limitations": "尚未验证，不应作为正式结论",
-    "lastVerified": null
-  }
-}
-```
-
-## 审核、版本与冲突
-
-后台 Worker 默认随 Server/MCP 进程启动；多个进程共享同一治理库时，通过 SQLite 租约串行调度。`MNEMOWEAVE_WORKER=off` 只用于诊断/候选暂存。
-
-自动审核的模型由 Model Gateway 显式配置，不从 Provider 或其他客户端寻找模型。设置完整 Chat Completions URL（例如本地兼容服务的 `http://127.0.0.1:端口/v1/chat/completions`）、`MNEMOWEAVE_MODEL`，以及需要时的 `MNEMOWEAVE_MODEL_KEY`。非本地端点要求 HTTPS；不配置则所有非明显重复候选进入人工审核。可另配 `MNEMOWEAVE_BACKUP_MODEL_*` 作为备用路由，仅在 temporary/unavailable/timeout 时最多切换一次。
-
-六项语义检查必须明确完成；低复用价值可拒绝。未验证证据、任何不确定性、重要架构知识、Global 晋升或冲突均转人工。内容相同但来源/适用范围不同或未知时保留候选并转人工。
-
-人工例外处理只通过 HTTP，使用独立 `MNEMOWEAVE_OPERATOR_TOKEN`，不得放进模型 Host/MCP 环境，也不得与普通令牌相同。两个令牌仅保护本地开发接口，不能替代最终 Bridge/Host 身份体系。
-
-- `POST /v1/review`：`{"candidateId":"…","decision":"approve","reason":"…"}`。decision 可为 approve/reject/amend；amend 需提供完整 replacement（新的 Remember 请求及幂等键）。
-- `POST /v1/retry`：仅处理 `failed` 候选，保留稳定 writeKey；执行前再次对账 Provider。
-- 带 `change` 意图的候选（revise/supersede/coexist/conflict）不进入自动批准，必须人工确认。
-- `POST /v1/conflicts/resolve`：keep_existing / revise / supersede / coexist / unverified；coexist 必须提供适用范围不同的 replacement。
-- `POST /v1/versions/cancel`：取消未发布版本操作；仅在不可逆关系投影前受理。取消回执标记 `uncertain=true`，不表示 Provider 回滚。
-
-只有 `status=persisted` 且存在正式成功回执才表示已核对 Provider 写入；`approved` 仅表示排队。内部状态 `pending_review` 对应 ADR 的 Pending；`needs_review` 表示等待人工。
-
-写入前可确定的故障最多尝试三次，退避按指数增长并封顶 15 分钟；已发起写入后结果未知时只对账，不盲目重发。没有明确结果时保留 `failed` 供人工处理；同一任务持续失败 24 小时后告警一次，不自动放弃。写入进程设置 `MNEMON_MAX_INSIGHTS=0`，关闭其自动容量清理；外部原生客户端仍可能更改同一 Store，因此请使用本项目专用 Store。
+**用户直接编辑**（`PATCH /v1/memories/{memoryId}`）不经过候选审核：它在 Mnemon 写入新生正文、以 supersedes 关联旧记忆、追加一个不可变 Revision 并移动当前指针，同时把这次改动记录为 `local-user` 的审核决定。它与"模型输出只能成为候选"的规则不冲突——模型没有这个入口。
 
 ## 治理库升级与恢复
 
-治理库当前 schema v8，启动时按顺序迁移（v1→v8）；每个版本迁移前用 `VACUUM INTO` 产生 `<governance.db>.pre-vN.<uuid>.db` 一致快照，包含 WAL 中已提交数据。迁移是 SQLite 事务，失败可重试；未识别的既有库拒绝初始化。
+治理库当前 schema v10，启动时按顺序迁移（v1→v10）；每步迁移前用 `VACUUM INTO` 生成 `<governance.db>.pre-vN.<uuid>.db` 一致快照（含 WAL 中已提交数据），迁移本身在事务内提交。未识别的既有库拒绝初始化。
 
-需要回退时：停止全部 Server/MCP/Worker，保留原库，将选定快照复制到**新的状态目录**并命名为 `governance.db`，再把 `MNEMOWEAVE_STATE_DIR` 指向新目录。快照只恢复治理数据，不能当作 Provider 回滚或通用备份。
+回退方式：停止全部 Server/MCP/Worker → 保留原库 → 将选定快照复制到**新的**状态目录并命名 `governance.db` → 把 `MNEMOWEAVE_STATE_DIR` 指向新目录。快照只恢复治理数据，不能当作 Provider 回滚或通用备份。升级前应先在隔离状态目录演练。
 
-v2→v3 回填缺陷已修复（迁移在 `catalog_relations` 尚未创建时不执行歧义检查），并有 contract 用例覆盖；升级仍应先在隔离状态目录演练。详见 `docs/implementation/current-handoff.md`。
+## 插件
 
-## 测试与边界
+`plugins/` 下有 ZCode、ChatGPT 桌面与 DSH 三个宿主插件，构建后输出到 `dist/plugins/`，说明见 [plugins/README.md](plugins/README.md)。DSH 界面见 [docs/dsh-ui.md](docs/dsh-ui.md)。
 
-- Unit / Contract：输入、候选审核边界、参数隔离、固定版本、错误 JSON、输出上限、超时、失败后队列恢复、重复 ID 映射、迁移与备份、租约 fencing、版本与冲突不变量、同步、保留清扫调度、View 交付、Bridge 会话注入与离线组装、容量配额、时间型复核、Blob 存储与回收、交互优先调度。当前 119 项全部通过。
-- E2E：真实官方二进制，专用 `work/e2e` 随机目录与 acceptance store；不接触个人 Mnemon 默认目录。包含 Provider 写入、HTTP 与独立 MCP 子进程、重启与崩溃恢复。
-- 不自动安装系统 Go、不修改系统 PATH，不需要 Docker；上游 Go 测试不作为验收前提。
-- 新增能力先补契约与失败场景，再补成功路径；不能把未执行或失败的检查写成通过。
-- Provider 版本未知时明确拒绝；升级先核查并重跑验收，不静默放宽版本。
+## 边界
 
-当前包内 imports 使用显式源码路径；各包声明依赖以记录边界，独立发布和包 exports 在后续构建设计中完善，不宣称已完成独立发布。
-
-## 运行时记忆配对
-
-Server 的 `MNEMOWEAVE_TOKEN` 为 master，只留在 Server。使用独立 operator token 调用 `POST /v1/sync/grant`，显式指定 `hostId`、`projects`（可用 `*` 表示全部项目）和 `globalIncluded`；响应中的 `credential` 作为该 Host 的 `MNEMOWEAVE_TOKEN`，请求携带 `x-mnemoweave-host`。普通 Host 不能使用 master 读取记忆，也不能通过修改 Host header 借用另一身份。
-
-项目 ID 必须显式登记（`POST /v1/runtime/projects`，或操作员签发具体项目 Grant）。用 `POST /v1/runtime/pins` 配置常驻正式记忆引用，再启动 Bridge/ZCode hook；详见 `docs/implementation/runtime-memory.md`。MCP 只需 Server URL、Host ID、Host credential，不需要 Mnemon 或治理库路径。不要将 operator token 传入 Host。
-
-旧运行示例中的 `$env:MNEMOWEAVE_TOKEN` 是 Server 启动值；在启动 Host/MCP/Bridge 的进程环境里替换为其 credential。旧数据未记录 projectId 的，只允许明确获准全部项目的调用者读取。
+- Provider 版本未知时明确拒绝，不静默放宽版本；升级前先核查并重跑验收。
+- 不直接读写 Mnemon 内部表；不修改系统 PATH、不安装系统 Go、不依赖 Docker。
+- 各包 imports 使用显式源码路径；`package.json` 的依赖声明用于记录边界，尚未完成独立发布与 `exports` 设计。
+- 同步与三类记忆（运行时准则、项目档案、正式记忆）已实现并有测试覆盖；未完成事项（三宿主实机注入核对、Host 真实会话验收）以 `docs/status.md` 为准。
+- 新增能力先补契约与失败场景，再补成功路径；未执行或失败的检查不得写成通过。

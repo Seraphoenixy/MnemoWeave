@@ -4,11 +4,12 @@ import { mkdir, mkdtemp } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { createRunner, MnemonCliProvider } from '../../packages/providers/mnemon/src/index.ts';
+import { mnemonBinary } from './mnemon-binary.ts';
 
 test('Official supersedes: replay preserves edge count/history; related is not directional; recall flag survives adapter', { timeout: 30000 }, async () => {
   await mkdir('work/e2e', { recursive: true });
   const dataDir = await mkdtemp(resolve('work/e2e/supersedes-'));
-  const binary = process.env.MNEMON_BINARY ?? resolve('work/tools/mnemon/mnemon.exe');
+  const binary = mnemonBinary();
   const provider = new MnemonCliProvider({ binary, dataDir, store: 'relations' });
   const run = createRunner(binary);
   const prefix = ['--data-dir', dataDir, '--store', 'relations'];

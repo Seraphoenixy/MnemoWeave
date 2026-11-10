@@ -1,215 +1,149 @@
-import { test } from 'node:test';
+import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
-import { resolve, join } from 'node:path';
+import { mkdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { DatabaseSync } from 'node:sqlite';
-import { SqliteCandidates } from '../../packages/infrastructure/governance/src/index.ts';
-import { SyncSource } from '../../packages/infrastructure/governance/src/sync-source.ts';
-import { createHttpServer } from '../../packages/protocols/http/src/index.ts';
-import type { SyncHttpEndpoints } from '../../packages/protocols/http/src/index.ts';
-import { Bridge } from '../../packages/bridge/src/index.ts';
-import { verifySnapshotFile } from '../../packages/bridge/src/replica.ts';
-import { HttpSyncChannel } from '../../apps/bridge/src/http-channel.ts';
-import { MemoryApplication } from '../../packages/core/application/src/index.ts';
-import type { RememberRequest } from '../../packages/core/contracts/src/index.ts';
+import type { AddressInfo } from 'node:net';
+import type { Server } from 'node:http';
+import type { SyncEntryDraftValue } from '../../packages/core/contracts/src/index.ts';
+import { buildChange, plainContent } from '../../packages/core/application/src/sync.ts';
+import { SyncStore } from '../../packages/infrastructure/sync-store/src/index.ts';
+import { createSyncServer, syncRoutes } from '../../packages/protocols/sync-http/src/index.ts';
 
-const request = (key: string, content: string): RememberRequest => ({
-  idempotencyKey: key, content, knowledgeType: 'Practice', tags: [], scope: 'project',
-  provenance: { source: 'sync-http-test', sourceReference: 'fixture:sync-http', evidence: ['fixture'], verificationStatus: 'verified', confidence: 0.8, applicability: 'sync http fixture', limitations: 'test only', lastVerified: '2026-11-08T00:00:00.000Z' },
+const TOKEN = 'a'.repeat(32);
+const NOW = '2026-11-10T05:00:00.000Z';
+
+let store: SyncStore;
+let server: Server;
+let base: string;
+
+before(async () => {
+  const dir = join('work', 'sync-http-test', randomUUID());
+  mkdirSync(dir, { recursive: true });
+  store = new SyncStore({ path: join(dir, 'sync.db'), now: () => NOW });
+  store.enroll('device-a', TOKEN, [
+    { scope: 'global', canRead: true, canWrite: true },
+    { scope: 'project:alpha', canRead: true, canWrite: true },
+  ]);
+  store.enroll('device-b', 'b'.repeat(32), [{ scope: 'project:beta', canRead: true, canWrite: true }]);
+  server = createSyncServer({ gateway: store, now: () => new Date(NOW) });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
 
-async function fixture() {
-  await mkdir('work/tests', { recursive: true });
-  const root = await mkdtemp(resolve('work/tests/sync-http-'));
-  const path = join(root, 'governance.db');
-  const repo = new SqliteCandidates(path);
-  const contents = new Map<string, string>();
-  let writes = 0;
-  const provider = {
-    async health() { return { ready: true as const, version: '0.2.13' as const, capabilities: ['health'] }; },
-    async recall() { return { memories: [] }; },
-    async readMemory(id: string) { const c = contents.get(id); if (c === undefined) throw new Error('missing'); return { id, content: c }; },
-    async inspectExact(content: string) { return { complete: true, matches: [...contents].filter(([, t]) => t === content).map(([id, text]) => ({ id, content: text })) }; },
-    async verifyContent(id: string, content: string) { return contents.get(id) === content; },
-    async persistReviewed(content: string) { const id = `provider-${++writes}`; contents.set(id, content); return { id, action: 'added' as const }; },
+after(() => {
+  server.close();
+  store.close();
+});
+
+const auth = { authorization: `Bearer ${TOKEN}` };
+
+function draft(overrides: Partial<SyncEntryDraftValue> = {}): SyncEntryDraftValue {
+  return {
+    entryId: overrides.entryId ?? randomUUID(),
+    kind: overrides.kind ?? 'runtime',
+    scope: overrides.scope ?? 'project:alpha',
+    content: overrides.content ?? plainContent('提交前必须运行类型检查。'),
+    payload: overrides.payload ?? { enabled: true },
+    withdrawnAt: overrides.withdrawnAt ?? null,
   };
-  const publish = async (key: string, content: string) => {
-    const candidate = repo.submit(request(key, content));
-    repo.review(candidate.id, 'approve', 'operator', 'fixture', null);
-    const written = await provider.persistReviewed(content);
-    repo.acquire('http-owner', 90000);
-    repo.finish(repo.claim('http-owner')!, written, false);
-    repo.release('http-owner');
-    const persisted = repo.get(candidate.id);
-    const receipt = persisted.executionReceipts[persisted.executionReceipts.length - 1] as { providerMemoryId: string };
-    return { memoryId: persisted.publication!.memoryId, providerMemoryId: receipt.providerMemoryId, content };
-  };
-  const source = new SyncSource(repo, async id => { const c = contents.get(id); if (c === undefined) throw new Error('missing'); return c; });
-  const snapshotDir = join(root, 'server-snapshots');
-  const sync: SyncHttpEndpoints = {
-    currentGrant: hostId => source.grantFor(hostId),
-    issueGrant: async (hostId, projects, globalIncluded, ttlMs) => source.issueGrant(hostId, projects, globalIncluded, ttlMs),
-    revoke: async (hostId, global) => { source.revokeHost(hostId, global); },
-    isRevoked: async hostId => source.isHostRevoked(hostId),
-    watermark: () => source.revocationWatermark(),
-    changes: sinceSeq => source.changes(sinceSeq),
-    snapshot: async () => {
-      const served = join(snapshotDir, `snapshot-${randomUUID()}.db`);
-      const manifest = await source.snapshot(served);
-      return { path: served, latestSeq: manifest.latestSeq };
-    },
-    partitionSummaries: async () => source.partitionSummaries(),
-    submitIntent: async (hostId, intent) => source.submitIntent(hostId, { intentId: intent.intentId, kind: intent.kind, payload: intent.payload, ...(intent.baselineRef !== undefined ? { baselineRef: intent.baselineRef } : {}) }),
-  };
-  const app = new MemoryApplication({ ...provider, async health(): Promise<{ ready: true; version: '0.2.13'; capabilities: ['health'] }> { return { ready: true, version: '0.2.13', capabilities: ['health'] }; } });
-  const server = createHttpServer(app, 'local-sync-http-token-0123456789', 'local-sync-operator-012345678', sync);
-  await new Promise<void>(done => server.listen(0, '127.0.0.1', done));
-  const address = server.address();
-  assert.ok(address && typeof address === 'object');
-  const base = `http://127.0.0.1:${address.port}`;
-  return { root, repo, contents, publish, source, base, server, hostId: 'host-http-bridge' };
 }
 
-const operatorHeaders = { authorization: 'Bearer local-sync-operator-012345678', 'content-type': 'application/json' };
-const hostHeaders = (hostId: string) => ({ authorization: 'Bearer local-sync-http-token-0123456789', 'x-mnemoweave-host': hostId });
+async function post(change: unknown) {
+  return fetch(`${base}/v1/sync/changes`, { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify(change) });
+}
 
-test('Pairing is operator-gated; the bridge fetches its grant over HTTP', async () => {
-  const f = await fixture();
-  try {
-    const denied = await fetch(`${f.base}/v1/sync/grant`, { method: 'POST', headers: { ...hostHeaders(f.hostId), 'content-type': 'application/json' }, body: JSON.stringify({ hostId: f.hostId, projects: ['*'], globalIncluded: true }) });
-    assert.equal(denied.status, 401, 'normal token cannot issue grants');
-    const issued = await fetch(`${f.base}/v1/sync/grant`, { method: 'POST', headers: operatorHeaders, body: JSON.stringify({ hostId: f.hostId, projects: ['*'], globalIncluded: true }) });
-    assert.equal(issued.status, 200);
-    const grant = await issued.json() as { grantId: string; hostId: string; expiresAt: string };
-    assert.equal(grant.hostId, f.hostId);
-    const fetched = await fetch(`${f.base}/v1/sync/grant`, { headers: hostHeaders(f.hostId) });
-    assert.equal(fetched.status, 200);
-    const refetched = await fetched.json() as { grantId: string };
-    assert.equal(refetched.grantId, grant.grantId);
-    const unpaired = await fetch(`${f.base}/v1/sync/changes?since=0`, { headers: hostHeaders('host-unknown') });
-    assert.equal(unpaired.status, 401);
-    const noHeader = await fetch(`${f.base}/v1/sync/changes?since=0`, { headers: { authorization: 'Bearer local-sync-http-token-0123456789' } });
-    assert.equal(noHeader.status, 401);
-  } finally { f.server.close(); f.repo.close(); }
+test('the served route list matches the documented surface', () => {
+  assert.deepEqual(syncRoutes.map((route) => `${route.method} ${route.path}`), [
+    'POST /v1/sync/changes',
+    'GET /v1/sync/changes',
+    'GET /v1/sync/receipts/{changeId}',
+    'GET /v1/sync/entries/{entryId}',
+    'GET /v1/sync/snapshot',
+    'GET /v1/sync/scopes',
+    'GET /v1/sync/health',
+  ]);
 });
 
-test('Bridge syncs snapshot and incrementals over HTTP and recalls locally', async () => {
-  const f = await fixture();
-  try {
-    await f.publish('http-sync-001', 'Published over HTTP transport test.');
-    const channel = new HttpSyncChannel(f.base, 'local-sync-http-token-0123456789', f.hostId, join(f.root, 'bridge', 'snapshots'));
-    const bridge = new Bridge(join(f.root, 'bridge'), f.hostId, channel);
-    // Pairing fetch fails while the operator has not issued a grant yet.
-    await assert.rejects(bridge.pair());
-    await fetch(`${f.base}/v1/sync/grant`, { method: 'POST', headers: operatorHeaders, body: JSON.stringify({ hostId: f.hostId, projects: ['*'], globalIncluded: true }) });
-    await bridge.pair();
-    const first = await bridge.sync();
-    assert.equal(first.mode, 'snapshot');
-    assert.equal(bridge.recall('HTTP transport test').recall!.memories[0]!.content, 'Published over HTTP transport test.');
-    await f.publish('http-sync-002', 'Incremental over HTTP.');
-    const second = await bridge.sync();
-    assert.equal(second.mode, 'incremental');
-    assert.ok(second.applied >= 2);
-    assert.equal(bridge.recall('Incremental over HTTP').recall!.memories[0]!.content, 'Incremental over HTTP.');
-    // Snapshot bytes fetched over HTTP verify against the embedded manifest.
-    const served = await channel.snapshot();
-    assert.equal(verifySnapshotFile(served.path).ok, true);
-    bridge.close();
-  } finally { f.server.close(); f.repo.close(); }
+test('health and scopes require a device token', async () => {
+  assert.equal((await fetch(`${base}/v1/sync/health`)).status, 401);
+  const health = await fetch(`${base}/v1/sync/health`, { headers: auth });
+  assert.equal(health.status, 200);
+  assert.deepEqual(await health.json(), { ready: true, protocol: 1, now: NOW });
+  const scopes = await fetch(`${base}/v1/sync/scopes`, { headers: auth });
+  assert.deepEqual((await scopes.json() as { scopes: { scope: string }[] }).scopes.map((item) => item.scope).sort(), ['global', 'project:alpha']);
 });
 
-test('Verify, watermark and intent intake endpoints behave per contract', async () => {
-  const f = await fixture();
-  try {
-    await fetch(`${f.base}/v1/sync/grant`, { method: 'POST', headers: operatorHeaders, body: JSON.stringify({ hostId: f.hostId, projects: ['*'], globalIncluded: true }) });
-    const before = await (await fetch(`${f.base}/v1/sync/verify`, { headers: hostHeaders(f.hostId) })).json() as unknown[];
-    assert.equal(before.length, 0, 'no memories published yet');
-    await f.publish('http-verify-001', 'Summary fixture content.');
-    const summaries = await (await fetch(`${f.base}/v1/sync/verify`, { headers: hostHeaders(f.hostId) })).json() as { memoryId: string; contentHashes: string[] }[];
-    assert.equal(summaries.length, 1);
-    const watermark = await (await fetch(`${f.base}/v1/sync/watermark`, { headers: hostHeaders(f.hostId) })).json() as { watermark: number; revoked: boolean };
-    assert.equal(watermark.revoked, false);
-    // Intent intake creates a candidate; malformed intents are rejected.
-    const intent = await fetch(`${f.base}/v1/sync/intents`, { method: 'POST', headers: { ...hostHeaders(f.hostId), 'content-type': 'application/json' }, body: JSON.stringify({ intentId: 'intent-1', kind: 'remember', payload: request('http-intent-001', 'Intent delivered over HTTP.') }) });
-    assert.equal(intent.status, 200);
-    const intentResult = await intent.json() as { status: string; reference?: string };
-    assert.equal(intentResult.status, 'accepted');
-    assert.ok(intentResult.reference, 'accepted intents carry a candidate reference');
-    const badKind = await fetch(`${f.base}/v1/sync/intents`, { method: 'POST', headers: { ...hostHeaders(f.hostId), 'content-type': 'application/json' }, body: JSON.stringify({ intentId: 'intent-2', kind: 'direct_write', payload: {} }) });
-    assert.equal(badKind.status, 400);
-    const inspect = new DatabaseSync(join(f.root, 'governance.db'));
-    try {
-      const row = inspect.prepare("SELECT c.id, l.status FROM governance_candidates c LEFT JOIN governance_lifecycle l ON l.candidate_id=c.id WHERE c.idempotency_key='http-intent-001'").get()!;
-      assert.equal(row['status'] ?? 'pending_review', 'pending_review');
-    } finally { inspect.close(); }
-    // Operator revocation propagates through the watermark endpoint.
-    await fetch(`${f.base}/v1/sync/revoke`, { method: 'POST', headers: operatorHeaders, body: JSON.stringify({ hostId: f.hostId }) });
-    const revokedWatermark = await (await fetch(`${f.base}/v1/sync/watermark`, { headers: hostHeaders(f.hostId) })).json() as { revoked: boolean };
-    assert.equal(revokedWatermark.revoked, true);
-    const isolated = await fetch(`${f.base}/v1/sync/intents`, { method: 'POST', headers: { ...hostHeaders(f.hostId), 'content-type': 'application/json' }, body: JSON.stringify({ intentId: 'intent-3', kind: 'remember', payload: request('http-intent-002', 'Should stay isolated.') }) });
-    assert.deepEqual(await isolated.json() as { status: string }, { status: 'isolated' });
-  } finally { f.server.close(); f.repo.close(); }
+test('browser-origin requests are refused', async () => {
+  const response = await fetch(`${base}/v1/sync/health`, { headers: { ...auth, origin: 'http://example.invalid' } });
+  assert.equal(response.status, 401);
 });
 
-test('Bridge over HTTP isolates intents after revocation and never submits them', async () => {
-  const f = await fixture();
-  try {
-    await fetch(`${f.base}/v1/sync/grant`, { method: 'POST', headers: operatorHeaders, body: JSON.stringify({ hostId: f.hostId, projects: ['*'], globalIncluded: true }) });
-    await f.publish('http-revoke-001', 'Content before revocation.');
-    const channel = new HttpSyncChannel(f.base, 'local-sync-http-token-0123456789', f.hostId, join(f.root, 'bridge', 'snapshots'));
-    const bridge = new Bridge(join(f.root, 'bridge'), f.hostId, channel);
-    await bridge.pair();
-    await bridge.sync();
-    assert.equal(bridge.recall('before revocation').status, 'ok');
-    bridge.queueIntent('remember', request('http-revoked-intent', 'Queued then revoked.') as unknown as Record<string, unknown>);
-    await fetch(`${f.base}/v1/sync/revoke`, { method: 'POST', headers: operatorHeaders, body: JSON.stringify({ hostId: f.hostId }) });
-    assert.equal(await bridge.isRevokedNow(), true);
-    assert.equal(bridge.recall('before revocation').status, 'unauthorized');
-    assert.equal(existsSync(join(f.root, 'bridge', 'replica.db')), true, 'replica retained');
-    const intent = bridge.queueIntent('remember', request('http-isolated-intent', 'Isolated intent.') as unknown as Record<string, unknown>);
-    assert.equal(intent.state, 'isolated');
-    const drain = await bridge.drainIntents();
-    // The pre-revocation queued intent is attempted but the server isolates it without processing.
-    assert.equal(drain.submitted, 1);
-    assert.equal(drain.isolated, 2);
-    const inspect = new DatabaseSync(join(f.root, 'governance.db'));
-    try {
-      assert.equal(inspect.prepare("SELECT count(*) n FROM governance_candidates WHERE idempotency_key IN ('http-isolated-intent','http-revoked-intent')").get()!['n'], 0);
-    } finally { inspect.close(); }
-    bridge.close();
-  } finally { f.server.close(); f.repo.close(); }
+test('a change is accepted, deduplicated and reported with its sequence', async () => {
+  const entry = draft();
+  const change = buildChange({ changeId: randomUUID(), baseVersion: 0, operation: 'create', entry });
+  const first = await post(change);
+  assert.equal(first.status, 200);
+  const accepted = await first.json() as { version: number; seq: number; duplicate: boolean };
+  assert.equal(accepted.version, 1);
+  assert.equal(accepted.duplicate, false);
+  const replay = await post(change);
+  assert.equal(replay.status, 200);
+  assert.equal((await replay.json() as { duplicate: boolean }).duplicate, true);
+  const receipt = await fetch(`${base}/v1/sync/receipts/${change.changeId}`, { headers: auth });
+  assert.equal(receipt.status, 200);
+  assert.equal((await receipt.json() as { version: number }).version, accepted.version);
+  assert.equal((await fetch(`${base}/v1/sync/receipts/${randomUUID()}`, { headers: auth })).status, 404);
 });
 
-test('Snapshot endpoint serves verifiable bytes for the HTTP channel', async () => {
-  const f = await fixture();
-  try {
-    await fetch(`${f.base}/v1/sync/grant`, { method: 'POST', headers: operatorHeaders, body: JSON.stringify({ hostId: f.hostId, projects: ['*'], globalIncluded: true }) });
-    await f.publish('http-snap-001', 'Snapshot bytes fixture.');
-    const response = await fetch(`${f.base}/v1/sync/snapshot`, { headers: hostHeaders(f.hostId) });
-    assert.equal(response.status, 200);
-    assert.match(response.headers.get('content-type') ?? '', /octet-stream/);
-    const latestSeq = Number(response.headers.get('x-sync-latest-seq'));
-    assert.ok(latestSeq > 0);
-    const path = join(f.root, 'downloaded-snapshot.db');
-    await writeFile(path, Buffer.from(await response.arrayBuffer()));
-    assert.equal(verifySnapshotFile(path).ok, true);
-  } finally { f.server.close(); f.repo.close(); }
+test('a stale base version answers 409 with the current state', async () => {
+  const entry = draft();
+  await post(buildChange({ changeId: randomUUID(), baseVersion: 0, operation: 'create', entry }));
+  await post(buildChange({ changeId: randomUUID(), baseVersion: 1, operation: 'update', entry: { ...entry, content: plainContent('第二版正文。') } }));
+  const stale = await post(buildChange({ changeId: randomUUID(), baseVersion: 1, operation: 'update', entry: { ...entry, content: plainContent('基于旧版本的更正。') } }));
+  assert.equal(stale.status, 409);
+  const body = await stale.json() as { code: string; currentVersion: number; currentEntry: { version: number } };
+  assert.equal(body.code, 'VERSION_CONFLICT');
+  assert.equal(body.currentVersion, 2);
+  assert.equal(body.currentEntry.version, 2);
 });
 
+test('pull pages expose contiguous sequences and honour since and limit', async () => {
+  const scope = 'global';
+  const entry = draft({ scope, payload: { enabled: true } });
+  await post(buildChange({ changeId: randomUUID(), baseVersion: 0, operation: 'create', entry }));
+  await post(buildChange({ changeId: randomUUID(), baseVersion: 1, operation: 'update', entry: { ...entry, content: plainContent('第二条全局准则。') } }));
+  const all = await fetch(`${base}/v1/sync/changes?scope=global&since=0&limit=10`, { headers: auth });
+  const page = await all.json() as { changes: { seq: number }[]; nextSince: number; hasMore: boolean; retentionFloor: number };
+  assert.deepEqual(page.changes.map((item) => item.seq), [1, 2]);
+  assert.equal(page.nextSince, 2);
+  assert.equal(page.retentionFloor, 1);
+  const tail = await fetch(`${base}/v1/sync/changes?scope=global&since=1&limit=1`, { headers: auth });
+  const tailPage = await tail.json() as { changes: { seq: number }[]; hasMore: boolean };
+  assert.deepEqual(tailPage.changes.map((item) => item.seq), [2]);
+  assert.equal(tailPage.hasMore, false);
+  assert.equal((await fetch(`${base}/v1/sync/changes?scope=project:alpha&since=abc`, { headers: auth })).status, 400);
+});
 
-test('Sync data endpoints reject partial, expired and revoked grants', async () => {
-  const f = await fixture();
-  try {
-    for (const mode of ['partial', 'expired', 'revoked']) {
-      f.source.issueGrant(f.hostId, mode === 'partial' ? ['proj-1'] : ['*'], true, mode === 'expired' ? 1 : 3600000);
-      if (mode === 'expired') await new Promise(resolve => setTimeout(resolve, 5));
-      if (mode === 'revoked') f.source.revokeHost(f.hostId);
-      for (const endpoint of ['changes?since=0', 'snapshot', 'verify']) {
-        const response = await fetch(`${f.base}/v1/sync/${endpoint}`, { headers: hostHeaders(f.hostId) });
-        assert.equal(response.status, 401, `${mode}: ${endpoint}`);
-      }
-    }
-  } finally { f.server.close(); f.repo.close(); }
+test('entry and snapshot reads are scope checked', async () => {
+  const entry = draft({ kind: 'formal', payload: { category: 'fact', importance: 3, tags: [], entities: [], relations: [] } });
+  await post(buildChange({ changeId: randomUUID(), baseVersion: 0, operation: 'create', entry }));
+  const read = await fetch(`${base}/v1/sync/entries/${entry.entryId}`, { headers: auth });
+  assert.equal(read.status, 200);
+  assert.equal((await read.json() as { entryId: string }).entryId, entry.entryId);
+  assert.equal((await fetch(`${base}/v1/sync/entries/${randomUUID()}`, { headers: auth })).status, 404);
+  const snapshot = await fetch(`${base}/v1/sync/snapshot?scope=project:alpha`, { headers: auth });
+  const body = await snapshot.json() as { asOfSeq: number; nextSince: number; entries: unknown[] };
+  assert.equal(body.asOfSeq, body.nextSince);
+  assert.ok(body.entries.length >= 1);
+  assert.equal((await fetch(`${base}/v1/sync/snapshot?scope=project:beta`, { headers: auth })).status, 403);
+  assert.equal((await fetch(`${base}/v1/sync/snapshot`, { headers: auth })).status, 400);
+});
+
+test('unknown routes and malformed bodies are refused', async () => {
+  assert.equal((await fetch(`${base}/v1/sync/unknown`, { headers: auth })).status, 404);
+  const wrongType = await fetch(`${base}/v1/sync/changes`, { method: 'POST', headers: auth, body: '{}' });
+  assert.equal(wrongType.status, 400);
+  const badChange = await post({ changeId: randomUUID(), baseVersion: 0, operation: 'create' });
+  assert.equal(badChange.status, 400);
 });

@@ -11,7 +11,7 @@ try {
     const configured = configure({ ...process.env, MNEMOWEAVE_WORKER: 'off' });
     app = configured.app; close = configured.close;
   } else {
-    app = httpMemoryClient(process.env.MNEMOWEAVE_SERVER ?? 'http://127.0.0.1:4317', process.env.MNEMOWEAVE_TOKEN ?? '', process.env.MNEMOWEAVE_BRIDGE_HOST_ID ?? '', process.env.MNEMOWEAVE_SESSION_ID);
+    app = httpMemoryClient(process.env.MNEMOWEAVE_SERVER ?? 'http://127.0.0.1:4317', process.env.MNEMOWEAVE_TOKEN ?? '', process.env.MNEMOWEAVE_HOST_ID ?? '', process.env.MNEMOWEAVE_SESSION_ID);
   }
   const server = createMcpServer(app);
   server.server.onclose = () => { void close(); };

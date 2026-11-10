@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { normalize as normalizePath, resolve } from 'node:path';
 import { normalizeHookEvent, injectContext, zcodeWorkspaceHooks, installWorkspaceHooks, installWorkspaceMcp, zcodeDescriptor, ZCODE_HOST_FACTS } from '../../packages/adapters/zcode/src/index.ts';
-import { codexMcpServerBlock, codexNotifyEntry, codexRegistrationStatus, codexDescriptor, CODEX_HOST_FACTS } from '../../packages/adapters/codex/src/index.ts';
 import { DSH_HOST_FACTS } from '../../packages/adapters/dsh/src/index.ts';
 import type { HandlerOptions } from '../../packages/adapters/zcode/src/index.ts';
 
@@ -67,40 +66,12 @@ test('ZCode workspace config generation enables hooks and merges without losing 
 
 function join2(...parts: string[]): string { return parts.join('/').replace(/\/{2,}/g, '/'); }
 
-test('Codex config generation and registration status reflect the live config', async () => {
-  const block = codexMcpServerBlock('mnemoweave', 'node', ['dist/apps/server/src/mcp-main.js'], { MNEMON_STORE: 'codex' });
-  assert.match(block, /\[mcp_servers\.mnemoweave\]/);
-  assert.match(block, /command = "node"/);
-  assert.match(block, /MNEMON_STORE = "codex"/);
-  const entry = codexNotifyEntry('C:\\tools\\mnemoweave-hook.exe');
-  // TOML basic strings escape backslashes: the generator doubles them for the file form.
-  assert.equal(entry, 'notify = [ "C:\\\\tools\\\\mnemoweave-hook.exe", "turn-ended" ]');
-  const root = await mkdtemp(resolve('work/tests/codex-'));
-  const configPath = join2(root, 'config.toml');
-  await writeFile(configPath, `${block}\n${entry}\n`);
-  const status = codexRegistrationStatus(configPath, 'mnemoweave');
-  assert.equal(status.configFound, true);
-  assert.equal(status.mcpRegistered, true);
-  assert.equal(status.notifyConfigured, true);
-  const descriptor = codexDescriptor(configPath, 'mnemoweave');
-  assert.equal(descriptor.capabilities.tool_calls.status, 'supported');
-  assert.equal(descriptor.capabilities.tool_calls.verifiedAt, '2026-11-08');
-  assert.equal(descriptor.capabilities.context_injection.status, 'supported', 'injection verified end-to-end via the marker probe');
-  assert.equal(descriptor.capabilities.message_events.status, 'supported');
-  assert.equal(descriptor.capabilities.budget_reporting.status, 'unverified', 'budget reporting stays unverified');
-});
-
 test('HOST-01 records keep verification state honest per host', () => {
   // ZCode: the assistant-final gap was corrected by upstream docs — Stop carries the text.
   assert.equal(ZCODE_HOST_FACTS.assistantFinalEntry.includes('Stop hook stdin carries last_assistant_message'), true);
   assert.equal(ZCODE_HOST_FACTS.sessionEndEntry.includes('missing'), true, 'the remaining ZCode gap is the missing session-end event');
-  // Codex: real-session verification upgraded the capabilities.
-  assert.equal(CODEX_HOST_FACTS.remaining.some(item => item.includes('failure-flag')), true);
-  const codexConfig = join2(root0, 'codex-live.toml');
-  void codexConfig;
   const zcode = zcodeDescriptor();
   assert.equal(zcode.capabilities.context_injection.status, 'unverified');
   assert.equal(zcode.gatesMet, false, 'ZCode stays unverified until a live session runs the handler');
-  void codexRegistrationStatus;
+  assert.equal(DSH_HOST_FACTS.status, 'blocked', 'DSH stays blocked until an installed SDK/runtime can be verified');
 });
-const root0 = '';

@@ -1,4 +1,4 @@
-import { testHostHeaders, pairTestHost, TEST_OPERATOR } from '../support/server.ts';
+import { testHostHeaders, awaitServerReady, TEST_OPERATOR } from '../support/server.ts';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdir,mkdtemp} from 'node:fs/promises';
@@ -10,10 +10,11 @@ import {SqliteCandidates} from '../../packages/infrastructure/governance/src/ind
 import {MnemonCliProvider,createRunner} from '../../packages/providers/mnemon/src/index.ts';
 import {MemoryApplication} from '../../packages/core/application/src/index.ts';
 import {startServer,stopProcess,until} from '../support/server.ts';
+import { mnemonBinary } from './mnemon-binary.ts';
 
 for(const stage of ['content','link'])test(`Actual kill after ${stage} commit preserves old publication, then recovers one directed replacement`,{timeout:45000},async()=>{
   await mkdir('work/e2e',{recursive:true});const root=await mkdtemp(resolve(`work/e2e/version-${stage}-`));
-  const env={MNEMON_BINARY:process.env.MNEMON_BINARY??resolve('work/tools/mnemon/mnemon.exe'),MNEMON_DATA_DIR:join(root,'provider'),MNEMON_STORE:'recovery',MNEMOWEAVE_STATE_DIR:join(root,'state'),MNEMOWEAVE_PORT:'0',MNEMOWEAVE_TOKEN:'recovery-host-token-0123456789',MNEMOWEAVE_OPERATOR_TOKEN:'recovery-operator-token-987654321'};
+  const env={MNEMON_BINARY:mnemonBinary(),MNEMON_DATA_DIR:join(root,'provider'),MNEMON_STORE:'recovery',MNEMOWEAVE_STATE_DIR:join(root,'state'),MNEMOWEAVE_PORT:'0',MNEMOWEAVE_TOKEN:'recovery-host-token-0123456789',MNEMOWEAVE_OPERATOR_TOKEN:'recovery-operator-token-987654321'};
   let server=await startServer(env);let fault:ReturnType<typeof spawn>|undefined;
   const headers=testHostHeaders(env.MNEMOWEAVE_TOKEN);const operator={...headers,authorization:`Bearer ${env.MNEMOWEAVE_OPERATOR_TOKEN}`};
   const get=async(id:string)=>await(await fetch(`${server.url}/v1/candidates/${id}`,{headers})).json() as CandidateRecord;

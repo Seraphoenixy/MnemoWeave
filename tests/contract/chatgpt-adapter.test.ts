@@ -7,7 +7,7 @@ test('ChatGPT local hook configuration uses arrays and leaves cloud orchestratio
   for (const event of ['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'Stop', 'SessionEnd']) assert.ok(Array.isArray(config.hooks[event]![0]!.hooks));
   assert.throws(() => chatgptHooksJson('node project-hook.js', 'cloud'), /REVIEW_REQUIRED/);
   assert.equal(chatgptDescriptor().gatesMet, false);
-  const toml = chatgptMcpConfig('node', ['C:\\project\\mcp.js'], { MNEMOWEAVE_BRIDGE_HOST_ID: 'chatgpt-host', MNEMOWEAVE_TOKEN: 'fixture-only-01234567890123456789' });
+  const toml = chatgptMcpConfig('node', ['C:\\project\\mcp.js'], { MNEMOWEAVE_HOST_ID: 'chatgpt-host', MNEMOWEAVE_TOKEN: 'fixture-only-01234567890123456789' });
   assert.equal((toml.match(/env = /g) ?? []).length, 1);
   assert.ok(toml.includes('C:\\\\project\\\\mcp.js'));
 });

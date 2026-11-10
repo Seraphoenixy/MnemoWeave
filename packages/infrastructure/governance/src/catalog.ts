@@ -242,8 +242,93 @@ export class SqliteMemoryCatalog implements MemoryCatalogReader {
     this.db.prepare('DELETE FROM catalog_reservations WHERE memory_id=? AND operation_id=?').run(plan.targetMemoryId,plan.id);
     this.scheduleReview(plan.memoryId, request.knowledgeType, time);
   }
-  /** KNOWLEDGE-01: due times are derived; expiry only queues a review, never invalidates. */
-  private scheduleReview(memoryId: string, knowledgeType: string, baseTime: string): void {
+  /**
+   * User edit: append one immutable revision without a review round. The edit is still recorded
+   * as an operator review decision so the audit trail keeps who changed what and why.
+   */
+  publishDirectEdit(memoryId: string, request: RememberRequest, providerId: string, hash: string, time: string, actor: string, reason: string): { memoryId: string; revisionId: string; candidateId: string } {
+    return this.transaction(() => {
+      if (createHash('sha256').update(request.content).digest('hex') !== hash) throw new MnemoWeaveError('PROVIDER_INTEGRITY');
+      const memory = this.db.prepare('SELECT * FROM catalog_memories WHERE id=?').get(memoryId);
+      if (!memory) throw new MnemoWeaveError('NOT_FOUND');
+      if (String(memory['state']) !== 'active') throw new MnemoWeaveError('INVALID_STATE');
+      const currentId = String(memory['current_revision_id']);
+      const base = this.db.prepare('SELECT revision_number FROM catalog_revisions WHERE id=?').get(currentId);
+      if (!base) throw new MnemoWeaveError('INVALID_STATE');
+      const candidateId = randomUUID();
+      const requestJson = JSON.stringify(request);
+      this.db.prepare('INSERT INTO governance_candidates(id,idempotency_key,request_hash,request_json,status,submitted_at) VALUES(?,?,?,?,?,?)')
+        .run(candidateId, `direct-edit:${candidateId}`, createHash('sha256').update(requestJson).digest('hex'), requestJson, 'pending_review', time);
+      this.db.prepare('INSERT INTO governance_submission_receipts(id,candidate_id,status) VALUES(?,?,?)').run(randomUUID(), candidateId, 'candidate');
+      this.db.prepare('INSERT INTO governance_lifecycle(candidate_id,status) VALUES(?,?)').run(candidateId, 'persisted');
+      this.db.prepare('INSERT INTO governance_reviews(id,candidate_id,decision,actor,reason,assessment_json,created_at) VALUES(?,?,?,?,?,?,?)')
+        .run(randomUUID(), candidateId, 'approve', actor, reason, null, time);
+      const revisionId = randomUUID();
+      const number = Number(base['revision_number']) + 1;
+      this.db.prepare('INSERT INTO catalog_revisions(id,memory_id,revision_number,parent_id,provider_memory_id,content_hash,candidate_id,published_at,effective_at,applicability,scope) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
+        .run(revisionId, memoryId, number, currentId, providerId, hash, candidateId, time, time, String(memory['applicability']), String(memory['scope']));
+      const changed = this.db.prepare('UPDATE catalog_memories SET current_revision_id=? WHERE id=? AND current_revision_id=?').run(revisionId, memoryId, currentId);
+      if (changed.changes !== 1) throw new MnemoWeaveError('INVALID_STATE');
+      this.emit('revision', revisionId, { id: revisionId, memoryId, number, parentId: currentId, providerMemoryId: providerId, contentHash: hash, candidateId, publishedAt: time, effectiveAt: time, applicability: memory['applicability'], scope: memory['scope'] });
+      this.scheduleReview(memoryId, request.knowledgeType, time);
+      return { memoryId, revisionId, candidateId };
+    });
+  }
+  /**
+   * Record a revision that another machine created. The local catalog has no candidate
+   * for it, so a synthetic one carries the request metadata (its body lives in the
+   * Provider). The call is idempotent by provider id: a replay returns the existing row.
+   */
+  publishSynced(memoryId: string, request: RememberRequest, providerId: string, hash: string, time: string, actor: string, reason: string): { memoryId: string; revisionId: string } {
+    return this.transaction(() => {
+      if (createHash('sha256').update(request.content).digest('hex') !== hash) throw new MnemoWeaveError('PROVIDER_INTEGRITY');
+      const existing = this.db.prepare('SELECT id, memory_id FROM catalog_revisions WHERE provider_memory_id=?').get(providerId);
+      if (existing) return { memoryId: String(existing['memory_id']), revisionId: String(existing['id']) };
+      const candidateId = randomUUID();
+      const requestJson = JSON.stringify(request);
+      this.db.prepare('INSERT INTO governance_candidates(id,idempotency_key,request_hash,request_json,status,submitted_at) VALUES(?,?,?,?,?,?)')
+        .run(candidateId, `sync:${candidateId}`, createHash('sha256').update(requestJson).digest('hex'), requestJson, 'pending_review', time);
+      this.db.prepare('INSERT INTO governance_submission_receipts(id,candidate_id,status) VALUES(?,?,?)').run(randomUUID(), candidateId, 'candidate');
+      this.db.prepare('INSERT INTO governance_lifecycle(candidate_id,status) VALUES(?,?)').run(candidateId, 'persisted');
+      this.db.prepare('INSERT INTO governance_reviews(id,candidate_id,decision,actor,reason,assessment_json,created_at) VALUES(?,?,?,?,?,?,?)')
+        .run(randomUUID(), candidateId, 'approve', actor, reason, null, time);
+      const memory = this.db.prepare('SELECT * FROM catalog_memories WHERE id=?').get(memoryId);
+      if (!memory) {
+        const revisionId = randomUUID();
+        this.db.prepare('INSERT INTO catalog_memories VALUES(?,?,?,?,?)').run(memoryId, null, 'active', request.scope, request.provenance.applicability);
+        this.db.prepare('INSERT INTO catalog_revisions(id,memory_id,revision_number,parent_id,provider_memory_id,content_hash,candidate_id,published_at,effective_at,applicability,scope) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
+          .run(revisionId, memoryId, 1, null, providerId, hash, candidateId, time, time, request.provenance.applicability, request.scope);
+        this.db.prepare('UPDATE catalog_memories SET current_revision_id=? WHERE id=?').run(revisionId, memoryId);
+        this.emit('memory', memoryId, { id: memoryId, currentRevisionId: revisionId, state: 'active', scope: request.scope, ...(request.projectId ? { projectId: request.projectId } : {}), applicability: request.provenance.applicability });
+        this.emit('revision', revisionId, { id: revisionId, memoryId, number: 1, parentId: null, providerMemoryId: providerId, contentHash: hash, candidateId, publishedAt: time, effectiveAt: time, applicability: request.provenance.applicability, scope: request.scope, ...(request.projectId ? { projectId: request.projectId } : {}) });
+        this.scheduleReview(memoryId, request.knowledgeType, time);
+        return { memoryId, revisionId };
+      }
+      if (String(memory['state']) !== 'active') throw new MnemoWeaveError('INVALID_STATE');
+      const currentId = String(memory['current_revision_id']);
+      const base = this.db.prepare('SELECT revision_number FROM catalog_revisions WHERE id=?').get(currentId);
+      if (!base) throw new MnemoWeaveError('INVALID_STATE');
+      const revisionId = randomUUID();
+      const number = Number(base['revision_number']) + 1;
+      this.db.prepare('INSERT INTO catalog_revisions(id,memory_id,revision_number,parent_id,provider_memory_id,content_hash,candidate_id,published_at,effective_at,applicability,scope) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
+        .run(revisionId, memoryId, number, currentId, providerId, hash, candidateId, time, time, String(memory['applicability']), String(memory['scope']));
+      const changed = this.db.prepare('UPDATE catalog_memories SET current_revision_id=? WHERE id=? AND current_revision_id=?').run(revisionId, memoryId, currentId);
+      if (changed.changes !== 1) throw new MnemoWeaveError('INVALID_STATE');
+      this.emit('revision', revisionId, { id: revisionId, memoryId, number, parentId: currentId, providerMemoryId: providerId, contentHash: hash, candidateId, publishedAt: time, effectiveAt: time, applicability: memory['applicability'], scope: memory['scope'] });
+      this.scheduleReview(memoryId, request.knowledgeType, time);
+      return { memoryId, revisionId };
+    });
+  }
+  /** Hide a memory whose remote entry was withdrawn; the revision history stays. */
+  retireSynced(memoryId: string): void {
+    this.transaction(() => {
+      const row = this.db.prepare("SELECT current_revision_id FROM catalog_memories WHERE id=? AND state='active'").get(memoryId);
+      if (!row) return;
+      this.db.prepare("UPDATE catalog_memories SET state='superseded' WHERE id=?").run(memoryId);
+      this.emit('memory', memoryId, { id: memoryId, currentRevisionId: String(row['current_revision_id']), state: 'superseded' });
+    });
+  }
+  /** KNOWLEDGE-01: due times are derived; expiry only queues a review, never invalidates. */  private scheduleReview(memoryId: string, knowledgeType: string, baseTime: string): void {
     if (!this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='catalog_review_state'").get()) return;
     const intervalDays = REVIEW_INTERVAL_DAYS[knowledgeType] ?? DEFAULT_REVIEW_INTERVAL_DAYS;
     const dueAt = new Date(new Date(baseTime).getTime() + intervalDays * REVIEW_DAY_MS).toISOString();

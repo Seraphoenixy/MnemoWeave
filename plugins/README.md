@@ -5,13 +5,13 @@
 | 目录 | 宿主 | 形态 | 状态 |
 |---|---|---|---|
 | `zcode-mnemo-weave/` | ZCode | `.zcode-plugin/plugin.json` + `hooks/hooks.json` + `.mcp.json` | 可安装 |
-| `chatgpt-mnemo-weave/` | ChatGPT 桌面 | `.codex-plugin/plugin.json` + `hooks/hooks.json` + `.mcp.json` | 可安装；钩子输出 `hookSpecificOutput` |
-| `dsh-mnemo-weave/` | DSH | Cordis 包：`lib/index.js` 注入骨架 + `lib/ui`、`lib/client.js` 只读记忆界面 | 可导入；界面已程序化验证，真实桌面加载未验收 |
+| `chatgpt-mnemo-weave/` | ChatGPT 桌面 | `.codex-plugin/plugin.json`（OpenAI 插件清单目录）+ `hooks/hooks.json` + `.mcp.json` | 可安装；钩子输出 `hookSpecificOutput` |
+| `dsh-mnemo-weave/` | DSH | Cordis 包：`lib/index.js` 注入骨架 + `lib/ui`、`lib/client.js` 记忆界面（可查看与编辑） | 可导入；界面已程序化验证，真实桌面加载未验收 |
 
 ## 构建
 
 ```powershell
-Set-Location D:\projects\MnemoWeave
+Set-Location D:/project/MnemoWeave
 node node_modules/typescript/bin/tsc
 node scripts/build-plugins.mjs
 ```
@@ -31,7 +31,7 @@ dist/plugins/
 
 - ZCode：Settings → Plugins → Create → Add marketplace → 选择 `dist/plugins/marketplace.json`，或直接选 `dist/plugins/zcode-mnemo-weave`。
 - ChatGPT 桌面：仓库级 marketplace 在 `.agents/plugins/marketplace.json`；也可把 `dist/plugins/chatgpt-mnemo-weave` 作为本地插件目录加入。
-- DSH：把 `dist/plugins/dsh-mnemo-weave` 作为插件包导入；只读记忆界面见 `docs/implementation/dsh-ui.md`，提示期注入未实现前只加载空注入骨架。
+- DSH：把 `dist/plugins/dsh-mnemo-weave` 作为插件包导入；记忆界面见 `docs/dsh-ui.md`，提示期注入骨架在 SDK 核验完成前只加载空注入。
 
 ## 运行前提
 

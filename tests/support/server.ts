@@ -1,4 +1,3 @@
-import { hostCredential } from '../../packages/protocols/http/src/index.ts';
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
@@ -17,8 +16,8 @@ export async function startServer(env: Record<string, string>): Promise<{ child:
         if (!line.startsWith('{')) continue;
         const event = JSON.parse(line) as { event: string; address?: { port: number } };
         if (event.event === 'listening') {
-          const url = `http://127.0.0.1:${event.address!.port}`;
-          void pairTestHost(url, env).then(() => { clearTimeout(timer); done({ child, url }); }).catch(error => { clearTimeout(timer); child.kill(); fail(error); });
+          clearTimeout(timer);
+          done({ child, url: `http://127.0.0.1:${event.address!.port}` });
         }
       }
     });
@@ -39,9 +38,10 @@ export async function until<T>(operation: () => Promise<T>, predicate: (value: T
 
 export const TEST_OPERATOR = 'isolated-acceptance-operator-0123456789';
 export const TEST_HOST = 'isolated-e2e-host';
-export function testHostHeaders(token: string) { return { authorization: `Bearer ${hostCredential(token, TEST_HOST)}`, 'x-mnemoweave-host': TEST_HOST, 'content-type': 'application/json' }; }
-export async function pairTestHost(url: string, env: Record<string, string>) {
-  if (!env.MNEMOWEAVE_STATE_DIR) return;
-  const response = await fetch(`${url}/v1/sync/grant`, { method: 'POST', headers: { authorization: `Bearer ${env.MNEMOWEAVE_OPERATOR_TOKEN ?? TEST_OPERATOR}`, 'content-type': 'application/json' }, body: JSON.stringify({ hostId: TEST_HOST, projects: ['*'], globalIncluded: true }) });
-  if (response.status !== 200) throw new Error('Isolated test Host pairing failed');
+/** Hosts authenticate with the service token and name themselves through the header. */
+export function testHostHeaders(token: string) { return { authorization: `Bearer ${token}`, 'x-mnemoweave-host': TEST_HOST, 'content-type': 'application/json' }; }
+/** Hosts no longer pair; the caller only needs the listener to be reachable. */
+export async function awaitServerReady(url: string, _env: Record<string, string>): Promise<void> {
+  const response = await fetch(`${url}/health/live`, { headers: { authorization: `Bearer ${_env.MNEMOWEAVE_TOKEN ?? ''}` } });
+  if (!response.ok) throw new Error(`Server not ready: HTTP ${response.status}`);
 }

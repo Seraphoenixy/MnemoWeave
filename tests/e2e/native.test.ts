@@ -7,9 +7,10 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { MnemonCliProvider } from '../../packages/providers/mnemon/src/index.ts';
 import { MemoryApplication } from '../../packages/core/application/src/index.ts';
 import { createHttpServer } from '../../packages/protocols/http/src/index.ts';
+import { mnemonBinary } from './mnemon-binary.ts';
 
 test('Real Mnemon: Remember, deduplicate, HTTP + stdio MCP Recall', { timeout: 60000 }, async () => {
-  const binary = process.env.MNEMON_BINARY ?? resolve('work/tools/mnemon/mnemon.exe');
+  const binary = mnemonBinary();
   await mkdir(resolve('work/e2e'), { recursive: true });
   const dataDir = await mkdtemp(resolve('work/e2e/run-'));
   const provider = new MnemonCliProvider({ binary, dataDir, store: 'acceptance' });

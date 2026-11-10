@@ -2,7 +2,7 @@
 //   node dist/tests/support/zcode-acceptance-collect.js <stateDir> [hostId]
 // Reads session_events from the governance store, maps the captured hooks onto the
 // HOST-03 event categories, and emits the sanitized result block to paste into
-// docs/implementation/host-acceptance/zcode.md.
+// docs/host-acceptance.md.
 import { DatabaseSync } from 'node:sqlite';
 import { isAbsolute, join } from 'node:path';
 
@@ -43,6 +43,6 @@ try {
     missing: required.filter(kind => !(kind in categories)),
     knownGaps: ['session.ended: ZCode 无专用会话结束事件（第十九批 HOST-02-ZC 登记，不假充）'],
     sanitizedReceipts: sanitized,
-    pasteBack: '将本 JSON 贴回 docs/implementation/host-acceptance/zcode.md 场景清单；能力声明升级见 packages/adapters/zcode/src/index.ts 的 zcodeDescriptor',
+    pasteBack: '将本 JSON 贴回 docs/host-acceptance.md 第 3 节；能力声明升级见 packages/adapters/zcode/src/index.ts 的 zcodeDescriptor',
   }, null, 2)}\n`);
 } finally { db.close(); }

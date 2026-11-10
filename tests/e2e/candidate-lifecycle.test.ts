@@ -1,4 +1,4 @@
-import { testHostHeaders, pairTestHost, TEST_OPERATOR } from '../support/server.ts';
+import { testHostHeaders, awaitServerReady, TEST_OPERATOR } from '../support/server.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -10,6 +10,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { MnemonCliProvider } from '../../packages/providers/mnemon/src/index.ts';
 import type { CandidateRecord } from '../../packages/core/contracts/src/index.ts';
+import { mnemonBinary } from './mnemon-binary.ts';
 
 async function start(env: Record<string, string>): Promise<{ child: ChildProcess; url: string }> {
   const child = spawn(process.execPath, ['apps/server/src/main.ts'], { cwd: resolve('.'), windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, MNEMOWEAVE_OPERATOR_TOKEN: TEST_OPERATOR, ...env } });
@@ -24,7 +25,7 @@ async function start(env: Record<string, string>): Promise<{ child: ChildProcess
       for (const line of lines) {
         if (!line.startsWith('{')) continue;
         const event = JSON.parse(line) as { event: string; address?: { port: number } };
-        if (event.event === 'listening') { const url = `http://127.0.0.1:${event.address!.port}`; void pairTestHost(url, env).then(() => { clearTimeout(timer); done({ child, url }); }).catch(fail); }
+        if (event.event === 'listening') { const url = `http://127.0.0.1:${event.address!.port}`; void awaitServerReady(url, env).then(() => { clearTimeout(timer); done({ child, url }); }).catch(fail); }
       }
     });
   });
@@ -37,7 +38,7 @@ async function stop(child: ChildProcess): Promise<void> {
 test('HTTP/MCP candidate submission survives actual Server restart and never writes formal memory', { timeout: 60000 }, async () => {
   await mkdir('work/e2e', { recursive: true });
   const root = await mkdtemp(resolve('work/e2e/candidates-'));
-  const binary = process.env.MNEMON_BINARY ?? resolve('work/tools/mnemon/mnemon.exe');
+  const binary = mnemonBinary();
   const env = {
     MNEMON_BINARY: binary, MNEMON_DATA_DIR: join(root, 'provider'), MNEMON_STORE: 'candidate_test',
     MNEMOWEAVE_STATE_DIR: join(root, 'state'), MNEMOWEAVE_PORT: '0', MNEMOWEAVE_TOKEN: 'candidate-lifecycle-test-token-001',

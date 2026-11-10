@@ -1,7 +1,6 @@
 
 # Bundle layer: DSH loads this file when the plugin bundle is enabled.
-# Token stays in the host environment (MNEMOWEAVE_TOKEN / MNEMOWEAVE_BRIDGE_UI_TOKEN);
-# no secrets in this file.
+# The service token stays in the host environment (MNEMOWEAVE_TOKEN); no secrets in this file.
 - insert:
     # Prompt-time View injection (skeleton; see README for its blocked state).
     - id: mnemo-weave
@@ -9,9 +8,9 @@
       config:
         serverUrl: http://127.0.0.1:4317
         timeoutMs: 1900
-    # Read-only memory page. Its Host half serves the RPC the sidebar page calls;
-    # the Bridge UI token is read from MNEMOWEAVE_BRIDGE_UI_TOKEN.
+    # Editable memory page. Its Host half calls the MnemoWeave Server directly with the
+    # service token from MNEMOWEAVE_TOKEN and identifies itself through MNEMOWEAVE_HOST_ID.
     - id: mnemo-weave-ui
       name: dsh-mnemo-weave/ui
       config:
-        bridgeUrl: http://127.0.0.1:4319
+        serverUrl: http://127.0.0.1:4317

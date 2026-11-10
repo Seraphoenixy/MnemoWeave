@@ -6,8 +6,12 @@ import type { Health, RecallRequest, RecallResult } from '../../../core/contract
 import type { MemoryProvider } from '../../../core/application/src/index.ts';
 
 export type Runner = (args: string[]) => Promise<string>;
+/**
+ * `binary` is whatever the environment already provides: a bare command name resolved
+ * through PATH (the default) or an explicit path. Nothing is resolved relative to the repo.
+ */
 export function createRunner(binary: string, timeout = 15000, maxBuffer = 2 * 1024 * 1024): Runner {
-  if (!isAbsolute(binary)) throw new Error('MNEMON_BINARY must be absolute');
+  if (!binary.trim()) throw new Error('MNEMON_BINARY must name a command');
   return args => new Promise((resolve, reject) => {
     execFile(binary, args, { shell: false, windowsHide: true, timeout, maxBuffer, encoding: 'utf8', env: { ...process.env, MNEMON_MAX_INSIGHTS: '0' } }, (error, stdout) => {
       if (error) {
@@ -23,6 +27,9 @@ const NativeRemember = z.discriminatedUnion('action', [
 ]);
 const Status = z.object({ total_insights: z.number().int().nonnegative() });
 const NativeMemory = z.object({ id: z.string().min(1), content: z.string() });
+const NativeForget = z.object({ id: z.string().min(1), status: z.literal('deleted') });
+const NativeRelated = z.array(z.object({ id: z.string().min(1), content: z.string(), depth: z.number().int().optional(), via_edge_type: z.string().optional() }));
+const EdgeTypes = ['supersedes', 'semantic', 'causal', 'entity', 'temporal'] as const;
 function decode<T>(schema: z.ZodType<T>, text: string): T {
   try { return schema.parse(JSON.parse(text)); } catch { throw new MnemoWeaveError('PROVIDER_PROTOCOL'); }
 }
@@ -106,6 +113,36 @@ export class MnemonCliProvider implements MemoryProvider {
     return this.serial(async () => {
       const result = decode(NativeRemember, await this.checked(['remember', '--source', 'external', '--', content]));
       return { id: result.action === 'skipped' ? result.replaced_id : result.id, action: result.action };
+    });
+  }
+  /**
+   * Cross-machine rebuild write. `--no-diff` is deliberate: the same body may already
+   * exist on this machine, and duplicate detection would return `skipped` without a new
+   * id. The source carries changeId and version so a lost response can be located later.
+   */
+  syncRemember(content: string, changeId: string, version: number): Promise<{ id: string; action: 'added' | 'skipped'; replacedId: string | null }> {
+    if (!content.trim() || Buffer.byteLength(content, 'utf8') > 8000) return Promise.reject(new MnemoWeaveError('INVALID_INPUT'));
+    if (!z.uuid().safeParse(changeId).success || !Number.isInteger(version) || version < 1) return Promise.reject(new MnemoWeaveError('INVALID_INPUT'));
+    return this.serial(async () => {
+      const result = decode(NativeRemember, await this.checked(['remember', '--source', `mnemoweave:${changeId}:${version}`, '--no-diff', '--', content]));
+      return { id: result.action === 'skipped' ? result.replaced_id : result.id, action: result.action, replacedId: result.action === 'skipped' ? result.replaced_id : null };
+    });
+  }
+  /** Soft delete. Historical edges pointing at the insight disappear, so sync never uses this for withdrawal. */
+  forget(id: string): Promise<{ id: string; status: 'deleted' }> {
+    if (!id.trim()) return Promise.reject(new MnemoWeaveError('INVALID_INPUT'));
+    return this.serial(async () => {
+      const result = decode(NativeForget, await this.checked(['forget', id]));
+      if (result.id !== id) throw new MnemoWeaveError('PROVIDER_PROTOCOL');
+      return result;
+    });
+  }
+  /** Read native relations back, used to verify rebuilt supersedes chains. */
+  related(id: string, edge: (typeof EdgeTypes)[number] = 'supersedes', depth = 1): Promise<{ id: string; content: string; depth: number; viaEdgeType: string | null }[]> {
+    if (!id.trim() || !EdgeTypes.includes(edge) || !Number.isInteger(depth) || depth < 1 || depth > 5) return Promise.reject(new MnemoWeaveError('INVALID_INPUT'));
+    return this.serial(async () => {
+      const rows = decode(NativeRelated, await this.checked(['related', id, '--edge', edge, '--depth', String(depth)]));
+      return rows.map((row) => ({ id: row.id, content: row.content, depth: row.depth ?? 1, viaEdgeType: row.via_edge_type ?? null }));
     });
   }
 }

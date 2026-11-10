@@ -3,7 +3,7 @@
     "mnemoweave": {
       "type": "stdio",
       "command": "node",
-      "args": ["${CODEX_PLUGIN_ROOT}/dist/apps/server/src/mcp-main.js"],
+      "args": ["${PLUGIN_ROOT}/dist/apps/server/src/mcp-main.js"],
       "env": {
         "MNEMON_BINARY": "${MNEMON_BINARY}",
         "MNEMON_DATA_DIR": "${MNEMON_DATA_DIR}",

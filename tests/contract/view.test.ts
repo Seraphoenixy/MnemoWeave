@@ -194,7 +194,7 @@ test('HTTP View delivery requires the paired Host header and returns the assembl
     const request = ViewRequest.parse(input);
     return assembler.assemble({ grant: grant({ hostId }), ...(request.query !== undefined ? { query: request.query } : {}) });
   };
-  const server = createHttpServer(store.app, token, undefined, undefined, view);
+  const server = createHttpServer(store.app, token, undefined, { view, context: () => ({ sessionId: 'probe', task: null, revision: 0, closed: false, entries: [], pins: [], capture: 'idle' }), pin: () => undefined, register: () => undefined, closeSession: () => undefined, events: () => ({ status: 'stored', eventId: 'probe' }), memories: async () => ({ items: [] }), editMemory: async () => { throw new Error('not configured'); } });
   await new Promise<void>(done => server.listen(0, '127.0.0.1', done));
   try {
     const address = server.address();
@@ -211,4 +211,49 @@ test('HTTP View delivery requires the paired Host header and returns the assembl
   } finally {
     await new Promise<void>((done, fail) => server.close(error => error ? fail(error) : done()));
   }
+});
+
+test('runtime rules are injected whole and counted separately from the memory budget', async () => {
+  const store = makeStore([makeEntry('content one')]);
+  const rules = [{ entryId: randomUUID(), version: 1, body: '提交前必须运行类型检查。' }];
+  const assembler = new ViewAssembler(store.app, { rules: () => rules });
+  const view = await assembler.assemble({ grant: grant(), query: 'content' });
+  assert.deepEqual(view.rules, rules);
+  assert.equal(view.rulesBudget?.usedTokens, estimateTokens(rules[0]!.body) + 8);
+  assert.equal(view.rulesBudget?.exceeded, false);
+  assert.equal(view.rulesBudget?.limitTokens, 1024);
+});
+
+test('an over-budget rule set is omitted instead of trimmed', async () => {
+  const store = makeStore([makeEntry('content one')]);
+  const rules = [{ entryId: randomUUID(), version: 1, body: '准则'.repeat(2000) }];
+  const assembler = new ViewAssembler(store.app, { rules: () => rules });
+  const view = await assembler.assemble({ grant: grant(), query: 'content' });
+  assert.equal(view.rules, undefined);
+  assert.equal(view.rulesBudget?.exceeded, true);
+  assert.ok(view.rulesBudget!.usedTokens > 1024);
+  assert.equal(view.memories.length, 1);
+  assert.equal(view.complete, true);
+});
+
+test('a view without rules carries no rules fields', async () => {
+  const store = makeStore([makeEntry('content one')]);
+  const assembler = new ViewAssembler(store.app);
+  const view = await assembler.assemble({ grant: grant(), query: 'content' });
+  assert.equal(view.rules, undefined);
+  assert.equal(view.rulesBudget, undefined);
+});
+
+test('A recalled Provider memory this machine never published is excluded as unregistered', async () => {
+  const entry = makeEntry('registered content');
+  const store = makeStore([entry]);
+  store.provider.recall = async () => ({ memories: [
+    { id: 'provider-never-published', content: '陌生正文 content', score: 0.9 },
+    { id: entry.descriptor.revisions[0]!.providerMemoryId, content: entry.content, score: 0.8 },
+  ] });
+  const view = await new ViewAssembler(store.app).assemble({ grant: grant(), query: 'content' });
+  assert.deepEqual(view.excluded.map(item => item.reason), ['unregistered']);
+  assert.equal(view.excluded[0]!.memoryId, 'provider-never-published');
+  assert.equal(view.memories.length, 1);
+  assert.equal(view.memories[0]!.memoryId, entry.descriptor.id);
 });

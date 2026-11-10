@@ -40,6 +40,23 @@ test('Failed receipt insertion rolls back candidate insertion', async () => {
   assert.equal(repo.submit(fixture()).status, 'pending_review');
   repo.close(); inject.close();
 });
+test('schema v12 adds confirmed entry versions and keeps the v11 tables', async () => {
+  await mkdir('work/tests', { recursive: true });
+  const path = join(await mkdtemp(resolve('work/tests/schema12-')), 'governance.db');
+  const repo = new SqliteCandidates(path);
+  repo.close();
+  const inspect = new DatabaseSync(path);
+  try {
+    assert.equal(Number(inspect.prepare('PRAGMA user_version').get()!['user_version']), 12);
+    const tables = new Set((inspect.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map((row) => row.name));
+    for (const name of ['entry_versions', 'sync_state', 'sync_outbox', 'sync_inbox', 'formal_map', 'runtime_rules', 'project_archives', 'project_bindings', 'runtime_injections']) assert.ok(tables.has(name), name);
+    for (const legacy of ['sync_log', 'sync_grants', 'sync_license_state']) assert.equal(tables.has(legacy), false, legacy);
+    assert.ok(tables.has('catalog_memories'));
+    assert.ok(tables.has('runtime_sessions'));
+  } finally {
+    inspect.close();
+  }
+});
 test('Rejected existing databases preserve their journal mode, data and version', async () => {
   await mkdir('work/tests', { recursive: true });
   for (const version of [0, 1, 2]) {

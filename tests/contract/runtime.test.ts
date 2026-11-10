@@ -5,13 +5,18 @@ import { resolve, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { SqliteCandidates } from '../../packages/infrastructure/governance/src/index.ts';
-import { SyncSource } from '../../packages/infrastructure/governance/src/sync-source.ts';
 import { MemoryApplication } from '../../packages/core/application/src/index.ts';
 import { MemoryRuntime } from '../../packages/core/application/src/runtime.ts';
 import { ViewAssembler, estimateTokens } from '../../packages/core/application/src/view.ts';
-import { renderView, InjectionSessions } from '../../packages/bridge/src/injection.ts';
-import { HostEvent, MnemoWeaveError, RememberInput } from '../../packages/core/contracts/src/index.ts';
+import { renderView } from '../../packages/client/src/render.ts';
+import { HostEvent, RememberInput } from '../../packages/core/contracts/src/index.ts';
+import type { ReadGrantRecord } from '../../packages/core/contracts/src/index.ts';
 import { SourceRegistry } from '../../packages/core/application/src/composition.ts';
+
+function grant(hostId: string, projects: string[], globalIncluded: boolean): ReadGrantRecord {
+  const now = Date.now();
+  return { grantId: randomUUID(), hostId, projects, globalIncluded, issuedAt: new Date(now).toISOString(), expiresAt: new Date(now + 3_600_000).toISOString(), generation: 0 };
+}
 
 async function fixture() {
   await mkdir('work/tests', { recursive: true });
@@ -26,9 +31,8 @@ async function fixture() {
     readMemory: async (id: string) => ({ id, content: contents.get(id)! }),
   };
   const app = new MemoryApplication(provider, repo, repo);
-  const source = new SyncSource(repo, async id => contents.get(id)!);
-  const grant = source.issueGrant('host-a', ['project-a'], false);
-  source.issueGrant('host-b', ['project-b'], true);
+  repo.runtime.register('project-a');
+  const hostGrant = grant('host-a', ['project-a'], false);
   const publish = (content: string, projectId = 'project-a', scope: 'project' | 'global' = 'project') => {
     const request = RememberInput.parse({ idempotencyKey: randomUUID(), content, scope, ...(scope === 'project' ? { projectId } : {}), knowledgeType: 'Constraint', provenance: { source: 'runtime-test', sourceReference: 'fixture', evidence: ['fixture'], verificationStatus: 'verified', confidence: 1, applicability: 'fixture', limitations: 'isolated test', lastVerified: null } });
     const candidate = repo.submit(request);
@@ -38,9 +42,9 @@ async function fixture() {
     return repo.get(candidate.id).publication!;
   };
   const event = (kind: 'session.started' | 'session.ended' | 'message.user' | 'message.assistant.final' | 'tool.completed', text = '', sessionId = 'session-a') => HostEvent.parse({ protocolVersion: '1', adapterVersion: 'test', eventId: randomUUID(), sessionId, projectId: 'project-a', kind, occurredAt: new Date().toISOString(), receivedAt: new Date().toISOString(), sourceRef: 'fixture', payload: kind.startsWith('session.') ? {} : { text } });
-  const send = (input: ReturnType<typeof HostEvent.parse>) => source.submitIntent('host-a', { intentId: input.eventId, kind: 'event', payload: input });
-  const runtime = new MemoryRuntime(repo.runtime, new ViewAssembler(app, { revocations: source }));
-  return { root, path, repo, app, source, grant, publish, event, send, runtime, queries };
+  const send = (input: ReturnType<typeof HostEvent.parse>) => { repo.events.record('host-a', input); repo.runtime.observe('host-a', input); };
+  const runtime = new MemoryRuntime(repo.runtime, new ViewAssembler(app));
+  return { root, path, repo, app, grant: hostGrant, publish, event, send, runtime, queries };
 }
 
 test('A new session receives resident memory without a search query; continue retains its task', async () => {
@@ -116,7 +120,7 @@ test('Capture extracts only user evidence, persists a reviewed candidate boundar
   } finally { f.repo.close(); }
 });
 
-test('Missing models, opt-out, invalid citations and revocation cannot silently publish knowledge', async () => {
+test('Missing models, opt-out and invalid citations cannot silently publish knowledge', async () => {
   const f = await fixture();
   try {
     f.send(f.event('message.user', 'Project uses strict TypeScript.'));
@@ -133,27 +137,15 @@ test('Missing models, opt-out, invalid citations and revocation cannot silently 
     await f.repo.runtime.tick({ capture: async () => ({ candidates: [{ content: 'Invented', eventIds: ['foreign-event'] }] }) });
     const db = new DatabaseSync(f.path);
     try { assert.equal(db.prepare('SELECT count(*) n FROM governance_candidates').get()!['n'], 0); } finally { db.close(); }
-    f.send(f.event('message.user', 'Use isolation for tests.', 'session-c'));
-    f.send(f.event('message.assistant.final', '', 'session-c'));
-    f.source.revokeHost('host-a');
-    await f.repo.runtime.tick({ capture: async () => { calls++; return { candidates: [] }; } });
-    assert.equal(calls, 0);
   } finally { f.repo.close(); }
 });
 
-test('Session end rejects new runtime views and pending injection cannot revive a closed session', async () => {
+test('Session end rejects new runtime views', async () => {
   const f = await fixture();
   try {
     f.send(f.event('session.started'));
     f.send(f.event('session.ended'));
     await assert.rejects(f.runtime.view(f.grant, { sessionId: 'session-a' }), /INVALID_STATE/);
-    let release!: () => void;
-    const waiting = new Promise<void>(resolve => { release = resolve; });
-    const sessions = new InjectionSessions({ assemble: async () => { await waiting; return f.runtime.view(f.grant, { sessionId: 'other' }); }, isRevoked: async () => false });
-    const pending = sessions.handle({ sessionId: 'other', turnId: 'turn-a', trigger: 'session_started' });
-    sessions.close('other'); release();
-    assert.notEqual((await pending).status, 'injected');
-    assert.equal(sessions.sessionCount, 0);
   } finally { f.repo.close(); }
 });
 
@@ -163,25 +155,4 @@ test('Composition rejects unavailable capabilities before executing a Source', a
   registry.register({ id: 'runtime', capabilities: ['project'], read: async () => { calls++; return {}; } });
   assert.throws(() => registry.compile({ plan: () => ({ steps: [{ sourceId: 'runtime', capability: 'write' }] }) }), /REVIEW_REQUIRED/);
   assert.equal(calls, 0);
-});
-
-test('Scoped snapshots and change streams contain only granted project history', async () => {
-  const f = await fixture();
-  try {
-    const allowed = f.publish('Project A scoped memory');
-    f.publish('Hidden project B memory', 'project-b');
-    f.publish('Hidden Global memory', '', 'global');
-    const changes = await f.source.changes(0, undefined, f.grant);
-    const serialized = JSON.stringify(changes);
-    assert.equal(serialized.includes('Hidden'), false);
-    assert.ok(changes.changes.some(change => change.op === 'scope_skip'));
-    const snapshotPath = join(f.root, 'scoped.db');
-    await f.source.snapshot(snapshotPath, undefined, f.grant);
-    const db = new DatabaseSync(snapshotPath, { readOnly: true });
-    try {
-      assert.deepEqual(db.prepare('SELECT id FROM replica_memories').all().map(row => row['id']), [allowed.memoryId]);
-      assert.equal(db.prepare('SELECT count(*) n FROM replica_revisions').get()!['n'], 1);
-      assert.equal(db.prepare('SELECT project_id FROM replica_memories').get()!['project_id'], 'project-a');
-    } finally { db.close(); }
-  } finally { f.repo.close(); }
 });

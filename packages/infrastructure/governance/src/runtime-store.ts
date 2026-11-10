@@ -92,12 +92,9 @@ export class SqliteRuntime implements RuntimeRepository {
   closeSession(hostId: string, sessionId: string): void {
     this.db.prepare('UPDATE runtime_sessions SET closed=1,revision=revision+1 WHERE host_id=? AND session_id=?').run(hostId, sessionId);
   }
-  private assertCaptureScope(hostId: string, projectId: string | undefined): void {
-    const grant = this.db.prepare('SELECT * FROM sync_grants WHERE host_id=?').get(hostId);
-    const watermark = Number(this.db.prepare('SELECT revocation_watermark FROM sync_license_state WHERE id=1').get()!['revocation_watermark']);
-    if (!grant || grant['revoked_at'] !== null || Number(grant['generation']) < watermark) throw new MnemoWeaveError('UNAUTHORIZED');
-    const projects = JSON.parse(String(grant['projects_json'])) as string[];
-    if (projectId && !projects.includes('*') && !projects.includes(projectId)) throw new MnemoWeaveError('UNAUTHORIZED');
+  private assertCaptureScope(_hostId: string, projectId: string | undefined): void {
+    // No per-host grants any more: the only scope rule left is an explicitly registered project.
+    if (projectId !== undefined && !this.registered(projectId)) throw new MnemoWeaveError('UNAUTHORIZED');
   }
   /** Persistent capture task, independent Run and Receipt; unknown model outcomes are safe to retry. */
   async tick(gateway: CaptureGateway | undefined): Promise<void> {

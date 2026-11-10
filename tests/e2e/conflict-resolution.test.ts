@@ -1,4 +1,4 @@
-import { testHostHeaders, pairTestHost, TEST_OPERATOR } from '../support/server.ts';
+import { testHostHeaders, awaitServerReady, TEST_OPERATOR } from '../support/server.ts';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdir,mkdtemp} from 'node:fs/promises';
@@ -6,10 +6,11 @@ import {join,resolve} from 'node:path';
 import {RememberInput} from '../../packages/core/contracts/src/index.ts';
 import type {CandidateRecord,ConflictRecord} from '../../packages/core/contracts/src/index.ts';
 import {startServer,stopProcess,until} from '../support/server.ts';
+import { mnemonBinary } from './mnemon-binary.ts';
 
 test('Real conflict decisions preserve history: keep, uncertain, revise, supersede and scope-qualified coexist', {timeout:90000},async()=>{
   await mkdir('work/e2e',{recursive:true});const root=await mkdtemp(resolve('work/e2e/conflicts-'));
-  const env={MNEMON_BINARY:process.env.MNEMON_BINARY??resolve('work/tools/mnemon/mnemon.exe'),MNEMON_DATA_DIR:join(root,'provider'),MNEMON_STORE:'conflicts',MNEMOWEAVE_STATE_DIR:join(root,'state'),MNEMOWEAVE_PORT:'0',MNEMOWEAVE_TOKEN:'conflict-host-token-0123456789',MNEMOWEAVE_OPERATOR_TOKEN:'conflict-operator-token-987654321'};
+  const env={MNEMON_BINARY:mnemonBinary(),MNEMON_DATA_DIR:join(root,'provider'),MNEMON_STORE:'conflicts',MNEMOWEAVE_STATE_DIR:join(root,'state'),MNEMOWEAVE_PORT:'0',MNEMOWEAVE_TOKEN:'conflict-host-token-0123456789',MNEMOWEAVE_OPERATOR_TOKEN:'conflict-operator-token-987654321'};
   let server=await startServer(env);
   const headers=testHostHeaders(env.MNEMOWEAVE_TOKEN);const operator={...headers,authorization:`Bearer ${env.MNEMOWEAVE_OPERATOR_TOKEN}`};
   const request=(key:string,text:string)=>RememberInput.parse({idempotencyKey:key,content:text,knowledgeType:'Practice',provenance:{source:'test',sourceReference:'fixture:conflict',evidence:['isolated fixture'],verificationStatus:'unverified',confidence:0.5,applicability:'same ARM project fixture',limitations:'not verified knowledge',lastVerified:null}});
