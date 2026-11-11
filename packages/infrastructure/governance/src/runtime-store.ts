@@ -143,7 +143,7 @@ export class SqliteRuntime implements RuntimeRepository {
         // Unknown project identity cannot silently promote the fact to Global.
         if (candidate && !task['project_id']) throw new MnemoWeaveError('REVIEW_REQUIRED');
         if (candidate) reference = this.submit({
-          idempotencyKey: `capture_${String(task['id'])}`, content: candidate.content, knowledgeType: 'Practice', tags: ['capture'], scope: 'project', projectId: String(task['project_id']),
+          idempotencyKey: `capture_${String(task['id'])}`, content: candidate.content, knowledgeType: 'Practice', tags: ['capture'],
           provenance: { source: 'runtime-capture', sourceReference: `session:${String(task['session_id'])}`, evidence: candidate.eventIds.map(id => `event:${String(task['host_id'])}:${id}`), verificationStatus: 'unverified', confidence: 0.5, applicability: `Project ${String(task['project_id'])}`, limitations: 'Model-extracted user statement; technical correctness has not been independently verified.', lastVerified: null },
         }).id;
         if (reference && candidate) for (const id of candidate.eventIds) {

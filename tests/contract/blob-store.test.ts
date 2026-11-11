@@ -8,7 +8,7 @@ import type { RememberRequest } from '../../packages/core/contracts/src/index.ts
 
 const DAY_MS = 86_400_000;
 const request = (key: string, content: string): RememberRequest => ({
-  idempotencyKey: key, content, knowledgeType: 'Practice', tags: [], scope: 'project',
+  idempotencyKey: key, content, knowledgeType: 'Practice', tags: [],
   provenance: {
     source: 'blob-test', sourceReference: `fixture:${key}`, evidence: ['fixture'], verificationStatus: 'verified',
     confidence: 0.5, applicability: 'isolated blob fixture', limitations: 'not production knowledge', lastVerified: null,

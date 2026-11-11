@@ -127,9 +127,11 @@ test('the page renders its editable shell and names unavailable data instead of 
   const page = calls.registered[0]!.component as unknown as (props: { connection: unknown; locale: unknown }) => ReactElement;
   const html = renderToString(React.createElement(page, { connection: { rpc: { call: async () => ({ ok: true, value: {} }) } }, locale: { getSnapshot: () => ({ active: 'zh-CN' }) } }));
   assert.match(html, /记忆中枢/);
-  assert.match(html, /直连 MnemoWeave Server/);
+  // The header carries no descriptive subtitle: connection state is the status row's job.
+  assert.doesNotMatch(html, /直连 MnemoWeave Server/, 'no subtitle repeats the transport');
+  assert.doesNotMatch(html, /主机:/, 'the host id is not repeated in the header');
   // The five class tabs are the top-level navigation; overview is the landing page.
-  for (const label of ['概览', '运行时记忆', '项目档案', '正式记忆', '同步']) assert.match(html, new RegExp(label));
+  for (const label of ['概览', '运行时记忆', '项目档案', '正式记忆', '设置']) assert.match(html, new RegExp(label));
   assert.match(html, /最近一次注入/);
   assert.match(html, /尚无注入记录/);
   assert.match(html, /本机与远端同步/);

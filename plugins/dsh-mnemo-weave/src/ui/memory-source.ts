@@ -10,7 +10,7 @@ import { MemoryClient, type ClientResponse, type ServerProbe, type ServerProbeFa
 import type { ServerPhaseReason } from '../shared/contract.ts';
 import type {
   UiArchive, UiConfigView, UiEditInput, UiEditResult, UiInjection, UiMemoryDetail, UiMemoryList,
-  ListSort, UiCreateInput, UiCreateResult, UiExplore, UiExploreHit, UiGraph, UiGraphEdge, UiGraphNode, UiMemoryConflict, UiMemoryRelation, UiMemoryRevision, UiMemorySummary, UiWithdrawInput, UiWithdrawResult, UiRule, UiStatus, UiSyncPass, UiSyncScope, UiSyncStatus,
+  ListSort, UiCreateInput, UiCreateResult, UiExplore, UiExploreHit, UiGraph, UiGraphEdge, UiGraphNode, UiMemoryConflict, UiMemoryRelation, UiMemoryRevision, UiMemorySummary, UiWithdrawInput, UiWithdrawResult, UiRule, UiRuleCreateInput, UiRuleEditInput, UiStatus, UiSyncPass, UiSyncScope, UiSyncStatus,
 } from '../shared/contract.ts';
 
 const PROTOCOL = 'PROVIDER_PROTOCOL';
@@ -26,6 +26,7 @@ function toPhaseReason(reason: ServerProbeFailure): ServerPhaseReason {
     case 'timeout': return 'timeout';
     case 'address_conflict': return 'address_conflict';
     case 'unauthorized': return 'unauthorized';
+    case 'task_missing': return 'task_missing';
     case 'task_failed':
     case 'starting':
     default: return 'task_failed';
@@ -133,7 +134,6 @@ export function parseMemoryList(value: unknown, query: string | undefined, limit
 
 function asSummary(value: unknown, what: string): UiMemorySummary {
   const row = asRecord(value, what);
-  const projectId = row['projectId'];
   const knowledgeType = row['knowledgeType'];
   const category = row['category'];
   const importance = row['importance'];
@@ -143,8 +143,6 @@ function asSummary(value: unknown, what: string): UiMemorySummary {
     memoryId: asString(row['memoryId'], `${what}.memoryId`),
     revisionId: asString(row['revisionId'], `${what}.revisionId`),
     providerMemoryId: asString(row['providerMemoryId'], `${what}.providerMemoryId`),
-    scope: asScope(row['scope'], `${what}.scope`),
-    ...(projectId === undefined ? {} : { projectId: asString(projectId, `${what}.projectId`) }),
     applicability: asString(row['applicability'], `${what}.applicability`),
     publishedAt: asString(row['publishedAt'], `${what}.publishedAt`),
     content: asString(row['content'], `${what}.content`),
@@ -196,15 +194,12 @@ export function parseMemoryDetail(value: unknown): UiMemoryDetail {
       selected: revisionId === selectedRevisionId,
     };
   });
-  const projectId = root['projectId'];
   return {
     memoryId: asString(root['id'], 'memory.id'),
     revisionId: selectedRevisionId,
     currentRevisionId,
     isCurrent: selectedRevisionId === currentRevisionId,
     providerMemoryId: asString(selected['providerMemoryId'], 'memory.selectedRevision.providerMemoryId'),
-    scope: asScope(root['scope'], 'memory.scope'),
-    ...(projectId === undefined ? {} : { projectId: asString(projectId, 'memory.projectId') }),
     applicability: asString(root['applicability'], 'memory.applicability'),
     state: asState(root['state'], 'memory.state'),
     content: asString(root['content'], 'memory.content'),
@@ -279,23 +274,22 @@ export function parseInjection(value: unknown): UiInjection {
   };
 }
 
+/** One `RuleRecord`, shared by the list and the two write responses. */
+export function parseRule(value: unknown, what = 'rule'): UiRule {
+  const row = asRecord(value, what);
+  return {
+    entryId: asString(row['entryId'], `${what}.entryId`),
+    body: asString(row['body'], `${what}.body`),
+    enabled: asBoolean(row['enabled'], `${what}.enabled`),
+    version: asInteger(row['version'], `${what}.version`),
+    withdrawnAt: nullableString(row['withdrawnAt'], `${what}.withdrawnAt`),
+  };
+}
+
 /** `RuleList` from `GET /v1/rules`; the Server returns every project to a named Host. */
 export function parseRuleList(value: unknown): UiRule[] {
   const root = asRecord(value, 'rules');
-  return asArray(root['items'], 'rules.items').map((item, index) => {
-    const what = `rules.items[${index}]`;
-    const row = asRecord(item, what);
-    const projectId = row['projectId'];
-    return {
-      entryId: asString(row['entryId'], `${what}.entryId`),
-      scope: asScope(row['scope'], `${what}.scope`),
-      projectId: projectId === null ? null : asString(projectId, `${what}.projectId`),
-      body: asString(row['body'], `${what}.body`),
-      enabled: asBoolean(row['enabled'], `${what}.enabled`),
-      version: asInteger(row['version'], `${what}.version`),
-      withdrawnAt: nullableString(row['withdrawnAt'], `${what}.withdrawnAt`),
-    };
-  });
+  return asArray(root['items'], 'rules.items').map((item, index) => parseRule(item, `rules.items[${index}]`));
 }
 
 /** `ArchiveList` from `GET /v1/archives`; without a project the Server returns all of them. */
@@ -483,8 +477,6 @@ export class MemorySource {
         const importance = row['importance'];
         return {
           memoryId: asString(row['memoryId'], `${where}.memoryId`),
-          scope: asScope(row['scope'], `${where}.scope`),
-          ...(projectId === undefined ? {} : { projectId: asString(projectId, `${where}.projectId`) }),
           state: asState(row['state'], `${where}.state`),
           publishedAt: asString(row['publishedAt'], `${where}.publishedAt`),
           ...(category === undefined || category === null ? {} : { category: asString(category, `${where}.category`) }),
@@ -537,8 +529,6 @@ export class MemorySource {
           memoryId: asString(row['memoryId'], `${where}.memoryId`),
           revisionId: asString(row['revisionId'], `${where}.revisionId`),
           providerMemoryId: asString(row['providerMemoryId'], `${where}.providerMemoryId`),
-          scope: asScope(row['scope'], `${where}.scope`),
-          ...(projectId === undefined ? {} : { projectId: asString(projectId, `${where}.projectId`) }),
           state,
           content: asString(row['content'], `${where}.content`),
           score,
@@ -574,8 +564,6 @@ export class MemorySource {
       ...(input.importance === undefined ? {} : { importance: input.importance }),
       ...(input.tags === undefined ? {} : { tags: input.tags }),
       ...(input.entities === undefined ? {} : { entities: input.entities }),
-      ...(input.scope === undefined ? {} : { scope: input.scope }),
-      ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
       ...(input.reason === undefined ? {} : { reason: input.reason }),
     });
     const root = asRecord(unwrap(response), 'create');
@@ -611,6 +599,32 @@ export class MemorySource {
 
   async rules(): Promise<UiRule[]> {
     return parseRuleList(unwrap(await this.client.rules()));
+  }
+
+  /** Publish a runtime rule. The Server treats user input as already confirmed. */
+  async createRule(input: UiRuleCreateInput): Promise<UiRule> {
+    const response = await this.client.createRule({
+      body: input.body,
+      ...(input.enabled === undefined ? {} : { enabled: input.enabled }),
+    });
+    return parseRule(unwrap(response), 'createRule');
+  }
+
+  async editRule(ruleId: string, input: UiRuleEditInput): Promise<UiRule> {
+    const response = await this.client.editRule(ruleId, {
+      ...(input.body === undefined ? {} : { body: input.body }),
+      ...(input.enabled === undefined ? {} : { enabled: input.enabled }),
+      ...(input.baseVersion === undefined ? {} : { baseVersion: input.baseVersion }),
+    });
+    return parseRule(unwrap(response), 'editRule');
+  }
+
+  async saveArchive(input: import('../shared/contract.ts').UiArchiveDraft, target?: { entryId: string; baseVersion: number }): Promise<UiArchive> {
+    const { projectId, ...fields } = input;
+    const response = target
+      ? await this.client.editArchive(target.entryId, { ...fields, baseVersion: target.baseVersion })
+      : await this.client.createArchive({ ...input, source: 'user' });
+    return parseArchiveList({ items: [unwrap(response)] })[0]!;
   }
 
   async archives(): Promise<UiArchive[]> {

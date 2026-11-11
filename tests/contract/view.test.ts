@@ -40,8 +40,8 @@ function makeEntry(content: string, applicability = 'isolated fixture'): StoreEn
   return {
     content,
     descriptor: {
-      id: memoryId, currentRevisionId: revisionId, state: 'active', scope: 'project', projectId: 'proj-1', applicability,
-      revisions: [{ id: revisionId, memoryId, number: 1, parentId: null, providerMemoryId, contentHash: sha(content), candidateId: randomUUID(), publishedAt: '2026-11-08T00:00:00.000Z', effectiveAt: '2026-11-08T00:00:00.000Z', applicability, scope: 'project' as const, projectId: 'proj-1' }],
+      id: memoryId, currentRevisionId: revisionId, state: 'active', applicability,
+      revisions: [{ id: revisionId, memoryId, number: 1, parentId: null, providerMemoryId, contentHash: sha(content), candidateId: randomUUID(), publishedAt: '2026-11-08T00:00:00.000Z', effectiveAt: '2026-11-08T00:00:00.000Z', applicability }],
       relations: [], conflicts: [],
     },
   };

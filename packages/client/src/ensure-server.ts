@@ -17,9 +17,11 @@
  * is listening there. A timeout may mean a Server that is still starting or a stuck one, and
  * a foreign 200 response must never be "fixed" by launching a second process on the port.
  *
- * Nothing here supervises or proxies the Server: the task owns the process, the host only
- * detects, wakes and then connects directly. `waitMs` bounds the wait so a host turn is
- * never held open by a Server that will not come up.
+ * A missing task is *not* installed from here. Registration asks for elevation, and a host
+ * process must not raise a permission prompt every time it starts: the install step
+ * (`node scripts/publish-server.mjs --register`) asks once, and a host that finds no task
+ * reports `task_missing` with the command to run. Nothing here supervises the Server either:
+ * the task owns the process, the host only detects, wakes and then connects.
  */
 import { execFile } from 'node:child_process';
 
@@ -38,6 +40,8 @@ export type ServerProbeFailure =
   | 'unauthorized'
   /** This Server is up, but its Provider dependency is not ready yet. */
   | 'starting'
+  /** No task is registered; the install step has not been run on this machine. */
+  | 'task_missing'
   /** The task could not be run, or the Server never became ready. */
   | 'task_failed';
 
@@ -64,6 +68,8 @@ export interface EnsureServerOptions extends ProbeOptions {
   pollMs?: number;
   /** Ask the scheduled task to run. Defaults to `schtasks /run`; injectable for tests. */
   runTask?: (taskName: string) => Promise<{ ok: boolean; detail: string }>;
+  /** Is the task registered? Defaults to `schtasks /query`; injectable for tests. */
+  taskExists?: (taskName: string) => Promise<boolean>;
   /** Clock injection so tests do not sleep. */
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
@@ -90,6 +96,20 @@ export async function runLocalServerTask(taskName: string = LOCAL_SERVER_TASK_NA
         return;
       }
       resolve({ ok: true, detail: (stdout || '').trim().slice(0, 200) });
+    });
+  });
+}
+
+/**
+ * Is the task registered? `schtasks /query` exits non-zero when it is not.
+ *
+ * Non-Windows reports `true` so that no host ever treats a missing Windows task as its problem.
+ */
+export async function queryLocalServerTask(taskName: string = LOCAL_SERVER_TASK_NAME): Promise<boolean> {
+  if (process.platform !== 'win32') return true;
+  return new Promise((resolve) => {
+    execFile('schtasks', ['/query', '/tn', taskName, '/fo', 'LIST'], { windowsHide: true, timeout: 10_000 }, (error, stdout) => {
+      resolve(!error && (stdout ?? '').trim() !== '');
     });
   });
 }
@@ -225,6 +245,7 @@ export async function ensureServer(options: EnsureServerOptions): Promise<Server
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((done) => { setTimeout(done, ms); }));
   const now = options.now ?? (() => Date.now());
   const runTask = options.runTask ?? runLocalServerTask;
+  const taskExists = options.taskExists ?? queryLocalServerTask;
   const deadline = now() + waitMs;
 
   let taskRun = false;
@@ -233,10 +254,18 @@ export async function ensureServer(options: EnsureServerOptions): Promise<Server
     const probe = await probeServer(options);
     if (probe.state === 'ready') return probe;
     if (probe.state === 'failed') {
-      // Only a refused connection justifies waking the task, and only once.
+      // Only a refused connection justifies touching the task, and only once.
       if (probe.reason !== 'connection_refused') return { ...probe, taskRun };
       if (!started) {
         started = true;
+        if (!(await taskExists(LOCAL_SERVER_TASK_NAME))) {
+          // Installation is the only place that may ask for elevation. A host that finds no
+          // task says so once and names the command; it never raises a prompt on its own.
+          return {
+            state: 'failed', reason: 'task_missing', taskRun: false,
+            detail: 'the local Server task is not registered; run the install step (node scripts/publish-server.mjs --register)',
+          };
+        }
         const run = await runTask(LOCAL_SERVER_TASK_NAME);
         if (!run.ok) return { state: 'failed', reason: 'task_failed', detail: run.detail, taskRun: false };
         taskRun = true;

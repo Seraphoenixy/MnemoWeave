@@ -103,9 +103,10 @@ test('a second write waits while the same entry is still unconfirmed', async () 
   assert.equal(fake.rows.length, 1, 'the queued change must not be duplicated');
 });
 
-test('rule and archive drafts carry their scope and payload', () => {
-  const rule = { entryId: randomUUID(), body: '准则正文', scope: 'project' as const, projectId: 'alpha', enabled: false, version: 2, withdrawnAt: null };
-  assert.equal(ruleScope(rule), 'project:alpha');
+test('a rule travels in the global scope and an archive in its project scope', () => {
+  const rule = { entryId: randomUUID(), body: '准则正文', enabled: false, version: 2, withdrawnAt: null };
+  // Rules are not project-scoped: every session applies the same set.
+  assert.equal(ruleScope(), 'global');
   const ruleEntry = ruleDraft(rule);
   assert.equal(ruleEntry.kind, 'runtime');
   assert.deepEqual(ruleEntry.payload, { enabled: false });

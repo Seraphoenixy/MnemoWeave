@@ -8,7 +8,7 @@ test('the DSH host bundle renders rules first, then working context, then memori
   const text = render({
     rules: [{ body: '提交前必须运行类型检查。' }],
     workingContext: [{ text: 'Working note.' }],
-    memories: [{ content: 'Formal memory.', scope: 'project' }],
+    memories: [{ content: 'Formal memory.' }],
   });
   const positions = ['Runtime rules', '提交前必须运行类型检查。', 'Working context', 'Formal memories'].map(needle => text.indexOf(needle));
   assert.ok(positions.every(position => position >= 0), text);
@@ -23,7 +23,7 @@ test('an omitted rule budget is named and empty views render nothing', () => {
 });
 
 test('memory rows keep their scope and excerpt marker', () => {
-  const text = render({ memories: [{ content: 'global one', scope: 'global' }, { content: 'excerpt one', scope: 'project', excerpt: true }] });
+  const text = render({ memories: [{ content: 'global one' }, { content: 'excerpt one', excerpt: true }] });
   assert.match(text, /- \(global\) global one/);
   assert.match(text, /- \(project\) excerpt one \[excerpt\]/);
 });

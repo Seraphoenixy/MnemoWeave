@@ -91,6 +91,7 @@ test('a refused connection wakes the task and then waits for the Server', async 
   try {
     const result = await ensureServer({
       baseUrl: `http://127.0.0.1:${port}`, token: TOKEN, hostId: 'probe', probeTimeoutMs: 500, waitMs: 5_000, pollMs: 10,
+      taskExists: async () => true,
       runTask: async (name) => {
         triggered.push(name);
         server = await listenOn(port, LIVE_OK, READY_OK);
@@ -180,14 +181,29 @@ test('an unresponsive address times out without waking the task', async () => {
   }
 });
 
-test('a missing task is reported as task_failed with its reason', async () => {
+test('a missing task is reported as task_missing with the install step, and nothing is woken', async () => {
   const port = await closedPort();
+  const triggered: string[] = [];
   const result = await ensureServer({
     baseUrl: `http://127.0.0.1:${port}`, token: TOKEN, hostId: 'probe', probeTimeoutMs: 300, waitMs: 1_000,
+    taskExists: async () => false,
+    runTask: async () => { triggered.push('run'); return { ok: true, detail: '' }; },
+  });
+  assert.equal(result.state, 'failed');
+  assert.equal(result.state === 'failed' ? result.reason : '', 'task_missing');
+  assert.equal(result.state === 'failed' ? result.taskRun : true, false);
+  assert.match(result.state === 'failed' ? result.detail : '', /publish-server\.mjs --register/, 'the detail names the one-time install step');
+  assert.deepEqual(triggered, [], 'nothing to run when there is no task');
+});
+
+test('an existing task is woken, and a refused wake is reported as task_failed', async () => {
+  const port = await closedPort();
+  const result = await ensureServer({
+    baseUrl: `http://127.0.0.1:${port}`, token: TOKEN, hostId: 'probe', probeTimeoutMs: 300, waitMs: 500,
+    taskExists: async () => true,
     runTask: async () => ({ ok: false, detail: 'ERROR: The system cannot find the file specified.' }),
   });
   assert.equal(result.state, 'failed');
   assert.equal(result.state === 'failed' ? result.reason : '', 'task_failed');
   assert.equal(result.state === 'failed' ? result.taskRun : true, false);
-  assert.match(result.state === 'failed' ? result.detail : '', /cannot find the file/);
 });

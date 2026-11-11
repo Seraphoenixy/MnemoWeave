@@ -77,7 +77,7 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
     try {
       this.transaction(() => {
         const version = Number(this.db.prepare('PRAGMA user_version').get()!['user_version']);
-      if (version > 14) throw new Error('Unsupported governance schema version');
+      if (version > 15) throw new Error('Unsupported governance schema version');
         if (version === 0) {
           if (this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").get()) throw new Error('Refusing to initialize an unidentified existing database');
           this.db.exec(`
@@ -179,7 +179,7 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
           const setRevision = this.db.prepare('UPDATE catalog_revisions SET applicability=?, scope=? WHERE id=?');
           for (const row of revisions) {
             const request = RememberInput.parse(JSON.parse(String(row['request_json'])));
-            setRevision.run(request.provenance.applicability, request.scope, String(row['revision_id']));
+            setRevision.run(request.provenance.applicability, 'global', String(row['revision_id']));
           }
           this.db.exec(`CREATE TRIGGER catalog_revisions_immutable_update BEFORE UPDATE ON catalog_revisions BEGIN SELECT RAISE(ABORT,'Revision is immutable'); END;`);
           this.db.exec('UPDATE governance_lifecycle SET changed_at=(SELECT submitted_at FROM governance_candidates c WHERE c.id=governance_lifecycle.candidate_id) WHERE changed_at IS NULL');
@@ -331,6 +331,37 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
           `);
         });
       }
+      if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) === 14) {
+        this.db.prepare('VACUUM INTO ?').run(`${path}.pre-v15.${randomUUID()}.db`);
+        this.transaction(() => {
+          if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) !== 14) return;
+          // v15: formal memories and runtime rules stop being project-scoped.
+          //
+          // A memory is a statement about the work, not an attribute of one directory, and a rule
+          // is a principle that holds everywhere. Project identity now belongs only to project
+          // archives, which are working notes about one repository. Project-scoped memories and
+          // rules cannot be reinterpreted as global ones — that would silently widen what a
+          // session sees — so they are cleared instead, together with everything hanging off
+          // them: catalog revisions, relations, conflicts and their sync bookkeeping.
+          //
+          // `scope`/`project_id` columns stay in place and are written as 'global'/NULL. Dropping
+          // them would rewrite every table that references a revision, and a fresh migration is a
+          // worse risk than two unused columns.
+          this.db.exec(`
+            DELETE FROM catalog_relations WHERE source_memory_id IN (SELECT id FROM catalog_memories WHERE scope <> 'global')
+              OR target_memory_id IN (SELECT id FROM catalog_memories WHERE scope <> 'global');
+            DELETE FROM catalog_conflict_decisions WHERE case_id IN (SELECT id FROM catalog_conflicts WHERE target_memory_id IN (SELECT id FROM catalog_memories WHERE scope <> 'global'));
+            DELETE FROM catalog_conflicts WHERE target_memory_id IN (SELECT id FROM catalog_memories WHERE scope <> 'global');
+            DELETE FROM catalog_reservations WHERE memory_id IN (SELECT id FROM catalog_memories WHERE scope <> 'global');
+            DELETE FROM catalog_revisions WHERE memory_id IN (SELECT id FROM catalog_memories WHERE scope <> 'global');
+            DELETE FROM catalog_memories WHERE scope <> 'global';
+            UPDATE catalog_memories SET scope = 'global';
+            DELETE FROM runtime_rules WHERE scope <> 'global' OR project_id IS NOT NULL;
+            UPDATE runtime_rules SET scope = 'global', project_id = NULL;
+            PRAGMA user_version=15;
+          `);
+        });
+      }
       this.db.prepare('SELECT knowledge_type, category, importance, tags_json, entities_json FROM catalog_revisions LIMIT 0').all();
       this.db.prepare('SELECT memory_id, version, provider_id, content, content_hash, scope, state FROM share_outbox LIMIT 0').all();
       this.ledger = new SqliteSyncLedger(this.db, operation => this.transaction(operation));
@@ -422,7 +453,7 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
       const body = this.db.prepare('SELECT content FROM governance_candidate_bodies WHERE candidate_id=?').get(candidateId);
       if (!body) return false; // cleared body: no content comparison, never a false duplicate
       const prior = CandidateRequest.parse(JSON.parse(String(this.db.prepare('SELECT request_json FROM governance_candidates WHERE id=?').get(candidateId)!['request_json'])));
-      return String(body['content']) === incoming.content && prior.scope === incoming.scope && prior.knowledgeType === incoming.knowledgeType && JSON.stringify(prior.tags) === JSON.stringify(incoming.tags) && JSON.stringify(prior.provenance) === JSON.stringify(incoming.provenance);
+      return String(body['content']) === incoming.content && prior.knowledgeType === incoming.knowledgeType && JSON.stringify(prior.tags) === JSON.stringify(incoming.tags) && JSON.stringify(prior.provenance) === JSON.stringify(incoming.provenance);
     }));
   }
   acquire(owner: string, duration: number): boolean {
@@ -518,7 +549,7 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
         : Number((this.db.prepare('SELECT revision_number FROM catalog_revisions WHERE memory_id=? ORDER BY revision_number DESC LIMIT 1').get(memoryId) as { revision_number?: number } | undefined)?.revision_number ?? 1);
       // Durable share marker, same transaction as the publication: if the process dies before
       // the listener runs, the next start still knows this memory owes a shared change.
-      const shareScope = request.projectId ? `project:${request.projectId}` : 'global';
+      const shareScope = 'global';
       this.db.prepare(`
         INSERT INTO share_outbox(memory_id, version, provider_id, content, content_hash, scope, state, attempts, last_error, created_at, updated_at)
         VALUES(?, ?, ?, ?, ?, ?, 'pending', 0, NULL, ?, ?)
@@ -531,7 +562,7 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
     // Outside the transaction: the listener may touch the network or the ledger, and a
     // publication that committed must not be rolled back because sharing it failed. The
     // durable row written inside `finish` is what makes a crash here recoverable.
-    const projectId = published.request.projectId ?? null;
+    const projectId = null;
     this.announcePublished(
       published.memoryId, result.id, published.number, published.request.content, published.contentHash,
       projectId ? `project:${projectId}` : 'global', projectId,

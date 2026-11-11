@@ -30,8 +30,7 @@ async function seed(
   const publish = async (content: string, projectId: string | null, index: number): Promise<void> => {
     const request = RememberInput.parse({
       idempotencyKey: `browse-${projectId ?? 'global'}-${index}`, content, knowledgeType: 'Practice', tags: [],
-      ...(projectId === null ? { scope: 'global' } : { scope: 'project', projectId }),
-      provenance: {
+            provenance: {
         source: 'local-user', sourceReference: `browse:${index}`, evidence: ['browse'], verificationStatus: 'verified',
         confidence: 1, applicability: projectId ?? 'global', limitations: '无（验收固定值）', lastVerified: '2026-11-10T00:00:00.000Z',
       },
@@ -49,7 +48,7 @@ async function seed(
   for (const [index, meta] of (counts.categorized ?? []).entries()) {
     const content = `同步分类条目 ${index}`;
     const request = RememberInput.parse({
-      idempotencyKey: `browse-synced-${index}`, content, knowledgeType: 'Practice', tags: [], scope: 'global',
+      idempotencyKey: `browse-synced-${index}`, content, knowledgeType: 'Practice', tags: [],
       provenance: {
         source: 'sync', sourceReference: `browse:synced:${index}`, evidence: ['sync'], verificationStatus: 'verified',
         confidence: 1, applicability: 'global', limitations: '无（验收固定值）', lastVerified: '2026-11-10T00:00:00.000Z',
@@ -92,24 +91,15 @@ test('paging covers every row exactly once, even when candidates share a timesta
   } finally { await app.close(); }
 });
 
-test('a scope filter reaches a project that sorts late, and reports the browsable projects', async () => {
+test('the list returns every memory regardless of the project it was recorded in', async () => {
   const root = resolve('work', 'browse-scope', randomUUID());
   const { app } = await seed(root, { global: 3, alpha: 2, beta: 1 });
   try {
+    // Memories are no longer project-scoped: the list is one set with no scope filter to reach it.
     const all = await app.client!.memories({ limit: 200 });
-    const listed = all.projects ?? [];
-    // The project index covers the whole set, so a filter can never hide an existing project.
-    assert.deepEqual(listed.map(entry => entry.projectId), ['alpha', 'beta']);
-    assert.deepEqual(listed.map(entry => entry.count), [2, 1]);
-
-    const beta = await app.client!.memories({ limit: 200, scope: 'project', projectId: 'beta' });
-    assert.equal(beta.items.length, 1);
-    assert.equal(beta.items[0]?.projectId, 'beta');
-    assert.equal(beta.items[0]?.scope, 'project');
-
-    const globalOnly = await app.client!.memories({ limit: 200, scope: 'global' });
-    assert.equal(globalOnly.items.length, 3);
-    assert.ok(globalOnly.items.every(item => item.scope === 'global'), 'a global filter never leaks project rows');
+    assert.equal(all.items.length, 6);
+    assert.equal((all as { projects?: unknown }).projects, undefined, 'no project index: a memory carries no project');
+    assert.ok(all.items.every(item => !('scope' in item) && !('projectId' in item)));
   } finally { await app.close(); }
 });
 

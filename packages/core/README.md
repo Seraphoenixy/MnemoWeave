@@ -1,8 +1,3 @@
-# core
+# Application Core
 
-Application Core 层分组。
-
-- `contracts/`：跨层共享的请求/输出契约（zod schema），包 `@mnemoweave/contracts`。
-- `application/`：应用核心工作流与端口（MemoryApplication、MemoryWorkflow、VersionWorkflow），包 `@mnemoweave/application`。
-
-本组承载 Application Core 的边界；包依赖方向与职责见 `docs/architecture.md`。
+`contracts/` 定义共享契约，`application/` 定义应用用例、工作流与依赖端口。参见 [架构](../../docs/architecture.md) 和 [实现与契约](../../docs/implementation.md)。

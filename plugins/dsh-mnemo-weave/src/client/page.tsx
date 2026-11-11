@@ -1,15 +1,17 @@
+import { SkillBacktestPanel } from './skill-backtest.tsx';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CreateDraft } from './panels.tsx';
-import type { ListSort, UiArchive, UiConfigView, UiConnectionTest, UiExplore, UiGraph, UiInjection, UiMemoryDetail, UiMemoryList, UiMemorySummary, UiRule, UiSettings, UiStatus, UiSyncPass, UiSyncStatus, UiWakeTest } from '../shared/contract.ts';
+import type { ListSort, UiArchive, UiConfigView, UiConnectionTest, UiExplore, UiGraph, UiInjection, UiMemoryDetail, UiMemoryList, UiMemorySummary, UiRegisterTest, UiRule, UiSettings, UiStatus, UiSyncPass, UiSyncStatus, UiWakeTest } from '../shared/contract.ts';
 import { createApi, RpcFailure } from './api.ts';
 import type { ClientConnection, LocaleService } from './dsh-types.ts';
 import { normalizeLanguage, translate, type Language, type MessageKey } from './i18n.ts';
 import { ensureStyles } from './styles.ts';
-import { ArchivesPanel, CreateMemoryForm, EntitiesPanel, ExplorePanel, GraphPanel, OverviewPanel, RuntimePanel, SettingsPanel, SyncPanel, TAB_KEYS, TAB_ORDER, type Tab } from './panels.tsx';
+import { ArchivesPanel, CreateMemoryForm, EntitiesPanel, ExplorePanel, MemoryOverviewPanel, MemoryPageHeader, OverviewPanel, RuntimePanel, SettingsPanel, TAB_KEYS, TAB_ORDER, isTab, type MemoryView, type RuleDraft, type Tab } from './panels.tsx';
+import { Modal } from './modal.tsx';
 import {
   availabilityText, classificationLists, classificationMeta, codeText, detailMeta, EDIT_LIMIT_BYTES, editBlocker, neighbourhood,
   formatDateTime, injectionChip,
-  listSummary, openConflicts, relationRows, relativeTime, revisionTimeline, scopeOptions, scopeParams,
+  listSummary, openConflicts, relationRows, relativeTime, revisionTimeline,
   statusChips, utf8Bytes, type Chip, type Tone,
 } from './view-model.ts';
 
@@ -27,6 +29,11 @@ function toList(value: string): string[] {
 const LIST_LIMIT = 25;
 /** Categories the edit form offers; the Server accepts exactly these. */
 const CATEGORY_VALUES = ['preference', 'decision', 'fact', 'insight', 'context', 'general'] as const;
+/** The empty creation draft, restored whenever the create window closes without publishing. */
+const EMPTY_CREATE_DRAFT: CreateDraft = {
+  content: '', knowledgeType: 'Practice', category: '', importance: '', tags: '', entities: '',
+  reason: '',
+};
 
 function useLanguage(locale: LocaleService | undefined): Language {
   const read = (): Language => {
@@ -49,6 +56,15 @@ function failureText(error: unknown, language: Language): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** The budget refusal and a stale base version are the two rule errors with specific wording. */
+function ruleFailure(error: unknown, language: Language): string {
+  if (error instanceof RpcFailure) {
+    if (error.code === 'RULE_BUDGET_EXCEEDED') return translate(language, 'runtime.budget');
+    if (error.code === 'VERSION_CONFLICT') return translate(language, 'runtime.conflict');
+  }
+  return failureText(error, language);
+}
+
 function ChipRow({ chips, ariaLabel }: { chips: Chip[]; ariaLabel: string }): JSX.Element {
   return (
     <div className="mwui-chips" role="list" aria-label={ariaLabel}>
@@ -64,7 +80,6 @@ function ChipRow({ chips, ariaLabel }: { chips: Chip[]; ariaLabel: string }): JS
 
 /** A card summarizing one memory: text first, then scope, classification, revision and age. */
 function MemoryCard({ item, active, language, now, onSelect }: { item: UiMemorySummary; active: boolean; language: Language; now: number; onSelect(id: string): void }): JSX.Element {
-  const scope = item.scope === 'global' ? translate(language, 'detail.global') : item.projectId ?? '—';
   // No separate title exists, so the body's first line is the headline and the rest the excerpt.
   const [firstLine, ...rest] = item.content.split('\n');
   const headline = (firstLine ?? '').trim() === '' ? item.memoryId : firstLine!;
@@ -81,7 +96,6 @@ function MemoryCard({ item, active, language, now, onSelect }: { item: UiMemoryS
         {excerpt === '' ? null : <span className="mwui-memcard-excerpt">{excerpt}</span>}
         <span className="mwui-memcard-meta">
           {label === undefined ? null : <span className="mwui-chip-slim" data-tone="category">{label}</span>}
-          <span className="mwui-chip-slim">{scope}</span>
           <span className="mwui-chip-slim">{translate(language, 'detail.revision')} v{item.entryVersion}</span>
           {item.tags === undefined || item.tags.length === 0 ? null : (
             <span className="mwui-memcard-tags">{item.tags.slice(0, 3).map(tag => `#${tag}`).join(' ')}</span>
@@ -99,19 +113,10 @@ function MemoryCard({ item, active, language, now, onSelect }: { item: UiMemoryS
 interface DetailProps {
   detail: UiMemoryDetail;
   language: Language;
-  editing: boolean;
-  draft: string;
-  reason: string;
-  saving: boolean;
   copied: 'id' | 'content' | null;
   comparing: boolean;
   /** Content of the live revision, fetched only while comparing a historical one. */
   currentContent: string | null;
-  onChangeDraft(value: string): void;
-  onChangeReason(value: string): void;
-  onBeginEdit(): void;
-  onCancel(): void;
-  onSave(): void;
   onCopy(kind: 'id' | 'content'): void;
   onSelectRevision(revisionId: string): void;
   onBackToCurrent(): void;
@@ -120,38 +125,20 @@ interface DetailProps {
   /** Inline preview of a relation's target, so following an edge does not have to lose this one. */
   relatedPreviews: Record<string, { status: 'loading' | 'ready' | 'error'; content?: string; state?: string; detail?: string }>;
   onPreviewRelated(memoryId: string): void;
-  onRebase(): void;
   /** Two-hop neighbourhood, loaded on demand from the catalogue graph. */
   neighbours: Array<{ memoryId: string; hop: number; kind: 'Supersedes' | 'RelatedTo' | 'Conflicts'; direction: 'out' | 'in' }>;
   graphLoading: boolean;
   graphError: string | null;
   graphTruncated: boolean;
   onLoadGraph(): void;
-  /** Classification edits; empty string means inherit the previous revision. */
-  categoryChoice: string;
-  importanceChoice: string;
-  tagsDraft: string;
-  onChangeCategory(value: string): void;
-  onChangeImportance(value: string): void;
-  onChangeTags(value: string): void;
-  /** Withdrawal is the counterpart of an edit and lives beside it. */
-  withdrawing: boolean;
-  withdrawReason: string;
+  /** Opens the edit window; the detail panel itself stays read-only. */
+  onBeginEdit(): void;
+  /** Opens the withdrawal window, the counterpart of an edit. */
   onBeginWithdraw(): void;
-  onCancelWithdraw(): void;
-  onChangeWithdrawReason(value: string): void;
-  onWithdraw(): void;
-  action: string | null;
-  /** Queued or unconfirmed: the save button stays disabled until the outcome is known. */
-  pending: boolean;
-  /** The draft's base is the text the editor opened with, not necessarily the latest. */
-  baseContent: string | null;
-  /** True when the latest revision differs from the draft's base, so a rebase is meaningful. */
-  canRebase: boolean;
 }
 
 function DetailView(props: DetailProps): JSX.Element {
-  const { detail, language, editing, draft, reason, saving, copied, comparing, currentContent, withdrawing, withdrawReason } = props;
+  const { detail, language, copied, comparing, currentContent } = props;
   const live = detail.revisions.find(revision => revision.current);
   return (
     <div className="mwui-detail">
@@ -189,128 +176,26 @@ function DetailView(props: DetailProps): JSX.Element {
               ))}
             </div>
           )}
-        {props.action === null ? null : <div className="mwui-inline-notice">{props.action}</div>}
       </div>
 
       <div>
         <div className="mwui-section-head">
-          <h4 className="mwui-section-title">{translate(language, editing ? 'detail.editTitle' : 'detail.content')}</h4>
+          <h4 className="mwui-section-title">{translate(language, 'detail.content')}</h4>
           <div className="mwui-section-actions">
             <button type="button" className="mwui-button mwui-mini" onClick={() => props.onCopy('content')}>
               {copied === 'content' ? translate(language, 'detail.copiedContent') : translate(language, 'detail.copy')}
             </button>
-            {detail.isCurrent || editing
+            {detail.isCurrent
               ? null
               : <button type="button" className="mwui-button mwui-mini" onClick={props.onBackToCurrent}>{translate(language, 'detail.backToCurrent')}</button>}
-            {detail.isCurrent && live !== undefined && !editing && detail.revisions.length > 1
+            {detail.isCurrent && live !== undefined && detail.revisions.length > 1
               ? <button type="button" className="mwui-button mwui-mini" onClick={props.onToggleCompare} disabled={currentContent === null && !comparing}>
                   {translate(language, comparing ? 'detail.stopCompare' : 'detail.compare')}
                 </button>
               : null}
           </div>
         </div>
-        {editing
-          ? (
-            <div className="mwui-edit">
-              <textarea
-                className="mwui-input mwui-textarea"
-                rows={10}
-                value={draft}
-                aria-label={translate(language, 'detail.content')}
-                onChange={event => props.onChangeDraft(event.target.value)}
-              />
-              <input
-                className="mwui-input"
-                type="text"
-                value={reason}
-                placeholder={translate(language, 'detail.reasonPlaceholder')}
-                aria-label={translate(language, 'detail.reason')}
-                onChange={event => props.onChangeReason(event.target.value)}
-              />
-              {/* Classification is optional. "Inherit" leaves the field out, so the new revision
-                  keeps what the previous one recorded instead of clearing it. */}
-              <div className="mwui-classify">
-                <label className="mwui-classify-field">
-                  <span>{translate(language, 'detail.category')}</span>
-                  <select
-                    className="mwui-input mwui-select"
-                    value={props.categoryChoice}
-                    onChange={event => props.onChangeCategory(event.target.value)}
-                  >
-                    <option value="">{translate(language, 'detail.inherit')}</option>
-                    {CATEGORY_VALUES.map(value => (
-                      <option key={value} value={value}>{translate(language, `category.${value}` as MessageKey)}</option>
-                    ))}
-                  </select>
-                </label>
-                <label className="mwui-classify-field">
-                  <span>{translate(language, 'detail.importance')}</span>
-                  <select
-                    className="mwui-input mwui-select"
-                    value={props.importanceChoice}
-                    onChange={event => props.onChangeImportance(event.target.value)}
-                  >
-                    <option value="">{translate(language, 'detail.inherit')}</option>
-                    {[1, 2, 3, 4, 5].map(value => <option key={value} value={String(value)}>{value}/5</option>)}
-                  </select>
-                </label>
-              </div>
-              <input
-                className="mwui-input"
-                type="text"
-                value={props.tagsDraft}
-                placeholder={translate(language, 'detail.tagsPlaceholder')}
-                aria-label={translate(language, 'detail.tags')}
-                onChange={event => props.onChangeTags(event.target.value)}
-              />
-              <div className="mwui-edit-hint" data-tone={draft.trim() === '' ? 'warn' : 'muted'}>
-                {translate(language, 'detail.emptyContent')} · {utf8Bytes(draft)}/{EDIT_LIMIT_BYTES} B
-              </div>
-              {/* The draft is measured against the base it opened with, not against the live text. */}
-              {props.canRebase
-                ? (
-                  <div className="mwui-inline-notice" data-tone="warn">
-                    <div>{translate(language, 'detail.baseMoved')}</div>
-                    <button type="button" className="mwui-button mwui-mini" onClick={props.onRebase} disabled={saving}>
-                      {translate(language, 'detail.useLatestBase')}
-                    </button>
-                  </div>
-                )
-                : null}
-              {/* Three-way view: what the draft was based on, and what the memory says now. The
-                  draft itself is the textarea above, so the user compares against both. */}
-              {props.canRebase && props.baseContent !== null
-                ? (
-                  <div className="mwui-compare mwui-compare-3">
-                    <div className="mwui-compare-col">
-                      <div className="mwui-compare-head">{translate(language, 'detail.openedVersion')}</div>
-                      <div className="mwui-content mwui-scroll">{props.baseContent === '' ? '—' : props.baseContent}</div>
-                    </div>
-                    <div className="mwui-compare-col">
-                      <div className="mwui-compare-head">{translate(language, 'detail.latestVersion')}</div>
-                      <div className="mwui-content mwui-scroll">{detail.content === '' ? '—' : detail.content}</div>
-                    </div>
-                  </div>
-                )
-                : null}
-              <div className="mwui-edit-actions">
-                <button
-                  type="button"
-                  className="mwui-button"
-                  data-variant="primary"
-                  onClick={props.onSave}
-                  disabled={saving || props.pending || editBlocker(draft, props.baseContent ?? detail.content) !== null}
-                >
-                  {saving ? translate(language, 'detail.saving') : translate(language, props.pending ? 'detail.submitPaused' : 'detail.save')}
-                </button>
-                <button type="button" className="mwui-button" onClick={props.onCancel} disabled={saving}>
-                  {translate(language, 'detail.cancel')}
-                </button>
-              </div>
-            </div>
-          )
-          : (
-            <div className="mwui-edit">
+        <div className="mwui-edit">
               {comparing && currentContent !== null && !detail.isCurrent
                 ? (
                   <div className="mwui-compare">
@@ -334,8 +219,7 @@ function DetailView(props: DetailProps): JSX.Element {
                   </div>
                 )
                 : <div className="mwui-edit-hint" data-tone="muted">{translate(language, 'detail.readOnlyHistory')}</div>}
-            </div>
-          )}
+        </div>
       </div>
 
       <div>
@@ -479,49 +363,199 @@ function DetailView(props: DetailProps): JSX.Element {
       )}
 
       {/* Withdrawal is the counterpart of an edit: it removes the memory from recall and keeps the
-          history. It is offered only on the live revision, next to the edit entry. */}
-      {detail.isCurrent && !editing
+          history. It is offered only on the live revision and opens its own confirmation window. */}
+      {detail.isCurrent
         ? (
           <div>
             <h4 className="mwui-section-title">{translate(language, 'detail.manage')}</h4>
-            {withdrawing
-              ? (
-                <div className="mwui-edit">
-                  <input
-                    className="mwui-input"
-                    type="text"
-                    value={withdrawReason}
-                    placeholder={translate(language, 'detail.withdrawReasonPlaceholder')}
-                    aria-label={translate(language, 'detail.withdrawReason')}
-                    onChange={event => props.onChangeWithdrawReason(event.target.value)}
-                  />
-                  <div className="mwui-edit-hint" data-tone="muted">{translate(language, 'detail.withdrawHint')}</div>
-                  <div className="mwui-edit-actions">
-                    <button
-                      type="button"
-                      className="mwui-button"
-                      data-variant="danger"
-                      onClick={props.onWithdraw}
-                      disabled={withdrawReason.trim() === '' || saving}
-                    >
-                      {translate(language, 'detail.withdrawConfirm')}
-                    </button>
-                    <button type="button" className="mwui-button" onClick={props.onCancelWithdraw} disabled={saving}>
-                      {translate(language, 'detail.cancel')}
-                    </button>
-                  </div>
-                </div>
-              )
-              : (
-                <div className="mwui-edit-actions">
-                  <button type="button" className="mwui-button" onClick={props.onBeginWithdraw}>
-                    {translate(language, 'detail.withdraw')}
-                  </button>
-                </div>
-              )}
+            <div className="mwui-edit-actions">
+              <button type="button" className="mwui-button" onClick={props.onBeginWithdraw}>
+                {translate(language, 'detail.withdraw')}
+              </button>
+            </div>
           </div>
         )
         : null}
+    </div>
+  );
+}
+
+/**
+ * The edit form, shown in a window over the detail panel.
+ *
+ * It is the same form the panel used to host inline; the panel itself now stays read-only, so the
+ * memory under edit keeps its content, revisions and scroll position visible behind the window.
+ */
+interface EditFormProps {
+  detail: UiMemoryDetail;
+  language: Language;
+  draft: string;
+  reason: string;
+  saving: boolean;
+  action: string | null;
+  /** Queued or unconfirmed: the save button stays disabled until the outcome is known. */
+  pending: boolean;
+  /** The draft's base is the text the editor opened with, not necessarily the latest. */
+  baseContent: string | null;
+  /** True when the latest revision differs from the draft's base, so a rebase is meaningful. */
+  canRebase: boolean;
+  /** Classification edits; empty string means inherit the previous revision. */
+  categoryChoice: string;
+  importanceChoice: string;
+  tagsDraft: string;
+  onChangeDraft(value: string): void;
+  onChangeReason(value: string): void;
+  onChangeCategory(value: string): void;
+  onChangeImportance(value: string): void;
+  onChangeTags(value: string): void;
+  onSave(): void;
+  onCancel(): void;
+  onRebase(): void;
+}
+
+function MemoryEditForm(props: EditFormProps): JSX.Element {
+  const { detail, language, draft, reason, saving, action, baseContent, canRebase } = props;
+  return (
+    <div className="mwui-edit">
+      {action === null ? null : <div className="mwui-inline-notice">{action}</div>}
+      <textarea
+        className="mwui-input mwui-textarea"
+        rows={10}
+        value={draft}
+        aria-label={translate(language, 'detail.content')}
+        onChange={event => props.onChangeDraft(event.target.value)}
+      />
+      <input
+        className="mwui-input"
+        type="text"
+        value={reason}
+        placeholder={translate(language, 'detail.reasonPlaceholder')}
+        aria-label={translate(language, 'detail.reason')}
+        onChange={event => props.onChangeReason(event.target.value)}
+      />
+      {/* Classification is optional. "Inherit" leaves the field out, so the new revision keeps
+          what the previous one recorded instead of clearing it. */}
+      <div className="mwui-classify">
+        <label className="mwui-classify-field">
+          <span>{translate(language, 'detail.category')}</span>
+          <select
+            className="mwui-input mwui-select"
+            value={props.categoryChoice}
+            onChange={event => props.onChangeCategory(event.target.value)}
+          >
+            <option value="">{translate(language, 'detail.inherit')}</option>
+            {CATEGORY_VALUES.map(value => (
+              <option key={value} value={value}>{translate(language, `category.${value}` as MessageKey)}</option>
+            ))}
+          </select>
+        </label>
+        <label className="mwui-classify-field">
+          <span>{translate(language, 'detail.importance')}</span>
+          <select
+            className="mwui-input mwui-select"
+            value={props.importanceChoice}
+            onChange={event => props.onChangeImportance(event.target.value)}
+          >
+            <option value="">{translate(language, 'detail.inherit')}</option>
+            {[1, 2, 3, 4, 5].map(value => <option key={value} value={String(value)}>{value}/5</option>)}
+          </select>
+        </label>
+      </div>
+      <input
+        className="mwui-input"
+        type="text"
+        value={props.tagsDraft}
+        placeholder={translate(language, 'detail.tagsPlaceholder')}
+        aria-label={translate(language, 'detail.tags')}
+        onChange={event => props.onChangeTags(event.target.value)}
+      />
+      <div className="mwui-edit-hint" data-tone={draft.trim() === '' ? 'warn' : 'muted'}>
+        {translate(language, 'detail.emptyContent')} · {utf8Bytes(draft)}/{EDIT_LIMIT_BYTES} B
+      </div>
+      {/* The draft is measured against the base it opened with, not against the live text. */}
+      {canRebase
+        ? (
+          <div className="mwui-inline-notice" data-tone="warn">
+            <div>{translate(language, 'detail.baseMoved')}</div>
+            <button type="button" className="mwui-button mwui-mini" onClick={props.onRebase} disabled={saving}>
+              {translate(language, 'detail.useLatestBase')}
+            </button>
+          </div>
+        )
+        : null}
+      {/* What the draft was based on, and what the memory says now. The draft itself is the
+          textarea above, so the user compares against both. */}
+      {canRebase && baseContent !== null
+        ? (
+          <div className="mwui-compare mwui-compare-3">
+            <div className="mwui-compare-col">
+              <div className="mwui-compare-head">{translate(language, 'detail.openedVersion')}</div>
+              <div className="mwui-content mwui-scroll">{baseContent === '' ? '—' : baseContent}</div>
+            </div>
+            <div className="mwui-compare-col">
+              <div className="mwui-compare-head">{translate(language, 'detail.latestVersion')}</div>
+              <div className="mwui-content mwui-scroll">{detail.content === '' ? '—' : detail.content}</div>
+            </div>
+          </div>
+        )
+        : null}
+      <div className="mwui-edit-actions">
+        <button
+          type="button"
+          className="mwui-button"
+          data-variant="primary"
+          onClick={props.onSave}
+          disabled={saving || props.pending || editBlocker(draft, baseContent ?? detail.content) !== null}
+        >
+          {saving ? translate(language, 'detail.saving') : translate(language, props.pending ? 'detail.submitPaused' : 'detail.save')}
+        </button>
+        <button type="button" className="mwui-button" onClick={props.onCancel} disabled={saving}>
+          {translate(language, 'detail.cancel')}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** The withdrawal confirmation, also a window of its own. */
+interface WithdrawFormProps {
+  language: Language;
+  reason: string;
+  saving: boolean;
+  action: string | null;
+  onChangeReason(value: string): void;
+  onConfirm(): void;
+  onCancel(): void;
+}
+
+function MemoryWithdrawForm(props: WithdrawFormProps): JSX.Element {
+  const { language, reason, saving, action } = props;
+  return (
+    <div className="mwui-edit">
+      <input
+        className="mwui-input"
+        type="text"
+        value={reason}
+        placeholder={translate(language, 'detail.withdrawReasonPlaceholder')}
+        aria-label={translate(language, 'detail.withdrawReason')}
+        onChange={event => props.onChangeReason(event.target.value)}
+      />
+      <div className="mwui-edit-hint" data-tone="muted">{translate(language, 'detail.withdrawHint')}</div>
+      {action === null ? null : <div className="mwui-inline-notice">{action}</div>}
+      <div className="mwui-edit-actions">
+        <button
+          type="button"
+          className="mwui-button"
+          data-variant="danger"
+          onClick={props.onConfirm}
+          disabled={reason.trim() === '' || saving}
+        >
+          {translate(language, 'detail.withdrawConfirm')}
+        </button>
+        <button type="button" className="mwui-button" onClick={props.onCancel} disabled={saving}>
+          {translate(language, 'detail.cancel')}
+        </button>
+      </div>
     </div>
   );
 }
@@ -535,6 +569,11 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
   const [config, setConfig] = useState<UiConfigView | null>(null);
   const [injection, setInjection] = useState<UiInjection | null>(null);
   const [tab, setTab] = useState<Tab>('overview');
+  /**
+   * The formal-memory page's own view. Content is the working view of this store: dsh-mnemon's
+   * overview leads because it manages memory spaces, and this store has none to manage.
+   */
+  const [memoryView, setMemoryView] = useState<MemoryView>('content');
   const [rules, setRules] = useState<UiRule[] | null | undefined>(undefined);
   const [archives, setArchives] = useState<UiArchive[] | null | undefined>(undefined);
   const [sync, setSync] = useState<UiSyncStatus | null | undefined>(undefined);
@@ -550,7 +589,6 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
   const [detail, setDetail] = useState<UiMemoryDetail | null>(null);
   const [query, setQuery] = useState('');
   /** `all`, `global`, or `project:<id>`; the default comes from the stored preference. */
-  const [filter, setFilter] = useState<string>('all');
   /** Classification filter; empty means every category. */
   const [categoryFilter, setCategoryFilter] = useState<string>('');
   /** Entity filter; empty means every entity. */
@@ -583,9 +621,9 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
   const [editPending, setEditPending] = useState(false);
   /** Semantic explore keeps its own query and result: it is a different search from the list. */
   /**
-   * Neighbourhood of the open memory. Loaded on demand: the graph covers the whole catalog, and
-   * opening a memory should not pay for it. Cleared when the selection changes so a stale
-   * neighbourhood is never shown beside a different memory.
+   * The relation graph, read once for the whole catalog. The formal-memory overview draws it, and
+   * a memory's detail derives its neighbourhood from the same nodes and edges, so a selection does
+   * not discard the read.
    */
   const [graph, setGraph] = useState<UiGraph | null>(null);
   const [graphLoading, setGraphLoading] = useState(false);
@@ -612,12 +650,12 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     }
   }, [api, language]);
 
-  // The canvas has nothing to draw until the graph is loaded, so opening the tab fetches it once.
-  // It is not refetched on every tab switch: the graph changes when memories do, and the explicit
+  // The overview has nothing to draw until the graph is loaded, so opening it fetches once. It is
+  // not refetched on every view switch: the graph changes when memories do, and the explicit
   // reload button covers that.
   useEffect(() => {
-    if (tab === 'graph' && !graphAttempted && !graphLoading) void loadGraph();
-  }, [tab, graphAttempted, graphLoading, loadGraph]);
+    if (tab === 'memories' && memoryView === 'overview' && !graphAttempted && !graphLoading) void loadGraph();
+  }, [tab, memoryView, graphAttempted, graphLoading, loadGraph]);
 
   /**
    * Entity index. Loaded with a one-row page: the index describes the whole scoped set, so a
@@ -651,11 +689,8 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
   const [settingsNotice, setSettingsNotice] = useState<string | null>(null);
   const [connectionTest, setConnectionTest] = useState<UiConnectionTest | null>(null);
   const [wakeTest, setWakeTest] = useState<UiWakeTest | null>(null);
-  /**
-   * A navigation the user asked for while an unsaved draft exists. The draft is never discarded
-   * silently: the page asks, and only then either keeps editing or drops the changes.
-   */
-  const [pendingLeave, setPendingLeave] = useState<(() => void) | null>(null);
+  /** Result of the settings page's one-time task registration; null before the first press. */
+  const [registerTest, setRegisterTest] = useState<UiRegisterTest | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
@@ -697,11 +732,10 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
    * identity — that would re-run the search effect and fetch the first page a second time.
    */
   const pageSizeRef = useRef<number>(LIST_LIMIT);
-  const loadList = useCallback(async (options: { query: string; filter: string; category?: string; entity?: string; sort?: ListSort; cursor?: string; append: boolean }, signal?: AbortSignal): Promise<void> => {
+  const loadList = useCallback(async (options: { query: string; category?: string; entity?: string; sort?: ListSort; cursor?: string; append: boolean }, signal?: AbortSignal): Promise<void> => {
     const page = await api.memories({
       ...(options.query.trim() === '' ? {} : { query: options.query.trim() }),
       limit: pageSizeRef.current,
-      ...scopeParams(options.filter),
       ...(options.category === undefined || options.category === '' ? {} : { category: options.category }),
       ...(options.entity === undefined || options.entity === '' ? {} : { entity: options.entity }),
       ...(options.sort === undefined ? {} : { sort: options.sort }),
@@ -729,7 +763,7 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     setError(null);
     void (async () => {
       try {
-        await Promise.all([loadStatus(controller.signal), loadList({ query: '', filter, category: categoryFilter, entity: entityFilter, sort, append: false }, controller.signal)]);
+        await Promise.all([loadStatus(controller.signal), loadList({ query: '', category: categoryFilter, entity: entityFilter, sort, append: false }, controller.signal)]);
       } catch (failure) {
         if (!controller.signal.aborted) setError(failureText(failure, language));
       } finally {
@@ -752,7 +786,7 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
       void (async () => {
         try {
           setError(null);
-          await loadList({ query, filter, category: categoryFilter, entity: entityFilter, sort, append: false }, controller.signal);
+          await loadList({ query, category: categoryFilter, entity: entityFilter, sort, append: false }, controller.signal);
         } catch (failure) {
           // Keep whatever was already loaded; the retry lives at the end of the list.
           if (!controller.signal.aborted) setListError(failureText(failure, language));
@@ -760,7 +794,7 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
       })();
     }, 280);
     return () => { clearTimeout(timer); controller.abort(); };
-  }, [query, filter, categoryFilter, entityFilter, sort, loadList, language]);
+  }, [query, categoryFilter, entityFilter, sort, loadList, language]);
 
   useEffect(() => {
     if (selectedId === null) return;
@@ -776,7 +810,6 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     setEditPending(false);
     setEditAction(null);
     setRelatedPreviews({});
-    setGraph(null);
     void (async () => {
       try {
         setError(null);
@@ -837,9 +870,9 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     listRequest.current?.abort();
     listRequest.current = controller;
     setListError(null);
-    void loadList({ query, filter, category: categoryFilter, entity: entityFilter, sort, cursor: list.nextCursor, append: true }, controller.signal)
+    void loadList({ query, category: categoryFilter, entity: entityFilter, sort, cursor: list.nextCursor, append: true }, controller.signal)
       .catch(failure => { if (!controller.signal.aborted) setListError(failureText(failure, language)); });
-  }, [list, query, filter, categoryFilter, entityFilter, sort, loadList, language]);
+  }, [list, query, categoryFilter, entityFilter, sort, loadList, language]);
 
   /**
    * Creation form. Opened explicitly, and closed on success; the draft is kept while open so a
@@ -847,46 +880,87 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
    */
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
-  const [createDraft, setCreateDraft] = useState<CreateDraft>({
-    content: '', knowledgeType: 'Practice', category: '', importance: '', tags: '', entities: '',
-    scope: 'global', projectId: '', reason: '',
-  });
+  const [createDraft, setCreateDraft] = useState<CreateDraft>(EMPTY_CREATE_DRAFT);
 
   /**
    * Publish a new memory. The Server treats this as already-confirmed user knowledge, so there is
    * no review step to wait for — only the publisher's write.
    */
-  const submitCreate = useCallback(async (): Promise<void> => {
+  const submitCreate = useCallback(async (organize = false): Promise<void> => {
     if (createDraft.content.trim() === '' || saving) return;
-    if (createDraft.scope === 'project' && createDraft.projectId.trim() === '') {
-      setCreateError(translate(language, 'create.projectRequired'));
-      return;
-    }
     setSaving(true);
     setCreateError(null);
     try {
-      const created = await api.create({
+      const input: Parameters<typeof api.create>[0] = {
         content: createDraft.content,
         knowledgeType: createDraft.knowledgeType,
         ...(createDraft.category === '' ? {} : { category: createDraft.category }),
         ...(createDraft.importance === '' ? {} : { importance: Number(createDraft.importance) }),
         ...(toList(createDraft.tags).length === 0 ? {} : { tags: toList(createDraft.tags) }),
         ...(toList(createDraft.entities).length === 0 ? {} : { entities: toList(createDraft.entities) }),
-        scope: createDraft.scope,
-        ...(createDraft.scope === 'project' ? { projectId: createDraft.projectId.trim() } : {}),
         ...(createDraft.reason.trim() === '' ? {} : { reason: createDraft.reason.trim() }),
-      });
+      };
+      const result = organize
+        ? await api.organizeMemory(input)
+        : { kind: 'formal' as const, entryId: (await api.create(input)).memoryId };
+      if (result.kind === 'review' || result.kind === 'duplicate') {
+        setCreateError(result.kind === 'review' ? result.reason : translate(language, 'create.duplicate'));
+        return;
+      }
       setCreating(false);
-      setCreateDraft({ content: '', knowledgeType: 'Practice', category: '', importance: '', tags: '', entities: '', scope: 'global', projectId: '', reason: '' });
+      setCreateDraft(EMPTY_CREATE_DRAFT);
       setNotice(translate(language, 'create.created'));
-      await loadList({ query, filter, category: categoryFilter, entity: entityFilter, sort, append: false });
-      setSelectedId(created.memoryId);
+      if (result.kind === 'formal') {
+        await loadList({ query, category: categoryFilter, entity: entityFilter, sort, append: false });
+        setMemoryView('content');
+        setSelectedId(result.entryId);
+      } else if (result.kind === 'runtime') {
+        await api.rules().then(items => { setRules(items); setRulesError(null); },
+          failure => { setRules(null); setRulesError(failureText(failure, language)); });
+      } else {
+        await api.archives().then(items => { setArchives(items); setArchivesError(null); },
+          failure => { setArchives(null); setArchivesError(failureText(failure, language)); });
+        setArchiveId(result.entryId);
+      }
     } catch (failure) {
       setCreateError(failureText(failure, language));
     } finally {
       setSaving(false);
     }
-  }, [api, createDraft, saving, language, query, filter, categoryFilter, entityFilter, sort, loadList]);
+  }, [api, createDraft, saving, language, query, categoryFilter, entityFilter, sort, loadList]);
+
+  /**
+   * Rule writes use the same identity as memory writes: the service token plus this Host. The
+   * list is reloaded before resolving so the panel never shows a stale body next to a new
+   * version number.
+   */
+  const submitRule = useCallback(async (draft: RuleDraft): Promise<void> => {
+    try {
+      const created = await api.createRule({
+        body: draft.body.trim(),
+        enabled: draft.enabled,
+      });
+      setNotice(translate(language, 'runtime.created'));
+      await loadStatus();
+      setRuleId(created.entryId);
+    } catch (failure) {
+      throw new Error(ruleFailure(failure, language));
+    }
+  }, [api, language, loadStatus]);
+
+  const saveRule = useCallback(async (target: string, input: { body: string; enabled: boolean; baseVersion: number }): Promise<void> => {
+    try {
+      const updated = await api.editRule({ ruleId: target, body: input.body.trim(), enabled: input.enabled, baseVersion: input.baseVersion });
+      setNotice(translate(language, 'runtime.saved'));
+      await loadStatus();
+      setRuleId(updated.entryId);
+    } catch (failure) {
+      // A stale base version means another writer moved the rule; reload so that reopening the
+      // editor starts from the version that actually exists.
+      if (failure instanceof RpcFailure && failure.code === 'VERSION_CONFLICT') await loadStatus();
+      throw new Error(ruleFailure(failure, language));
+    }
+  }, [api, language, loadStatus]);
 
   /**
    * Load the entity index for the current scope. A one-row page is enough: the Server builds the
@@ -896,14 +970,14 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     setEntitiesLoading(true);
     setEntitiesError(null);
     try {
-      const page = await api.memories({ limit: 1, ...scopeParams(filter) }, signal);
+      const page = await api.memories({ limit: 1 }, signal);
       setEntities(page.entities ?? []);
     } catch (failure) {
       setEntitiesError(failureText(failure, language));
     } finally {
       setEntitiesLoading(false);
     }
-  }, [api, filter, language]);
+  }, [api, language]);
 
   const refresh = useCallback((): void => {
     const controller = new AbortController();
@@ -914,7 +988,7 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
       try {
         await Promise.all([
           loadStatus(controller.signal),
-          loadList({ query, filter, category: categoryFilter, entity: entityFilter, sort, append: false }, controller.signal),
+          loadList({ query, category: categoryFilter, entity: entityFilter, sort, append: false }, controller.signal),
           loadEntities(controller.signal),
           ...(selectedId === null ? [] : [loadDetail(selectedId, viewedRevisionId, controller.signal)]),
         ]);
@@ -923,7 +997,7 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
         setError(failureText(failure, language));
       } finally { setBusy(false); }
     })();
-  }, [loadStatus, loadList, loadDetail, loadEntities, query, filter, categoryFilter, entityFilter, sort, selectedId, viewedRevisionId, language]);
+  }, [loadStatus, loadList, loadDetail, loadEntities, query, categoryFilter, entityFilter, sort, selectedId, viewedRevisionId, language]);
 
   const beginEdit = useCallback((): void => {
     if (detail === null) return;
@@ -953,7 +1027,6 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     setEditPending(false);
     setEditAction(null);
     setRelatedPreviews({});
-    setGraph(null);
   }, []);
 
   /**
@@ -1016,7 +1089,7 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
       setViewedRevisionId(result.revisionId);
       // Read the revision the Server reported instead of assuming the newest one is ours.
       await loadDetail(detail.memoryId, result.revisionId, controller.signal);
-      await loadList({ query, filter, category: categoryFilter, entity: entityFilter, sort, append: false }, controller.signal);
+      await loadList({ query, category: categoryFilter, entity: entityFilter, sort, append: false }, controller.signal);
       setNotice(translate(language, 'detail.saved'));
       setNow(Date.now());
     } catch (failure) {
@@ -1044,42 +1117,47 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     } finally {
       setSaving(false);
     }
-  }, [api, detail, draft, reason, saving, language, loadDetail, loadList, loadCurrentContent, query, filter, categoryFilter, categoryChoice, importanceChoice, tagsDraft]);
+  }, [api, detail, draft, reason, saving, language, loadDetail, loadList, loadCurrentContent, query, categoryFilter, categoryChoice, importanceChoice, tagsDraft]);
 
   const retry = useCallback((): void => {
-    if (detail !== null && editing) void save();
-    else refresh();
-  }, [detail, editing, save, refresh]);
+    refresh();
+  }, [refresh]);
 
   /**
-   * Run a navigation unless it would throw away an unsaved draft. Leaving the editor, switching
-   * memory, switching revision or switching tab all pass through here, so no single path can
-   * bypass the prompt.
+   * Navigation is unobstructed: a create or edit form lives in a window over the page, and the
+   * window asks before closing with unsubmitted content.
    */
-  const withDraftGuard = useCallback((action: () => void): void => {
-    const dirty = editing && detail !== null && draft !== detail.content && draft.trim() !== '';
-    if (dirty) { setPendingLeave(() => action); return; }
-    action();
-  }, [editing, detail, draft]);
-
-  const discardAndLeave = useCallback((): void => {
-    const action = pendingLeave;
-    setPendingLeave(null);
-    setEditing(false);
-    setDraft('');
-    setReason('');
-    if (action !== null) action();
-  }, [pendingLeave]);
-
-  const keepEditing = useCallback((): void => { setPendingLeave(null); }, []);
-
   const selectMemory = useCallback((memoryId: string): void => {
-    withDraftGuard(() => setSelectedId(memoryId));
-  }, [withDraftGuard]);
+    setSelectedId(memoryId);
+  }, []);
 
   const changeTab = useCallback((next: Tab): void => {
-    withDraftGuard(() => setTab(next));
-  }, [withDraftGuard]);
+    setTab(next);
+  }, []);
+
+  /** Switch the formal-memory page's view. */
+  const changeMemoryView = useCallback((next: MemoryView): void => {
+    if (next === memoryView) return;
+    setMemoryView(next);
+  }, [memoryView]);
+
+  /** Open a memory that another view found, in the content view where its detail lives. */
+  const openMemoryFromView = useCallback((memoryId: string): void => {
+    setSelectedId(memoryId);
+    setMemoryView('content');
+  }, []);
+
+  const beginCreate = useCallback((): void => {
+    setCreateError(null);
+    setCreating(true);
+  }, []);
+
+  const closeCreate = useCallback((): void => {
+    setCreating(false);
+    setCreateError(null);
+    // Closing discards the draft: reopening starts empty rather than restoring a "discarded" text.
+    setCreateDraft(EMPTY_CREATE_DRAFT);
+  }, []);
 
   const copy = useCallback((kind: 'id' | 'content'): void => {
     if (detail === null || typeof navigator === 'undefined' || navigator.clipboard === undefined) return;
@@ -1125,12 +1203,9 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
   const counts: Record<Tab, number | null> = {
     overview: null,
     memories: list === null ? null : list.items.length,
-    entities: null,
-    explore: null,
-    graph: null,
     runtime: sizeOf(rules),
     archives: sizeOf(archives),
-    sync: sync === null || sync === undefined ? null : sizeOf(sync.scopes),
+    skills: null,
     settings: null,
   };
 
@@ -1145,8 +1220,7 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
         setSettings(next);
         // Applied before the first fetch uses it, without making the fetch depend on settings.
         pageSizeRef.current = next.interface.pageSize;
-        setTab(current => (current === 'overview' ? next.interface.defaultTab as Tab : current));
-        setFilter(next.interface.defaultScope);
+        setTab(current => (current === 'overview' && isTab(next.interface.defaultTab) ? next.interface.defaultTab : current));
       })
       .catch(() => {
         // A settings read failure must not block browsing: the page keeps its defaults.
@@ -1189,6 +1263,21 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
   }, [api, language]);
 
   /**
+   * Register the scheduled task. This is the page's only action that may raise an elevation
+   * prompt; it is never called from a connection probe.
+   */
+  const registerTask = useCallback(async (): Promise<void> => {
+    setBusy(true);
+    setRegisterTest(null);
+    try {
+      setRegisterTest(await api.registerTask());
+      await loadStatus();
+    } catch (failure) {
+      setError(failureText(failure, language));
+    } finally { setBusy(false); }
+  }, [api, language, loadStatus]);
+
+  /**
    * Withdraw the memory. The Server appends a withdrawal version and keeps every earlier revision
    * readable, so this is reversible in the sense that the history survives — not in the sense that
    * the memory comes back.
@@ -1212,7 +1301,7 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
       setWithdrawing(false);
       setWithdrawReason('');
       await loadDetail(detail.memoryId, undefined, controller.signal);
-      await loadList({ query, filter, category: categoryFilter, entity: entityFilter, sort, append: false }, controller.signal);
+      await loadList({ query, category: categoryFilter, entity: entityFilter, sort, append: false }, controller.signal);
       setNotice(translate(language, 'detail.withdrawn'));
       setNow(Date.now());
     } catch (failure) {
@@ -1225,7 +1314,7 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     } finally {
       setSaving(false);
     }
-  }, [api, detail, saving, withdrawReason, language, loadDetail, loadList, query, filter, categoryFilter]);
+  }, [api, detail, saving, withdrawReason, language, loadDetail, loadList, query, categoryFilter]);
 
   const beginWithdraw = useCallback((): void => {
     setWithdrawing(true);
@@ -1273,15 +1362,20 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     }
   }, [api, language]);
 
+  // A window closes only after the user confirms that unsubmitted content can be dropped.
+  const createDirty = createDraft.content !== '' || createDraft.tags !== '' || createDraft.entities !== ''
+    || createDraft.reason !== '' || createDraft.category !== ''
+    || createDraft.importance !== '' || createDraft.knowledgeType !== 'Practice';
+  const editTags = detail === null ? '' : (detail.revisions.find(item => item.revisionId === detail.revisionId)?.tags ?? []).join(', ');
+  const editDirty = editing && editBase !== null && (
+    draft !== editBase.content || reason.trim() !== '' || categoryChoice !== '' || importanceChoice !== '' || tagsDraft !== editTags
+  );
+
   return (
     <div className="mwui-root">
       <header className="mwui-header">
         <div>
           <h1 className="mwui-title">{translate(language, 'page.title')}</h1>
-          <p className="mwui-subtitle">
-            {translate(language, 'page.subtitle')}
-            {status === null ? '' : ` · ${translate(language, 'toolbar.host')}: ${status.hostId}`}
-          </p>
         </div>
         <div className="mwui-actions">
           <button type="button" className="mwui-button" onClick={refresh} disabled={busy || saving}>
@@ -1325,18 +1419,61 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
       </nav>
 
       {tab === 'memories' ? (
-      <>
-      {creating ? (
-        <CreateMemoryForm
-          draft={createDraft}
-          busy={saving}
-          error={createError}
+      <div className="mwui-memory">
+        <MemoryPageHeader
+          count={listSummary(list, language)}
           language={language}
-          onChange={patch => setCreateDraft(current => ({ ...current, ...patch }))}
-          onCancel={() => { setCreating(false); setCreateError(null); }}
-          onSubmit={() => { void submitCreate(); }}
+          active={memoryView}
+          creating={creating}
+          saving={saving}
+          onSelect={changeMemoryView}
+          onCreate={beginCreate}
         />
-      ) : null}
+      {memoryView === 'overview' ? (
+        <MemoryOverviewPanel
+          memories={list}
+          entities={entities}
+          graph={graph}
+          graphLoading={graphLoading}
+          graphError={graphError}
+          focusId={selectedId}
+          language={language}
+          onReloadGraph={() => { void loadGraph(); }}
+          onOpen={openMemoryFromView}
+        />
+      ) : memoryView === 'recall' ? (
+        <ExplorePanel
+          query={exploreQuery}
+          result={explore}
+          error={exploreError}
+          busy={busy}
+          language={language}
+          minScore={exploreMinScore}
+          limit={exploreLimit}
+          onChangeQuery={setExploreQuery}
+          onChangeMinScore={value => { setExploreMinScore(value); setExplore(null); }}
+          onSearch={() => { void searchExplore(); }}
+          onShowMore={() => { void searchExplore({ limit: Math.min(50, exploreLimit * 2) }); }}
+          onOpen={openMemoryFromView}
+        />
+      ) : memoryView === 'entities' ? (
+        <EntitiesPanel
+          entities={entities}
+          query={entitiesQuery}
+          error={entitiesError}
+          loading={entitiesLoading}
+          language={language}
+          active={entityFilter}
+          onChangeQuery={setEntitiesQuery}
+          onSelect={value => {
+            // Applying the entity to the content list is the point of this view; moving there
+            // keeps one results view instead of a second one that could drift from it.
+            setEntityFilter(value);
+            setMemoryView('content');
+          }}
+        />
+      ) : (
+      <>
       <div className="mwui-body" data-view={selectedId === null ? 'list' : 'detail'}>
         <section className="mwui-pane mwui-pane-list" aria-label={translate(language, 'list.title')}>
           <div className="mwui-pane-header">
@@ -1355,26 +1492,6 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
             {query === '' ? null : (
               <button type="button" className="mwui-button" onClick={() => setQuery('')}>{translate(language, 'search.clear')}</button>
             )}
-          </div>
-          <div className="mwui-filter">
-            <label className="mwui-filter-label" htmlFor="mwui-scope">{translate(language, 'list.scope')}</label>
-            <select
-              id="mwui-scope"
-              className="mwui-input mwui-select"
-              value={filter}
-              onChange={event => setFilter(event.target.value)}
-            >
-              {scopeOptions(list?.projects).map(option => (
-                <option key={option.value} value={option.value}>
-                  {option.value === 'all'
-                    ? translate(language, 'list.scopeAll')
-                    : option.value === 'global'
-                      ? translate(language, 'detail.global')
-                      : (option.projectId ?? option.value)}
-                </option>
-              ))}
-            </select>
-            <span className="mwui-filter-count">{list === null ? '' : listSummary(list, language)}</span>
           </div>
           {/* Only categories that exist are offered, so the picker cannot lead to an empty page. */}
           {list?.categories === undefined || list.categories.length === 0 ? null : (
@@ -1425,19 +1542,8 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
               <option value="importance">{translate(language, 'list.sortImportance')}</option>
             </select>
           </div>
-          {/* Creating publishes straight to a formal memory, so the button says so rather than
-              implying a draft is being saved. */}
-          <div className="mwui-filter">
-            <button
-              type="button"
-              className="mwui-button"
-              data-variant="primary"
-              onClick={() => { setCreateError(null); setCreating(true); }}
-              disabled={creating}
-            >
-              {translate(language, 'create.title')}
-            </button>
-          </div>
+          {/* Creating publishes straight to a formal memory; the page-level action starts the
+              form in the content view rather than repeating the button in every filter row. */}
           <ul className="mwui-list">
             {list === null
               ? <li className="mwui-empty">{translate(language, 'list.loading')}</li>
@@ -1473,118 +1579,126 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
             <span className="mwui-pane-title">{translate(language, 'detail.title')}</span>
             {/* Narrow screens show one pane at a time; this returns to the list with filter and
                 selection intact, because both panes stay mounted. */}
-            <button type="button" className="mwui-button mwui-mini mwui-back" onClick={() => withDraftGuard(() => setSelectedId(null))}>
+            <button type="button" className="mwui-button mwui-mini mwui-back" onClick={() => setSelectedId(null)}>
               {translate(language, 'list.title')}
             </button>
           </div>
-          {pendingLeave === null ? null : (
-            <div className="mwui-guard" role="alertdialog" aria-label={translate(language, 'detail.draftTitle')}>
-              <span>{translate(language, 'detail.draftPrompt')}</span>
-              <button type="button" className="mwui-button mwui-mini" onClick={keepEditing}>{translate(language, 'detail.keepEditing')}</button>
-              <button type="button" className="mwui-button mwui-mini" data-variant="primary" onClick={discardAndLeave}>{translate(language, 'detail.discardDraft')}</button>
-            </div>
-          )}
           {detail === null || detail.memoryId !== selectedId
             ? <div className="mwui-empty">{translate(language, 'detail.placeholder')}</div>
             : (
               <DetailView
                 detail={detail}
                 language={language}
-                editing={editing}
-                draft={draft}
-                reason={reason}
-                saving={saving}
                 copied={copied}
                 comparing={comparing}
                 currentContent={currentContent}
-                action={editAction}
-                onChangeDraft={setDraft}
-                onChangeReason={setReason}
                 onBeginEdit={beginEdit}
-                onCancel={cancelEdit}
-                onSave={() => { void save(); }}
+                onBeginWithdraw={beginWithdraw}
                 onCopy={copy}
-                onSelectRevision={revisionId => withDraftGuard(() => selectRevision(revisionId))}
-                onBackToCurrent={() => withDraftGuard(backToCurrent)}
+                onSelectRevision={selectRevision}
+                onBackToCurrent={backToCurrent}
                 onToggleCompare={toggleCompare}
                 onOpenRelated={openRelated}
                 relatedPreviews={relatedPreviews}
                 onPreviewRelated={previewRelated}
-                onRebase={rebaseToLatest}
                 neighbours={graph === null || detail === null ? [] : neighbourhood(graph, detail.memoryId, 2)}
                 graphLoading={graphLoading}
                 graphError={graphError}
                 graphTruncated={graph !== null && graph.truncated}
                 onLoadGraph={() => { void loadGraph(); }}
-                categoryChoice={categoryChoice}
-                importanceChoice={importanceChoice}
-                tagsDraft={tagsDraft}
-                onChangeCategory={setCategoryChoice}
-                onChangeImportance={setImportanceChoice}
-                onChangeTags={setTagsDraft}
-                withdrawing={withdrawing}
-                withdrawReason={withdrawReason}
-                onBeginWithdraw={beginWithdraw}
-                onCancelWithdraw={cancelWithdraw}
-                onChangeWithdrawReason={setWithdrawReason}
-                onWithdraw={() => { void withdraw(); }}
-                pending={editPending}
-                baseContent={editBase?.content ?? null}
-                canRebase={editing && editBase !== null && detail.entryVersion !== editBase.entryVersion}
               />
             )}
         </section>
       </div>
       </>
+      )}
+      {creating ? (
+        <Modal
+          title={translate(language, 'create.title')}
+          language={language}
+          busy={saving}
+          dirty={createDirty}
+          onClose={closeCreate}
+        >
+          <CreateMemoryForm
+            draft={createDraft}
+            busy={saving}
+            error={createError}
+            language={language}
+            onChange={patch => setCreateDraft(current => ({ ...current, ...patch }))}
+            onCancel={closeCreate}
+            onSubmit={() => { void submitCreate(); }}
+            onOrganize={() => { void submitCreate(true); }}
+          />
+        </Modal>
+      ) : null}
+      {editing && detail !== null ? (
+        <Modal
+          title={translate(language, 'detail.editTitle')}
+          {...(editBase === null ? {} : { subtitle: `${translate(language, 'common.version')} v${editBase.entryVersion}` })}
+          language={language}
+          busy={saving}
+          dirty={editDirty}
+          onClose={cancelEdit}
+        >
+          <MemoryEditForm
+            detail={detail}
+            language={language}
+            draft={draft}
+            reason={reason}
+            saving={saving}
+            action={editAction}
+            pending={editPending}
+            baseContent={editBase?.content ?? null}
+            canRebase={editBase !== null && detail.entryVersion !== editBase.entryVersion}
+            categoryChoice={categoryChoice}
+            importanceChoice={importanceChoice}
+            tagsDraft={tagsDraft}
+            onChangeDraft={setDraft}
+            onChangeReason={setReason}
+            onChangeCategory={setCategoryChoice}
+            onChangeImportance={setImportanceChoice}
+            onChangeTags={setTagsDraft}
+            onSave={() => { void save(); }}
+            onCancel={cancelEdit}
+            onRebase={rebaseToLatest}
+          />
+        </Modal>
+      ) : null}
+      {withdrawing && detail !== null ? (
+        <Modal
+          title={translate(language, 'detail.withdraw')}
+          language={language}
+          busy={saving}
+          dirty={withdrawReason.trim() !== ''}
+          onClose={cancelWithdraw}
+        >
+          <MemoryWithdrawForm
+            language={language}
+            reason={withdrawReason}
+            saving={saving}
+            action={editAction}
+            onChangeReason={setWithdrawReason}
+            onConfirm={() => { void withdraw(); }}
+            onCancel={cancelWithdraw}
+          />
+        </Modal>
+      ) : null}
+      </div>
       ) : tab === 'overview' ? (
         <OverviewPanel status={status} config={config} injection={injection} memories={list} rules={rules} archives={archives} sync={sync} language={language} now={now} onOpen={changeTab} />
       ) : tab === 'runtime' ? (
-        <RuntimePanel rules={rules} error={rulesError} selected={ruleId} language={language} onSelect={setRuleId} />
+        <RuntimePanel rules={rules} error={rulesError} selected={ruleId} language={language} onSelect={setRuleId} onCreate={submitRule} onSave={saveRule} />
       ) : tab === 'archives' ? (
-        <ArchivesPanel archives={archives} error={archivesError} selected={archiveId} language={language} onSelect={setArchiveId} />
-      ) : tab === 'entities' ? (
-        <EntitiesPanel
-          entities={entities}
-          query={entitiesQuery}
-          error={entitiesError}
-          loading={entitiesLoading}
-          language={language}
-          active={entityFilter}
-          onChangeQuery={setEntitiesQuery}
-          onSelect={value => {
-            // Applying the entity to the list is the point of this page; switching tabs keeps one
-            // results view instead of a second one that could drift from it.
-            setEntityFilter(value);
-            setTab('memories');
-          }}
-        />
-      ) : tab === 'explore' ? (
-        <ExplorePanel
-          query={exploreQuery}
-          result={explore}
-          error={exploreError}
-          busy={busy}
-          language={language}
-          minScore={exploreMinScore}
-          limit={exploreLimit}
-          onChangeQuery={setExploreQuery}
-          onChangeMinScore={value => { setExploreMinScore(value); setExplore(null); }}
-          onSearch={() => { void searchExplore(); }}
-          onShowMore={() => { void searchExplore({ limit: Math.min(50, exploreLimit * 2) }); }}
-          onOpen={memoryId => { setSelectedId(memoryId); setTab('memories'); }}
-        />
-      ) : tab === 'graph' ? (
-        <GraphPanel
-          graph={graph}
-          loading={graphLoading}
-          error={graphError}
-          language={language}
-          focusId={selectedId}
-          onReload={() => { void loadGraph(); }}
-          onOpen={memoryId => { setSelectedId(memoryId); setTab('memories'); }}
-        />
-      ) : tab === 'sync' ? (
-        <SyncPanel sync={sync} error={syncError} pass={syncPass} language={language} busy={busy} onRefresh={() => { void refreshSync(); }} />
+        <ArchivesPanel archives={archives} error={archivesError} selected={archiveId} language={language} onSelect={setArchiveId} onSave={async (draft, target) => {
+          const saved = await api.saveArchive({ ...draft, ...(target ? { entryId: target.entryId, baseVersion: target.version } : {}) });
+          setArchives(previous => previous?.some(item => item.entryId === saved.entryId)
+            ? previous.map(item => item.entryId === saved.entryId ? saved : item)
+            : [saved, ...(previous ?? [])]);
+          setArchiveId(saved.entryId);
+        }} />
+      ) : tab === 'skills' ? (
+        <SkillBacktestPanel language={language} run={api.skillBacktest} conversations={api.skillConversations} review={api.skillReview} />
       ) : (
         settings === null
           ? <div className="mwui-empty">{translate(language, 'list.loading')}</div>
@@ -1596,12 +1710,18 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
               notice={settingsNotice}
               connectionTest={connectionTest}
               wakeTest={wakeTest}
+              registerTest={registerTest}
+              sync={sync}
+              syncError={syncError}
+              syncPass={syncPass}
               onSaveInterface={patch => { void saveSettings(() => api.saveInterface(patch)); }}
               onSaveConnection={input => { void saveSettings(() => api.saveConnection(input)); }}
               onSaveInjection={input => { void saveSettings(() => api.saveInjection(input)); }}
               onSaveAutoStart={enabled => { void saveSettings(() => api.saveAutoStart(enabled)); }}
+              onRegisterTask={() => { void registerTask(); }}
               onTestConnection={serverUrl => { void testConnection(serverUrl); }}
               onTestWake={() => { void testWake(); }}
+              onRefreshSync={() => { void refreshSync(); }}
             />
           )
       )}

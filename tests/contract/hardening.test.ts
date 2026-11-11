@@ -11,7 +11,7 @@ import type { RememberRequest } from '../../packages/core/contracts/src/index.ts
 
 const DAY_MS = 86_400_000;
 const request = (key: string, content = `Hardening fixture content for ${key}.`): RememberRequest => ({
-  idempotencyKey: key, content, knowledgeType: 'Practice', tags: [], scope: 'project',
+  idempotencyKey: key, content, knowledgeType: 'Practice', tags: [],
   provenance: { source: 'hardening-test', sourceReference: 'fixture:hardening', evidence: ['fixture'], verificationStatus: 'unverified', confidence: 0.5, applicability: 'hardening fixture', limitations: 'test only', lastVerified: null },
 });
 

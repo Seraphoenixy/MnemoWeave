@@ -10,13 +10,26 @@
  *    written through `host-config.js`, which the injection hook also loads; the token never
  *    passes through this module's stored form and is never returned to the browser.
  */
-import { MemoryClient, ensureServer, probeServer } from '../../../../packages/client/src/index.ts';
+import { MemoryClient, ensureServer, probeServer, registerLocalServerTask, resolveLocalServerRegistration } from '../../../../packages/client/src/index.ts';
 import {
   LOCAL_SERVER_TASK_NAME, MIN_TOKEN_LENGTH, describeHostConfig, readPreferences, resolveHostConfig,
   settingsPath, validatePreferences, writePreferences,
 } from '../shared/host-config.js';
 import type { HostConfigDescription, ResolvedHostConfig } from '../shared/host-config.js';
-import type { UiConnectionTest, UiSettings, UiWakeTest } from '../shared/contract.ts';
+import type { UiConnectionTest, UiRegisterTest, UiSettings, UiWakeTest } from '../shared/contract.ts';
+
+/**
+ * The settings page's registration action. It runs only when a person asks for it, and it is the
+ * single place inside the plugin that may raise an elevation prompt.
+ */
+async function defaultRegisterTask(env: NodeJS.ProcessEnv): Promise<UiRegisterTest> {
+  const target = resolveLocalServerRegistration(env);
+  if (target === undefined) {
+    return { result: 'failed', detail: 'no published Server found; run node scripts/publish-server.mjs' };
+  }
+  const outcome = await registerLocalServerTask(target);
+  return { result: outcome.result, ...(outcome.detail === undefined ? {} : { detail: outcome.detail }) };
+}
 
 export interface SettingsDeps {
   /** Entry config from the Cordis plugin, the lowest-priority explicit layer. */
@@ -24,6 +37,8 @@ export interface SettingsDeps {
   env?: NodeJS.ProcessEnv;
   /** Injected so tests never touch the real task scheduler or the real Server. */
   runTask?: () => Promise<void>;
+  /** Injected so tests never raise a real elevation prompt. */
+  registerTask?: () => Promise<UiRegisterTest>;
   probe?: (input: { baseUrl: string; token: string }) => Promise<UiConnectionTest>;
   /**
    * Called whenever the live connection changes, so the read path can adopt the same client.
@@ -46,6 +61,7 @@ export interface Snapshot {
 export class SettingsService {
   private readonly env: NodeJS.ProcessEnv;
   private readonly runTask: () => Promise<void>;
+  private readonly registerTaskAction: () => Promise<UiRegisterTest>;
   private readonly probe: (input: { baseUrl: string; token: string }) => Promise<UiConnectionTest>;
   private resolved: ResolvedHostConfig;
   private current: Snapshot;
@@ -58,6 +74,7 @@ export class SettingsService {
     this.onConnection = deps.onConnection;
     this.env = deps.env ?? process.env;
     this.runTask = deps.runTask ?? defaultRunTask;
+    this.registerTaskAction = deps.registerTask ?? (() => defaultRegisterTask(this.env));
     this.probe = deps.probe ?? defaultProbe;
     this.resolved = resolveHostConfig(this.entryConfig, this.env, readPreferences(this.env));
     this.current = this.makeSnapshot(this.resolved);
@@ -98,7 +115,6 @@ export class SettingsService {
     return {
       interface: {
         defaultTab: description.preferences.defaultTab,
-        defaultScope: description.preferences.defaultScope,
         pageSize: description.preferences.pageSize,
         source: 'preference',
       },
@@ -167,10 +183,9 @@ export class SettingsService {
     return this.settings();
   }
 
-  /** Injection settings apply as a group: project and budget travel together. */
-  saveInjection(input: { projectId?: string | null; injectTimeoutMs?: number }): UiSettings {
+  /** The injection wait budget is the only injection preference left. */
+  saveInjection(input: { injectTimeoutMs?: number }): UiSettings {
     writePreferences({
-      ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
       ...(input.injectTimeoutMs === undefined ? {} : { injectTimeoutMs: input.injectTimeoutMs }),
     }, this.env);
     this.reload();
@@ -228,6 +243,14 @@ export class SettingsService {
     const ready = await ensureServer({ baseUrl: serverUrl, token, hostId: this.current.hostId, probeTimeoutMs: 1_000, waitMs: 4_000 });
     if (ready.state === 'ready') return { result: 'woken' };
     return { result: 'timeout', detail: ready.state === 'failed' ? ready.detail : 'the Server did not become ready in time' };
+  }
+
+  /**
+   * Register the scheduled task once, through the scheduler. The page calls this only from its
+   * own button: nothing here runs during a connection probe.
+   */
+  async registerTask(): Promise<UiRegisterTest> {
+    return this.registerTaskAction();
   }
 
   /** Probe used when the page refreshes its status. */

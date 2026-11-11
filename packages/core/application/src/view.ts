@@ -55,9 +55,10 @@ export class ViewAssembler {
   private readonly app: ViewSource;
   private readonly revocations: GrantRevocationSource | undefined;
   private readonly budgetTokens: number;
-  private readonly rules: ((input: { projectId?: string }) => ViewRuleRecord[]) | undefined;
+  /** Rules apply to every session, so the source is read without a project argument. */
+  private readonly rules: (() => ViewRuleRecord[]) | undefined;
   private generation: number;
-  constructor(app: ViewSource, options: { revocations?: GrantRevocationSource; budgetTokens?: number; generation?: number; rules?: (input: { projectId?: string }) => ViewRuleRecord[] } = {}) {
+  constructor(app: ViewSource, options: { revocations?: GrantRevocationSource; budgetTokens?: number; generation?: number; rules?: () => ViewRuleRecord[] } = {}) {
     if (!app.catalogReader) throw new Error('View assembly requires the publication catalog');
     this.app = app; this.revocations = options.revocations;
     this.budgetTokens = options.budgetTokens ?? DEFAULT_INJECTION_BUDGET_TOKENS;
@@ -78,7 +79,7 @@ export class ViewAssembler {
     const query = input.query;
     // Rules are read before assembly and delivered whole; exceeding the rule budget omits
     // the block entirely instead of trimming a rule.
-    const ruleRows = this.rules?.(input) ?? [];
+    const ruleRows = this.rules?.() ?? [];
     const ruleUsed = ruleRows.reduce((sum, rule) => sum + estimateTokens(rule.body) + 8, 0);
     const rulesExceeded = ruleUsed > RULE_BUDGET_TOKENS;
     const rules = rulesExceeded ? [] : ruleRows;
@@ -93,10 +94,10 @@ export class ViewAssembler {
     // Dynamic candidates: visible per the catalog; version state re-checked again before delivery.
     let dynamic = recall.memories.filter(memory => this.app.catalogReader!.currentMemoryIds(memory.id).some(id => {
       const descriptor = this.safeDescriptor(id);
-      return descriptor?.state === 'active' && mayRead(grant, descriptor) && (!input.projectId || descriptor.scope === 'global' || descriptor.projectId === input.projectId);
+      return descriptor?.state === 'active' && mayRead(grant);
     }));
     dynamic = await Promise.all(dynamic.map(async memory => {
-      const id = this.app.catalogReader!.currentMemoryIds(memory.id).find(id => { const descriptor = this.safeDescriptor(id); return descriptor?.state === 'active' && mayRead(grant, descriptor); })!;
+      const id = this.app.catalogReader!.currentMemoryIds(memory.id).find(id => { const descriptor = this.safeDescriptor(id); return descriptor?.state === 'active' && mayRead(grant); })!;
       const descriptor = this.app.catalogReader!.get(id);
       const read = await this.app.readMemory({ memoryId: id, revisionId: descriptor.currentRevisionId });
       return { ...memory, content: read.content };
@@ -113,13 +114,13 @@ export class ViewAssembler {
       seenPinned.add(item.memoryId);
       const descriptor = this.safeDescriptor(item.memoryId);
       if (!descriptor || descriptor.state !== 'active') { excluded.push({ memoryId: item.memoryId, reason: descriptor && descriptor.state === 'superseded' ? 'superseded' : 'not_visible' }); continue; }
-      if (!mayRead(grant, descriptor)) { excluded.push({ memoryId: item.memoryId, reason: 'grant_scope' }); continue; }
+      if (!mayRead(grant)) { excluded.push({ memoryId: item.memoryId, reason: 'grant_scope' }); continue; }
       const revision = descriptor.revisions.find((value: { id: string }) => value.id === descriptor.currentRevisionId)!;
       const read = await this.app.readMemory({ memoryId: item.memoryId });
       pinned.push({
         memoryId: descriptor.id, revisionId: revision.id, providerMemoryId: revision.providerMemoryId,
         tier: item.tier === 'critical' ? 'pinned-critical' : 'pinned-normal',
-        scope: descriptor.scope, ...(descriptor.projectId ? { projectId: descriptor.projectId } : {}), applicability: descriptor.applicability,
+        applicability: descriptor.applicability,
         content: read.content, excerpt: item.tier !== 'critical',
         sourceReference: `readMemory:${revision.providerMemoryId}`,
       });
@@ -153,11 +154,11 @@ export class ViewAssembler {
         if (pinnedIds.has(logicalId)) continue;
         const descriptor = this.safeDescriptor(logicalId);
         if (!descriptor || descriptor.state !== 'active') { excluded.push({ memoryId: logicalId, reason: descriptor && descriptor.state === 'superseded' ? 'superseded' : 'not_visible' }); continue; }
-        if (!mayRead(grant, descriptor)) { excluded.push({ memoryId: logicalId, reason: 'grant_scope' }); continue; }
+        if (!mayRead(grant)) { excluded.push({ memoryId: logicalId, reason: 'grant_scope' }); continue; }
         const revision = descriptor.revisions.find((value: { id: string }) => value.id === descriptor.currentRevisionId)!;
         const entry: ViewRecord['memories'][number] = {
           memoryId: descriptor.id, revisionId: revision.id, providerMemoryId: revision.providerMemoryId,
-          tier: 'dynamic', scope: descriptor.scope, ...(descriptor.projectId ? { projectId: descriptor.projectId } : {}), applicability: descriptor.applicability,
+          tier: 'dynamic', applicability: descriptor.applicability,
           content: (await this.app.readMemory({ memoryId: logicalId, revisionId: revision.id })).content, excerpt: false,
           ...(memory.score === undefined ? {} : { score: memory.score }),
           sourceReference: `readMemory:${revision.providerMemoryId}`,
@@ -171,7 +172,7 @@ export class ViewAssembler {
     // Reject changed publications rather than labeling old text with a new current pointer.
     for (const memory of memories) {
       const current = this.safeDescriptor(memory.memoryId);
-      if (!current || current.state !== 'active' || current.currentRevisionId !== memory.revisionId || !mayRead(grant, current)) throw new MnemoWeaveError('INVALID_STATE');
+      if (!current || current.state !== 'active' || current.currentRevisionId !== memory.revisionId || !mayRead(grant)) throw new MnemoWeaveError('INVALID_STATE');
     }
     // Delivery checks: grant may have been revoked or expired while content was assembled.
     this.checkGrant(grant);

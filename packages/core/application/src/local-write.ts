@@ -89,16 +89,16 @@ export function planEditChange(input: { entryId: string; scope: string; content:
   };
 }
 
-/** Scope for a local rule row: global rules live in the global scope. */
-export function ruleScope(row: LocalRuleRow): string {
-  return row.scope === 'global' ? 'global' : `project:${row.projectId ?? ''}`;
+/** A rule travels in the global scope: rules are not project-scoped. */
+export function ruleScope(): string {
+  return 'global';
 }
 
 export function ruleDraft(row: LocalRuleRow): SyncEntryDraftValue {
   return {
     entryId: row.entryId,
     kind: 'runtime',
-    scope: ruleScope(row),
+    scope: ruleScope(),
     content: {
       format: 'plain',
       data: row.body,

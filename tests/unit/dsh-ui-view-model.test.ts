@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { normalizeLanguage, translate } from '../../plugins/dsh-mnemo-weave/src/client/i18n.ts';
 import {
   availabilityText, codeText, detailMeta, editBlocker, filterEntities, formatDateTime, injectionChip, listSummary,
-  neighbourhood, relativeTime, scopeOptions, scopeParams, stateText, statusChips, utf8Bytes, type Chip,
+  neighbourhood, relativeTime, stateText, statusChips, utf8Bytes, type Chip,
 } from '../../plugins/dsh-mnemo-weave/src/client/view-model.ts';
 import type { UiConfigView, UiInjection, UiMemoryDetail, UiMemoryList, UiMemoryRevision, UiStatus } from '../../plugins/dsh-mnemo-weave/src/shared/contract.ts';
 
@@ -29,8 +29,6 @@ const detail = (overrides: Partial<UiMemoryDetail> = {}): UiMemoryDetail => ({
   currentRevisionId: '22222222-2222-4222-8222-222222222222',
   isCurrent: true,
   providerMemoryId: 'provider-1',
-  scope: 'project',
-  projectId: 'proj-a',
   applicability: 'release',
   state: 'active',
   content: 'x',
@@ -113,12 +111,12 @@ test('the list summary counts what the Server returned', () => {
 
 test('detail metadata names the viewed revision, not the live one', () => {
   const meta = detailMeta(detail(), 'en');
-  assert.deepEqual(meta.map(item => item.key), ['state', 'revision', 'currentness', 'scope', 'applicability', 'published']);
-  assert.deepEqual(meta.slice(0, 4).map(item => item.value), ['Active', '#2', 'Current revision', 'proj-a']);
-  assert.equal(meta[5]?.value, formatDateTime('2026-11-09T02:00:00.000Z'));
+  assert.deepEqual(meta.map(item => item.key), ['state', 'revision', 'currentness', 'applicability', 'published']);
+  assert.deepEqual(meta.slice(0, 3).map(item => item.value), ['Active', '#2', 'Current revision']);
+  assert.equal(meta[4]?.value, formatDateTime('2026-11-09T02:00:00.000Z'));
+  // A memory has no project dimension left, so the metadata must not name one.
+  assert.ok(!meta.some(item => item.key === 'scope' || item.key === 'project'));
 
-  const { projectId: _project, ...globalFields } = detail({ scope: 'global' });
-  assert.equal(detailMeta(globalFields as UiMemoryDetail, 'zh')[3]?.value, '全局');
   assert.equal(detailMeta(detail({ state: 'superseded' }), 'zh')[0]?.value, '已被取代');
   assert.equal(detailMeta(detail({ revisions: [] }), 'en')[1]?.value, '—');
 
@@ -147,16 +145,6 @@ test('the edit form blocks empty, oversized and unchanged bodies before any requ
   assert.equal(editBlocker('a', 'a'), 'unchanged');
   assert.equal(editBlocker('b', 'a'), null);
   assert.equal(utf8Bytes('中'), 3);
-});
-
-test('scope options come from the browsable set and parse back into request parameters', () => {
-  const options = scopeOptions([{ projectId: 'alpha', count: 2 }, { projectId: 'beta', count: 1 }]);
-  assert.deepEqual(options.map(option => option.value), ['all', 'global', 'project:alpha', 'project:beta']);
-  assert.deepEqual(scopeParams('all'), { scope: 'all' });
-  assert.deepEqual(scopeParams('global'), { scope: 'global' });
-  assert.deepEqual(scopeParams('project:alpha'), { scope: 'project', projectId: 'alpha' });
-  // A project that only appears on a later page is still offered: the index covers the whole set.
-  assert.equal(scopeOptions([{ projectId: 'late-project', count: 1 }]).length, 3);
 });
 
 test('the injection chip names the last View and flags a budget omission', () => {

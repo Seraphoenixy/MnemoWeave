@@ -92,14 +92,17 @@ export const CSS = `
 .mwui-subrow-button{width:100%;display:flex;gap:8px;align-items:baseline;appearance:none;border:0;background:transparent;
   color:inherit;font:inherit;padding:0;cursor:pointer;text-align:left}
 .mwui-subrow[data-selected="true"] .mwui-subrow-main{color:var(--mwui-accent)}
-.mwui-guard{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:8px 12px;padding:8px 10px;border-radius:8px;
-  border:1px solid rgb(210,153,34);background:var(--mwui-surface);font-size:11.5px;color:rgb(210,153,34)}
-.mwui-guard span{flex:1;min-width:0}
 .mwui-settings-group{display:flex;flex-direction:column;gap:8px;padding:12px 0;border-bottom:1px solid var(--mwui-border)}
 .mwui-settings-group:last-child{border-bottom:0}
 .mwui-settings-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px}
 .mwui-settings-row label{min-width:150px;color:var(--mwui-muted)}
 .mwui-settings-row .mwui-input{flex:1 1 220px}
+/* A labelled control inside a pane: the label reads like a settings row's, the control takes the
+   full width of its column. */
+.mwui-field{display:flex;flex-direction:column;gap:4px;min-width:0}
+.mwui-field>span{font-size:11.5px;color:var(--mwui-muted)}
+.mwui-field .mwui-textarea{min-height:88px}
+.mwui-field .mwui-select{width:100%}
 .mwui-source{margin-left:auto;color:var(--mwui-muted);font-size:10.5px;border:1px solid var(--mwui-border);
   border-radius:999px;padding:0 7px}
 .mwui-chip-slim[data-tone="ok"]{color:rgb(63,185,80);border-color:rgb(63,185,80)}
@@ -116,9 +119,6 @@ export const CSS = `
 .mwui-relation-evidence{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .mwui-relation-preview{width:100%;display:flex;flex-direction:column;gap:4px;margin-top:4px}
 .mwui-classify{display:flex;gap:8px;flex-wrap:wrap}
-.mwui-create{border:1px solid var(--mwui-accent);border-radius:8px;margin:8px;background:var(--mwui-panel)}
-.mwui-create .mwui-detail{padding-top:4px}
-.mwui-create .mwui-textarea{min-height:96px}
 .mwui-graph-scroll{overflow:auto;max-height:70vh;border:1px solid var(--mwui-border);border-radius:8px;background:var(--mwui-panel)}
 .mwui-graph{display:block;width:100%;height:auto;min-width:520px}
 .mwui-graph-link{stroke:var(--mwui-border);stroke-width:1.5}
@@ -179,7 +179,31 @@ export const CSS = `
   padding:5px 12px;border-radius:8px;cursor:pointer;white-space:nowrap}
 .mwui-tab:hover{background:var(--mwui-hover, rgba(127,127,127,.12))}
 .mwui-tab[data-active="true"]{border-color:var(--mwui-accent);font-weight:650}
+/* A Source page's compound header, as dsh-mnemon frames a memory page: title, count and the
+   page-level action, then its own secondary tabs as an underline strip. */
+.mwui-memory{display:flex;flex-direction:column;flex:1;min-height:0}
+.mwui-memory-workspace{display:flex;flex-direction:column;flex:0 0 auto;border-bottom:1px solid var(--mwui-border);margin-bottom:12px}
+.mwui-memory-head{display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap;padding:2px 2px 8px}
+.mwui-memory-heading{display:flex;flex-direction:column;gap:2px;min-width:0}
+.mwui-memory-title{margin:0;font-size:15px;font-weight:650;letter-spacing:.2px}
+.mwui-memory-description{margin:0;color:var(--mwui-muted);font-size:12px;max-width:720px}
+.mwui-memory-actions{margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.mwui-memory-meta{color:var(--mwui-muted);font-size:11.5px}
+.mwui-memory-tabs{display:flex;gap:22px;min-width:0;overflow-x:auto;scrollbar-width:none}
+.mwui-memory-tabs::-webkit-scrollbar{display:none}
+.mwui-memory-tabs button{position:relative;appearance:none;border:0;border-bottom:2px solid transparent;background:transparent;
+  color:var(--mwui-muted);font:inherit;font-size:13px;line-height:20px;padding:6px 1px 9px;margin-bottom:-1px;white-space:nowrap;cursor:pointer}
+.mwui-memory-tabs button:hover{color:inherit}
+.mwui-memory-tabs button[data-active="true"]{border-bottom-color:var(--mwui-accent);color:inherit;font-weight:600}
+@media (max-width:900px){
+  .mwui-memory-actions{width:100%}
+  .mwui-memory-actions .mwui-button{flex:1}
+  .mwui-memory-tabs{gap:18px}
+}
 .mwui-page{display:flex;flex-direction:column;gap:12px;flex:1;min-height:0;overflow:auto}
+/* A page's own cards keep their content height and let the page scroll. Left shrinkable, a pane
+   competes with its siblings for the viewport and the clipped one simply loses rows. */
+.mwui-page>*{flex:0 0 auto}
 .mwui-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
 .mwui-card{display:flex;flex-direction:column;gap:2px;border:1px solid var(--mwui-border);border-radius:12px;padding:10px 12px;background:var(--mwui-surface)}
 .mwui-card-label{font-size:11.5px;color:var(--mwui-muted)}
@@ -195,6 +219,21 @@ export const CSS = `
 .mwui-table th{text-align:left;font-weight:600;color:var(--mwui-muted);padding:4px 8px;border-bottom:1px solid var(--mwui-border);white-space:nowrap}
 .mwui-table td{padding:4px 8px;border-bottom:1px dashed var(--mwui-border);vertical-align:top}
 .mwui-table td[data-tone="warn"]{color:rgb(210,153,34);font-weight:600}
+/* A modal form. The page behind it keeps its layout, selection and scroll position: the window is
+   the only interactive surface and the underlying panes are never rewritten to host a form. */
+.mwui-modal{position:fixed;inset:0;z-index:60;display:flex;align-items:center;justify-content:center;
+  padding:24px;background:rgba(15,17,20,.45)}
+.mwui-modal-dialog{width:min(800px,100%);max-height:min(88vh,960px);display:flex;flex-direction:column;
+  min-height:0;border:1px solid var(--mwui-border);border-radius:14px;background:var(--dsh-color-bg,#fff);
+  box-shadow:0 18px 48px rgba(0,0,0,.35)}
+.mwui-modal-dialog:focus{outline:none}
+.mwui-modal-head{display:flex;align-items:center;gap:10px;padding:12px 14px;
+  border-bottom:1px solid var(--mwui-border);background:var(--mwui-surface)}
+.mwui-modal-title{font-weight:650;font-size:14px}
+.mwui-modal-subtitle{color:var(--mwui-muted);font-size:11.5px}
+.mwui-modal-close{margin-left:auto}
+.mwui-modal-body{display:flex;flex-direction:column;gap:12px;padding:14px;overflow:auto;min-height:0}
+@media (max-width:640px){.mwui-modal{padding:10px}.mwui-modal-dialog{max-height:94vh}}
 `;
 
 /** Inject the stylesheet once per document; a second client instance reuses the same tag. */

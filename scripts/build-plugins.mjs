@@ -28,8 +28,15 @@ for (const name of plugins) {
   }
   const stage = join(staging, name);
   cpSync(source, stage, { recursive: true, filter: path => !path.includes(`${join('plugins', name, 'dist')}`) });
-  // Host hooks/MCP launch the compiled server and adapters from inside the plugin folder.
-  if (name !== 'dsh-mnemo-weave') cpSync(runtime, join(stage, 'dist'), { recursive: true, filter: path => !path.startsWith(output) });
+  // Host hooks/MCP launch the compiled server and adapters from inside the plugin folder. The
+  // published environment file belongs to the deployment, not to a plugin copy: shipping it
+  // would give every plugin its own stale paths.
+  if (name !== 'dsh-mnemo-weave') {
+    cpSync(runtime, join(stage, 'dist'), {
+      recursive: true,
+      filter: path => !path.startsWith(output) && !path.endsWith('.env.local-server') && !path.includes(`${join('dist', 'data')}`),
+    });
+  }
   cpSync(stage, join(output, name), { recursive: true });
   process.stdout.write(`built ${join(output, name)}\n`);
 }

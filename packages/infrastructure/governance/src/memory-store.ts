@@ -16,7 +16,7 @@ import type { SqliteMemoryCatalog } from './catalog.ts';
 type Transaction = <T>(operation: () => T) => T;
 
 interface RuleDbRow {
-  entry_id: string; body: string; scope: string; project_id: string | null; enabled: number; version: number; withdrawn_at: string | null;
+  entry_id: string; body: string; enabled: number; version: number; withdrawn_at: string | null;
 }
 
 interface ArchiveDbRow {
@@ -44,21 +44,18 @@ export class SqliteMemoryStore implements MemoryApplyStore {
    */
   publishSynced(input: SyncedPublish): void {
     if (!this.catalog) return;
-    const project = input.projectId ?? undefined;
     const request = RememberInput.parse({
       idempotencyKey: `sync-${input.entryId.slice(0, 8)}-${input.version}`,
       content: input.content,
       knowledgeType: 'Practice',
       tags: input.tags,
-      scope: project ? 'project' : 'global',
-      ...(project ? { projectId: project } : {}),
       provenance: {
         source: 'sync',
         sourceReference: `mnemoweave:${input.entryId}:${input.version}`,
         evidence: [`synced from the shared server at ${input.at}`],
         verificationStatus: 'verified',
         confidence: 1,
-        applicability: project ?? 'global',
+        applicability: 'global',
         limitations: '内容由其他设备写入，本机未重新审核',
         lastVerified: input.at,
       },
@@ -82,10 +79,10 @@ export class SqliteMemoryStore implements MemoryApplyStore {
     this.transaction(() => {
       this.db.prepare(`
         INSERT INTO runtime_rules(entry_id, body, scope, project_id, enabled, version, withdrawn_at, updated_at)
-        VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES(?, ?, 'global', NULL, ?, ?, ?, ?)
         ON CONFLICT(entry_id) DO UPDATE SET body=excluded.body, scope=excluded.scope, project_id=excluded.project_id,
           enabled=excluded.enabled, version=excluded.version, withdrawn_at=excluded.withdrawn_at, updated_at=excluded.updated_at
-      `).run(row.entryId, row.body, row.scope, row.projectId, row.enabled ? 1 : 0, row.version, row.withdrawnAt, at);
+      `).run(row.entryId, row.body, row.enabled ? 1 : 0, row.version, row.withdrawnAt, at);
     });
   }
 
@@ -173,38 +170,34 @@ export class SqliteMemoryStore implements MemoryApplyStore {
     return rows.map((row) => ({ entryId: row.entry_id, version: row.version, providerId: row.provider_id, contentHash: row.content_hash, state: row.state as FormalMapRow['state'], appliedAt: row.applied_at }));
   }
 
-  /** Enabled, non-withdrawn rules for a scope; project rules do not leak across projects. */
-  rulesFor(scope: 'global' | 'project', projectId: string | null): LocalRuleRow[] {
+  /** Enabled, non-withdrawn rules; every rule applies to every session. */
+  rulesFor(): LocalRuleRow[] {
     const rows = this.db.prepare(`
-      SELECT entry_id, body, scope, project_id, enabled, version, withdrawn_at FROM runtime_rules
-      WHERE scope = ? AND withdrawn_at IS NULL AND enabled = 1 AND (project_id IS ? OR project_id = ?)
+      SELECT entry_id, body, enabled, version, withdrawn_at FROM runtime_rules
+      WHERE withdrawn_at IS NULL AND enabled = 1
       ORDER BY version ASC
-    `).all(scope, projectId, projectId) as unknown as RuleDbRow[];
-    return rows.map((row) => ({ entryId: row.entry_id, body: row.body, scope: row.scope as LocalRuleRow['scope'], projectId: row.project_id, enabled: row.enabled === 1, version: row.version, withdrawnAt: row.withdrawn_at }));
-  }
-
-  /** Every rule in a scope, disabled included: operator listing and budget checks need them. */
-  allRules(scope: 'global' | 'project', projectId: string | null): LocalRuleRow[] {
-    const rows = this.db.prepare(`
-      SELECT entry_id, body, scope, project_id, enabled, version, withdrawn_at FROM runtime_rules
-      WHERE scope = ? AND withdrawn_at IS NULL AND (project_id IS ? OR project_id = ?)
-      ORDER BY version ASC
-    `).all(scope, projectId, projectId) as unknown as RuleDbRow[];
-    return rows.map((row) => ({ entryId: row.entry_id, body: row.body, scope: row.scope as LocalRuleRow['scope'], projectId: row.project_id, enabled: row.enabled === 1, version: row.version, withdrawnAt: row.withdrawn_at }));
-  }
-
-  /** Every live rule across all projects; the memory page lists them without narrowing. */
-  everyRule(): LocalRuleRow[] {
-    const rows = this.db.prepare(`
-      SELECT entry_id, body, scope, project_id, enabled, version, withdrawn_at FROM runtime_rules
-      WHERE withdrawn_at IS NULL ORDER BY scope ASC, project_id ASC, version ASC
     `).all() as unknown as RuleDbRow[];
-    return rows.map((row) => ({ entryId: row.entry_id, body: row.body, scope: row.scope as LocalRuleRow['scope'], projectId: row.project_id, enabled: row.enabled === 1, version: row.version, withdrawnAt: row.withdrawn_at }));
+    return rows.map((row) => ({ entryId: row.entry_id, body: row.body, enabled: row.enabled === 1, version: row.version, withdrawnAt: row.withdrawn_at }));
+  }
+
+  /** Every rule, disabled included: operator listing and budget checks need them. */
+  allRules(): LocalRuleRow[] {
+    const rows = this.db.prepare(`
+      SELECT entry_id, body, enabled, version, withdrawn_at FROM runtime_rules
+      WHERE withdrawn_at IS NULL
+      ORDER BY version ASC
+    `).all() as unknown as RuleDbRow[];
+    return rows.map((row) => ({ entryId: row.entry_id, body: row.body, enabled: row.enabled === 1, version: row.version, withdrawnAt: row.withdrawn_at }));
+  }
+
+  /** Every live rule; the memory page lists them without narrowing. */
+  everyRule(): LocalRuleRow[] {
+    return this.allRules();
   }
 
   rule(entryId: string): LocalRuleRow | null {
-    const row = this.db.prepare('SELECT entry_id, body, scope, project_id, enabled, version, withdrawn_at FROM runtime_rules WHERE entry_id = ?').get(entryId) as RuleDbRow | undefined;
-    return row ? { entryId: row.entry_id, body: row.body, scope: row.scope as LocalRuleRow['scope'], projectId: row.project_id, enabled: row.enabled === 1, version: row.version, withdrawnAt: row.withdrawn_at } : null;
+    const row = this.db.prepare('SELECT entry_id, body, enabled, version, withdrawn_at FROM runtime_rules WHERE entry_id = ?').get(entryId) as RuleDbRow | undefined;
+    return row ? { entryId: row.entry_id, body: row.body, enabled: row.enabled === 1, version: row.version, withdrawnAt: row.withdrawn_at } : null;
   }
 
   archive(entryId: string): LocalArchiveRow | null {

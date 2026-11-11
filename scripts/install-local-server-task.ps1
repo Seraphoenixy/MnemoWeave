@@ -73,9 +73,12 @@ if (-not $NodeExe) {
 }
 
 # 48 hex characters: above the 24-character floor every consumer enforces.
+# RandomNumberGenerator::Fill only exists in .NET Core and later; this script also runs under
+# Windows PowerShell 5.1, where it does not, so GetBytes is used instead.
 function New-RandomToken {
     $bytes = New-Object byte[] 24
-    [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+    $generator = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $generator.GetBytes($bytes) } finally { $generator.Dispose() }
     return -join ($bytes | ForEach-Object { $_.ToString('x2') })
 }
 
@@ -138,9 +141,12 @@ switch ($Action) {
     }
 
     'register' {
-        $main = Join-Path $ServerDir 'dist/apps/server/src/main.js'
+        # Published directory (apps/ directly) or a checkout (dist/apps/...). The publish step
+        # uses dist/ itself, so both shapes have to be accepted by one installer.
+        $main = Join-Path $ServerDir 'apps/server/src/main.js'
+        if (-not (Test-Path -LiteralPath $main)) { $main = Join-Path $ServerDir 'dist/apps/server/src/main.js' }
         if (-not (Test-Path -LiteralPath $main)) {
-            throw "compiled Server entry not found: $main (run node node_modules/typescript/bin/tsc first)"
+            throw "compiled Server entry not found under $ServerDir (run node node_modules/typescript/bin/tsc and node scripts/publish-server.mjs)"
         }
         if (-not (Test-Path -LiteralPath $EnvFile)) {
             throw "environment file not found: $EnvFile (see scripts/local-server.env.example)"

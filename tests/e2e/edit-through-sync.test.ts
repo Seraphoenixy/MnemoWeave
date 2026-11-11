@@ -90,6 +90,19 @@ test('a user edit is confirmed remotely, applied locally and published once', as
     const listingAfter = await app.client!.memories({ query: '第二次编辑', limit: 10 });
     assert.equal(listingAfter.items[0]?.content, '第二次编辑后的正文。');
     assert.equal(listingAfter.items[0]?.entryVersion, 2);
+    assert.ok(app.client?.createArchive && app.client.editArchive && app.client.archives);
+    const archive = await app.client.createArchive({
+      projectId: 'alpha', title: 'Design record', body: 'Original archive', source: 'user',
+      verification: 'open', evidence: 'Design review',
+    });
+    const archiveEdit = { title: archive.title, body: 'Revised archive', verification: 'verified', evidence: archive.evidence } as const;
+    const updated = await app.client.editArchive(archive.entryId, { ...archiveEdit, baseVersion: archive.version });
+    assert.equal(updated.version, archive.version + 1);
+    await assert.rejects(app.client.editArchive(archive.entryId, { ...archiveEdit, baseVersion: archive.version }),
+      (error: unknown) => error instanceof MnemoWeaveError && error.code === 'VERSION_CONFLICT');
+    assert.equal((await app.client.archives({ projectId: 'alpha' })).items[0]?.body, archiveEdit.body);
+    assert.deepEqual(remote.pull(DEVICE_TOKEN, { scope: SCOPE, since: 0, limit: 10 }).changes
+      .filter(change => change.entry.entryId === archive.entryId).map(change => [change.operation, change.version]), [['create', 1], ['update', 2]]);
     // One edit is one local Revision: the initial publish plus two edits is three, not four.
     // Appending from both the sync apply step and the direct-edit path doubled the history.
     const inspect = new SqliteCandidates(resolve(join(dir, 'state', 'governance.db')));

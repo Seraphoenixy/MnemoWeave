@@ -95,22 +95,16 @@ test('a created memory is published with its classification and can be edited', 
   } finally { await close(); }
 });
 
-test('a project-scoped memory lands in that project and nowhere else', async () => {
+test('a created memory is reachable from the one memory list', async () => {
   const { client, close } = await harness();
   try {
-    const created = await client.createMemory({
-      content: '项目范围的正文。', knowledgeType: 'Constraint', scope: 'project', projectId: 'alpha',
-    });
+    const created = await client.createMemory({ content: '正文。', knowledgeType: 'Constraint' });
     assert.equal(created.ok, true);
     if (!created.ok) return;
-    const inProject = await client.listMemories({ limit: 50, scope: 'project', projectId: 'alpha' });
-    assert.equal(inProject.ok, true);
-    if (inProject.ok) assert.ok(inProject.value.items.some(item => item.memoryId === created.value.memoryId));
-
-    const globalOnly = await client.listMemories({ limit: 50, scope: 'global' });
-    assert.equal(globalOnly.ok, true);
-    if (globalOnly.ok) assert.equal(globalOnly.value.items.some(item => item.memoryId === created.value.memoryId), false,
-      'a project memory is not a global memory');
+    // There is no project dimension to filter by: the created memory is simply in the list.
+    const listed = await client.listMemories({ limit: 50 });
+    assert.equal(listed.ok, true);
+    if (listed.ok) assert.ok(listed.value.items.some(item => item.memoryId === created.value.memoryId));
   } finally { await close(); }
 });
 

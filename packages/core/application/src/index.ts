@@ -67,7 +67,7 @@ export class MemoryApplication {
       // filled from the visible set or the Provider list is exhausted, so a large visible
       // pool can no longer push matching results out of a fixed 100-record fetch.
       const catalog = this.candidates.catalog;
-      const visible = new Set(catalog.visibleProviderIds().filter(id => !grant || catalog.currentMemoryIds(id).some(logicalId => mayRead(grant, catalog.get(logicalId)))));
+      const visible = new Set(catalog.visibleProviderIds().filter(id => !grant || catalog.currentMemoryIds(id).some(logicalId => mayRead(grant))));
       const unmatched = new Set<string>();
       const page = 100;
       const maxWindow = 1000;
@@ -88,7 +88,7 @@ export class MemoryApplication {
         window += page;
       }
       if (grant) assertGrant(grant);
-      const authorized = selected.filter(memory => !grant || catalog.currentMemoryIds(memory.id).some(id => { const descriptor = catalog.get(id); return descriptor.state === 'active' && mayRead(grant, descriptor); }));
+      const authorized = selected.filter(memory => !grant || catalog.currentMemoryIds(memory.id).some(id => { const descriptor = catalog.get(id); return descriptor.state === 'active' && mayRead(grant); }));
       return { ...RecallOutput.parse({ memories: authorized, complete: exhausted }), unregistered: [...unmatched] };
     }
     if (grant) throw new MnemoWeaveError('REVIEW_REQUIRED');
@@ -97,35 +97,34 @@ export class MemoryApplication {
   async remember(input: unknown, grant?: ReadGrantRecord): Promise<CandidateRecord> {
     if (!this.candidates) throw new MnemoWeaveError('REVIEW_REQUIRED');
     const request = RememberInput.parse(input);
-    if (grant && !mayRead(grant, request)) throw new MnemoWeaveError('UNAUTHORIZED');
-    if (grant && request.change) { const target = this.candidates.catalog?.get(request.change.targetMemoryId); if (!target || !mayRead(grant, target)) throw new MnemoWeaveError('UNAUTHORIZED'); }
+    if (grant && !mayRead(grant)) throw new MnemoWeaveError('UNAUTHORIZED');
+    if (grant && request.change) { if (!this.candidates.catalog?.get(request.change.targetMemoryId) || !mayRead(grant)) throw new MnemoWeaveError('UNAUTHORIZED'); }
     return this.candidates.submit(request);
   }
   async candidateStatus(input: unknown, grant?: ReadGrantRecord): Promise<CandidateRecord> {
     if (!this.candidates) throw new MnemoWeaveError('REVIEW_REQUIRED');
     const candidate = this.candidates.get(CandidateIdInput.parse(input).candidateId);
-    if (grant) { assertGrant(grant); if (!mayRead(grant, candidate.request)) throw new MnemoWeaveError('UNAUTHORIZED'); }
+    if (grant) { assertGrant(grant); if (!mayRead(grant)) throw new MnemoWeaveError('UNAUTHORIZED'); }
     return candidate;
   }
   async readMemory(input: unknown, grant?: ReadGrantRecord) {
     if (!this.candidates?.catalog || !this.provider.readMemory) throw new MnemoWeaveError('REVIEW_REQUIRED');
     const request = MemoryIdInput.parse(input);
     const descriptor = this.candidates.catalog.get(request.memoryId);
-    if (grant) { assertGrant(grant); if (!mayRead(grant, descriptor)) throw new MnemoWeaveError('UNAUTHORIZED'); }
+    if (grant) { assertGrant(grant); if (!mayRead(grant)) throw new MnemoWeaveError('UNAUTHORIZED'); }
     const revisionId = request.revisionId ?? descriptor.currentRevisionId;
     const revision = descriptor.revisions.find(value => value.id === revisionId);
     if (!revision) throw new MnemoWeaveError('NOT_FOUND');
-    if (grant && !mayRead(grant, revision)) throw new MnemoWeaveError('UNAUTHORIZED');
     const actual = await this.provider.readMemory(revision.providerMemoryId);
     if (actual.id !== revision.providerMemoryId || createHash('sha256').update(actual.content).digest('hex') !== revision.contentHash) throw new MnemoWeaveError('PROVIDER_INTEGRITY');
     if (grant) assertGrant(grant);
-    const visible = grant ? { ...descriptor, revisions: descriptor.revisions.filter(item => mayRead(grant, item)), relations: descriptor.relations.filter(item => [item.sourceMemoryId, item.targetMemoryId].every(id => mayRead(grant, this.candidates!.catalog!.get(id)))), conflicts: descriptor.conflicts.filter(item => mayRead(grant, this.candidates!.get(item.candidateId).request)) } : descriptor;
+    const visible = descriptor;
     return PublishedMemoryOutput.parse({ ...visible, selectedRevisionId: revisionId,selectedRevision:revision, content: actual.content, entryVersion: this.candidates.entryVersion?.(request.memoryId) ?? 0 });
   }
   async readConflict(input:unknown, grant?: ReadGrantRecord){
     if(!this.candidates?.catalog)throw new MnemoWeaveError('REVIEW_REQUIRED');
     const record = this.candidates.catalog.getConflict(ConflictIdInput.parse(input).caseId);
-    if (grant) { assertGrant(grant); if (!mayRead(grant, this.candidates.catalog.get(record.targetMemoryId)) || !mayRead(grant, this.candidates.get(record.candidateId).request)) throw new MnemoWeaveError('UNAUTHORIZED'); }
+    if (grant) { assertGrant(grant); if (!mayRead(grant)) throw new MnemoWeaveError('UNAUTHORIZED'); }
     return record;
   }
   async resolveConflict(input:unknown,operator:string){

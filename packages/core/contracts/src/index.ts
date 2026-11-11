@@ -64,8 +64,6 @@ export const RememberInput = z.object({
   category: z.enum(['preference', 'decision', 'fact', 'insight', 'context', 'general']).optional(),
   importance: z.number().int().min(1).max(5).optional(),
   entities: z.array(z.string().trim().min(1).max(200)).max(50).optional(),
-  scope: z.enum(['project', 'global']).default('project'),
-  projectId: z.string().trim().min(1).max(200).optional(),
   change: ChangeIntent.optional(),
   provenance: Provenance,
 }).strict();
@@ -96,7 +94,7 @@ export const RevisionDescriptor = z.object({
   id: z.uuid(), memoryId: z.uuid(), number: z.number().int().positive(), parentId: z.uuid().nullable(),
   providerMemoryId: z.string().min(1), contentHash: z.string().regex(/^[a-f0-9]{64}$/),
   candidateId: z.uuid(), publishedAt: z.iso.datetime(), effectiveAt: z.iso.datetime(),
-  applicability: z.string(), scope: z.enum(['project', 'global']), projectId: z.string().optional(),
+  applicability: z.string(),
   /**
    * Classification attached to this revision. `knowledgeType` comes from a local Remember; the
    * rest arrive with a synced formal entry. They are separate dimensions, not synonyms, so a
@@ -130,7 +128,7 @@ export type ConflictResolutionRequest=z.infer<typeof ConflictResolutionInput>;
 export type ConflictRecord=z.infer<typeof ConflictDescriptor>;
 export const MemoryDescriptor = z.object({
   id: z.uuid(), currentRevisionId: z.uuid(), state: z.enum(['active', 'superseded', 'unverified']),
-  scope: z.enum(['project', 'global']), projectId: z.string().optional(), applicability: z.string(), revisions: z.array(RevisionDescriptor),
+  applicability: z.string(), revisions: z.array(RevisionDescriptor),
   relations: z.array(LogicalRelation).default([]),
   conflicts:z.array(ConflictDescriptor).default([]),
 });
@@ -138,7 +136,6 @@ export const MemoryIdInput = z.object({ memoryId: z.uuid(), revisionId: z.uuid()
 /** One entry of the client-facing memory list; content comes from the authoritative Provider. */
 export const MemoryListItem = z.object({
   memoryId: z.uuid(), revisionId: z.uuid(), providerMemoryId: z.string().min(1),
-  scope: z.enum(['project', 'global']), projectId: z.string().optional(),
   applicability: z.string(), publishedAt: z.iso.datetime(), content: z.string(),
   entryVersion: z.number().int().nonnegative(),
   /**
@@ -155,15 +152,9 @@ export const MemoryListQuery = z.object({
   query: z.string().trim().max(500).optional(),
   limit: z.coerce.number().int().min(1).max(200).default(50),
   /**
-   * `all` (default), `global`, or one project. Filtering happens before body matching so a
-   * project whose memories sort late is still reachable.
-   */
-  scope: z.enum(['all', 'global', 'project']).default('all'),
-  projectId: z.string().trim().min(1).max(200).optional(),
-  /**
    * Keep only memories whose current revision carries this classification. Applied to the
-   * candidate set like `scope`, before the body is read, so a filtered page costs no more than
-   * an unfiltered one.
+   * candidate set before the body is read, so a filtered page costs no more than an
+   * unfiltered one.
    */
   category: z.enum(['preference', 'decision', 'fact', 'insight', 'context', 'general']).optional(),
   knowledgeType: z.enum(['Concept', 'Practice', 'Architecture', 'Troubleshooting', 'Constraint', 'Procedure', 'Reference']).optional(),
@@ -176,10 +167,7 @@ export const MemoryListQuery = z.object({
    * how many rows matched, so candidates skipped for not matching the query do not stall paging.
    */
   cursor: z.string().trim().max(500).optional(),
-}).strict().refine(
-  value => value.scope !== 'project' || value.projectId !== undefined,
-  'scope=project requires projectId',
-);
+}).strict();
 /**
  * Semantic search over the Provider, mapped back to this machine's catalog.
  *
@@ -199,7 +187,6 @@ export const ExploreInput = z.object({
 }).strict();
 export const ExploreHit = z.object({
   memoryId: z.uuid(), revisionId: z.uuid(), providerMemoryId: z.string().min(1),
-  scope: z.enum(['project', 'global']), projectId: z.string().optional(),
   state: z.enum(['active', 'superseded', 'unverified']),
   content: z.string(), score: z.number(), publishedAt: z.iso.datetime(),
   /** Classification of the current revision, when it was recorded. */
@@ -231,15 +218,11 @@ export type ExploreOutputRecord = z.infer<typeof ExploreOutput>;
  * label; a renderer resolves the names of the nodes it actually shows.
  */
 export const MemoryGraphQuery = z.object({
-  scope: z.enum(['all', 'global', 'project']).default('all'),
-  projectId: z.string().trim().min(1).max(200).optional(),
   /** Cap on nodes; edges are then limited to those whose endpoints are both present. */
   limit: z.coerce.number().int().min(1).max(500).default(200),
-}).strict().refine(value => value.scope !== 'project' || value.projectId !== undefined, 'scope=project requires projectId');
+}).strict();
 export const MemoryGraphNode = z.object({
   memoryId: z.uuid(),
-  scope: z.enum(['global', 'project']),
-  projectId: z.string().optional(),
   /**
    * A retired memory is still a node: a supersede edge points *at* one by definition, so excluding
    * them would make every supersede edge undrawable. Withdrawn memories never appear.
@@ -271,15 +254,13 @@ export type MemoryGraphRecord = z.infer<typeof MemoryGraph>;
 export const MemoryList = z.object({  items: z.array(MemoryListItem),
   /** Present when more candidates remain; absent once the scan is exhausted. */
   nextCursor: z.string().optional(),
-  /** Projects that appear in the browsable set, so the filter never hides an existing project. */
-  projects: z.array(z.object({ projectId: z.string(), count: z.number().int().nonnegative() }).strict()).optional(),
   /**
-   * Classification values present in the scoped set. Indexed before the category filter is
+   * Classification values present in the browsable set. Indexed before the category filter is
    * applied, so choosing one category cannot remove the others from the picker.
    */
   categories: z.array(z.object({ value: z.string(), count: z.number().int().nonnegative() }).strict()).optional(),
   knowledgeTypes: z.array(z.object({ value: z.string(), count: z.number().int().nonnegative() }).strict()).optional(),
-  /** Entities named by the current revisions in the scoped set, in their recorded spelling. */
+  /** Entities named by the current revisions in the browsable set, in their recorded spelling. */
   entities: z.array(z.object({ value: z.string(), count: z.number().int().nonnegative() }).strict()).optional(),
 }).strict();
 export type MemoryListItemRecord = z.infer<typeof MemoryListItem>;
@@ -287,19 +268,20 @@ export type MemoryListRecord = z.infer<typeof MemoryList>;
 
 // ── Runtime rules and project archives (operator write surface) ──
 export const RuleCreate = z.object({
-  scope: z.enum(['global', 'project']),
-  projectId: z.string().trim().min(1).max(200).optional(),
   body: z.string().trim().min(1).max(4000),
   enabled: z.boolean().default(true),
-}).strict().refine(value => value.scope === 'global' ? value.projectId === undefined : value.projectId !== undefined, 'Project-scoped rules require projectId');
+}).strict();
 export const RuleEdit = z.object({
   body: z.string().trim().min(1).max(4000).optional(),
   enabled: z.boolean().optional(),
+  /**
+   * The version the editor was opened at. When supplied, a stale value is refused instead of
+   * overwriting a change this caller never read.
+   */
+  baseVersion: z.number().int().nonnegative().optional(),
 }).strict().refine(value => value.body !== undefined || value.enabled !== undefined, 'Rule edit requires body or enabled');
 export const RuleRecord = z.object({
   entryId: z.uuid(),
-  scope: z.enum(['global', 'project']),
-  projectId: z.string().nullable(),
   body: z.string().min(1),
   enabled: z.boolean(),
   version: z.number().int().positive(),
@@ -314,6 +296,10 @@ export const ArchiveCreate = z.object({
   verification: z.enum(['verified', 'open', 'refuted']),
   evidence: z.string().trim().min(1).max(2000),
 }).strict();
+export const ArchiveEdit = ArchiveCreate.pick({ title: true, body: true, verification: true, evidence: true }).extend({
+  baseVersion: z.number().int().positive(),
+}).strict();
+export type ArchiveEditInput = z.infer<typeof ArchiveEdit>;
 export const ArchiveRecord = z.object({
   entryId: z.uuid(), projectId: z.string().min(1), title: z.string().min(1), body: z.string().min(1),
   source: z.enum(['session', 'tool', 'user']), verification: z.enum(['verified', 'open', 'refuted']),
@@ -344,13 +330,8 @@ export const MemoryCreateInput = z.object({
   importance: z.number().int().min(1).max(5).optional(),
   tags: z.array(z.string().trim().min(1).max(100)).max(20).optional(),
   entities: z.array(z.string().trim().min(1).max(200)).max(50).optional(),
-  scope: z.enum(['global', 'project']).default('global'),
-  projectId: z.string().trim().min(1).max(200).optional(),
   reason: z.string().trim().min(1).max(4000).optional(),
-}).strict().refine(
-  value => value.scope === 'global' ? value.projectId === undefined : value.projectId !== undefined,
-  'Project-scoped memories require projectId',
-);
+}).strict();
 export const MemoryCreateOutput = z.object({
   memoryId: z.uuid(), revisionId: z.uuid(), providerMemoryId: z.string().min(1),
   contentHash: z.string().regex(/^[a-f0-9]{64}$/),
@@ -467,8 +448,7 @@ export type ReadGrantRecord = z.infer<typeof ReadGrant>;
 export const ViewMemory = z.object({
   memoryId: z.uuid(), revisionId: z.uuid(), providerMemoryId: z.string().min(1),
   tier: z.enum(['pinned-critical', 'pinned-normal', 'dynamic']),
-  projectId: z.string().optional(),
-  scope: z.enum(['project', 'global']), applicability: z.string(),
+  applicability: z.string(),
   content: z.string(), excerpt: z.boolean(), score: z.number().finite().optional(),
   sourceReference: z.string().min(1),
 }).strict();
@@ -661,11 +641,9 @@ Object.assign(openapi.paths, {
     description: 'The relation graph over the visible catalog. Structure only — nodes carry what the catalog knows, not the body, because reading bodies would cost one Provider process per node. Every edge has both endpoints present.',
     parameters: [
       { name: 'x-mnemoweave-host', in: 'header', required: true, schema: z.toJSONSchema(z.string().min(1)) },
-      { name: 'scope', in: 'query', schema: z.toJSONSchema(z.enum(['all', 'global', 'project'])) },
-      { name: 'projectId', in: 'query', schema: z.toJSONSchema(z.string().min(1).max(200)) },
       { name: 'limit', in: 'query', schema: z.toJSONSchema(z.coerce.number().int().min(1).max(500)) },
     ],
-    responses: { '200': { description: 'Nodes and edges, with `truncated` when the node cap was reached', content: jsonContent(MemoryGraph) }, '400': { description: 'Invalid scope, missing projectId for scope=project, or an out-of-range limit' }, '401': { description: 'Missing host identity' } },
+    responses: { '200': { description: 'Nodes and edges, with `truncated` when the node cap was reached', content: jsonContent(MemoryGraph) }, '400': { description: 'An out-of-range limit' }, '401': { description: 'Missing host identity' } },
   } },
   '/v1/memories/explore': { post: {
     description: 'Provider-ranked semantic search, mapped to memories this machine published. Distinct from the list endpoint, which matches body text over a stable scan. Provider hits with no catalog entry are counted in `unregistered` and never returned.',
@@ -722,25 +700,33 @@ Object.assign(openapi.paths, {
   } },
   '/v1/rules': {
     get: {
-      description: 'Rule list. An operator narrows by scope (global, project or all); a Host that names itself receives every rule across all projects. Disabled rules are listed, withdrawn ones are not.',
-      parameters: [{ name: 'scope', in: 'query', schema: z.toJSONSchema(z.enum(['global', 'project', 'all'])) }, { name: 'projectId', in: 'query', schema: z.toJSONSchema(z.string().min(1)) }],
+      description: 'Rule list for the operator or a Host that names itself. Rules apply to every session; disabled rules are listed, withdrawn ones are not.',
+      parameters: [],
       security: [{ operator: [] }, { bearer: [] }],
-      responses: { '200': { description: 'Rules', content: jsonContent(RuleList) }, '400': { description: 'Invalid scope' }, '401': { description: 'Operator credential or Host header required' } },
+      responses: { '200': { description: 'Rules', content: jsonContent(RuleList) }, '401': { description: 'Operator credential or Host header required' } },
     },
     post: {
-      description: 'Operator-only rule creation. Rejects with RULE_BUDGET_EXCEEDED when the applicable rules no longer fit the rule budget; a truncated rule is never stored.',
-      security: [{ operator: [] }],
+      description: 'Rule creation by the operator or a Host that names itself. Rejects with RULE_BUDGET_EXCEEDED when the applicable rules no longer fit the rule budget; a truncated rule is never stored.',
+      security: [{ operator: [] }, { bearer: [] }],
       requestBody: { required: true, content: jsonContent(RuleCreate) },
-      responses: { '201': { description: 'Created rule', content: jsonContent(RuleRecord) }, '400': { description: 'Invalid input' }, '401': { description: 'Operator credential required' }, '409': { description: 'RULE_BUDGET_EXCEEDED' } },
+      responses: { '201': { description: 'Created rule', content: jsonContent(RuleRecord) }, '400': { description: 'Invalid input' }, '401': { description: 'Operator credential or Host header required' }, '409': { description: 'RULE_BUDGET_EXCEEDED' } },
     },
   },
   '/v1/rules/{ruleId}': { patch: {
-    description: 'Operator-only rule edit; appends a version and re-checks the rule budget.',
+    description: 'Rule edit by the operator or a Host that names itself; appends a version and re-checks the rule budget. A supplied baseVersion that no longer matches the current version is refused with VERSION_CONFLICT.',
     parameters: [{ name: 'ruleId', in: 'path', required: true, schema: z.toJSONSchema(z.uuid()) }],
-    security: [{ operator: [] }],
+    security: [{ operator: [] }, { bearer: [] }],
     requestBody: { required: true, content: jsonContent(RuleEdit) },
-    responses: { '200': { description: 'Updated rule', content: jsonContent(RuleRecord) }, '400': { description: 'Invalid input' }, '401': { description: 'Operator credential required' }, '404': { description: 'Rule not found' }, '409': { description: 'RULE_BUDGET_EXCEEDED' } },
+    responses: { '200': { description: 'Updated rule', content: jsonContent(RuleRecord) }, '400': { description: 'Invalid input' }, '401': { description: 'Operator credential or Host header required' }, '404': { description: 'Rule not found' }, '409': { description: 'RULE_BUDGET_EXCEEDED or VERSION_CONFLICT' } },
   } },
+  '/v1/archives/{entryId}': {
+    patch: {
+      description: 'Edit an archive using the version read by the editor.',
+      parameters: [{ in: 'path', name: 'entryId', required: true, schema: { type: 'string', format: 'uuid' } }],
+      requestBody: { required: true, content: jsonContent(ArchiveEdit) },
+      responses: { '200': { description: 'Updated archive', content: jsonContent(ArchiveRecord) }, '409': { description: 'Archive version conflict' } },
+    },
+  },
   '/v1/archives': {
     get: {
       description: 'Project archive read for the operator or a Host that names itself. Without projectId every project is returned; withdrawn entries appear only when asked.',
@@ -752,10 +738,10 @@ Object.assign(openapi.paths, {
       responses: { '200': { description: 'Archives', content: jsonContent(ArchiveList) }, '400': { description: 'Invalid input' }, '401': { description: 'Operator credential or Host header required' } },
     },
     post: {
-      description: 'Operator-only project archive write; model output cannot reach this endpoint.',
+      description: 'Create a project archive from a named Host or with the operator credential.',
       security: [{ operator: [] }],
       requestBody: { required: true, content: jsonContent(ArchiveCreate) },
-      responses: { '201': { description: 'Created archive', content: jsonContent(ArchiveRecord) }, '400': { description: 'Invalid input' }, '401': { description: 'Operator credential required' } },
+      responses: { '201': { description: 'Created archive', content: jsonContent(ArchiveRecord) }, '400': { description: 'Invalid input' }, '401': { description: 'Operator credential or Host header required' } },
     },
   },
   '/v1/runtime/projects': { post: { description: 'Operator-only explicit project registration; IDs are never inferred from paths.', requestBody: { required: true, content: jsonContent(z.object({ projectId: z.string().min(1).max(200) }).strict()) }, responses: { '200': { description: 'Registered' }, '401': { description: 'Operator required' } } } },

@@ -85,6 +85,8 @@ test('preferences reject bad values and unknown keys instead of clamping silentl
   assert.throws(() => validatePreferences({ pageSize: 2 }), /pageSize/);
   assert.throws(() => validatePreferences({ pageSize: 999 }), /pageSize/);
   assert.throws(() => validatePreferences({ defaultTab: 'nope' }), /defaultTab/);
+  // Sync is a settings section now; an old preference follows it instead of failing every read.
+  assert.deepEqual(validatePreferences({ defaultTab: 'sync' }), { defaultTab: 'settings' });
   assert.throws(() => validatePreferences({ defaultScope: 'everything' }), /defaultScope/);
   // The injection budget is part of the turn deadline, so the upper bound is enforced.
   assert.throws(() => validatePreferences({ injectTimeoutMs: 5_000 }), /injectTimeoutMs/);
@@ -230,7 +232,7 @@ test('the page and the injection hook read the same saved values', () => {
     env,
     probe: async () => ({ ok: true, reason: 'ok' as const }),
   });
-  service.saveInjection({ projectId: 'alpha', injectTimeoutMs: 900 });
+  service.saveInjection({ injectTimeoutMs: 900 });
   const pageView = service.settings();
   // The hook resolves independently, from the same file.
   const hookView = resolveHostConfig({ token: TOKEN }, env, readPreferences(env));
@@ -264,3 +266,17 @@ test('a corrupt preference file falls back to defaults instead of breaking the p
   assert.equal(recovered.defaultTab, 'overview');
 });
 
+
+test('the registration action is delegated and never runs during a probe', async () => {
+  const env = tempEnv('register');
+  let calls = 0;
+  const service = new SettingsService({
+    entryConfig: { token: TOKEN, serverUrl: 'http://127.0.0.1:4317', hostId: 'dsh' },
+    env,
+    probe: async () => ({ ok: true, reason: 'ok' as const }),
+    registerTask: async () => { calls += 1; return { result: 'registered' as const }; },
+  });
+  assert.equal(calls, 0, 'constructing the service or probing must not raise a prompt');
+  assert.deepEqual(await service.registerTask(), { result: 'registered' });
+  assert.equal(calls, 1, 'each press asks the injected action exactly once');
+});

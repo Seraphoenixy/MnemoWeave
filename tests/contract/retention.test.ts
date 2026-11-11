@@ -10,7 +10,6 @@ import type { RememberRequest } from '../../packages/core/contracts/src/index.ts
 const DAY_MS = 86_400_000;
 const request = (key: string, content = 'Retention fixture content for candidate clearing.'): RememberRequest => ({
   idempotencyKey: key, content, knowledgeType: 'Practice', tags: [],
-  scope: 'project',
   provenance: { source: 'retention-test', sourceReference: 'fixture:retention', evidence: ['fixture'], verificationStatus: 'unverified', confidence: 0.5, applicability: 'isolated retention fixture', limitations: 'not production knowledge', lastVerified: null },
 });
 
@@ -141,7 +140,6 @@ test('Cleared candidate bodies never affect published revision reads', async () 
     const publication = repo.get(candidate.id).publication!;
     const before = repo.catalog.get(publication.memoryId);
     assert.equal(before.revisions[0]!.applicability, input.provenance.applicability);
-    assert.equal(before.revisions[0]!.scope, 'project');
     const report = repo.sweepRetention(new Date(Date.now() + (CANDIDATE_BODY_RETENTION_DAYS + 1) * DAY_MS));
     assert.equal(report.clearedCandidates, 1);
     const after = repo.catalog.get(publication.memoryId);

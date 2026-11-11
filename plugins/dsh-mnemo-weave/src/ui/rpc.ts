@@ -1,15 +1,21 @@
-import type { MemoriesRequest, MemoryRequest, RpcResult, UiCreateInput, UiEditInput, UiSettings, UiWithdrawInput } from '../shared/contract.ts';
+import type { MemoriesRequest, MemoryRequest, RpcResult, UiCreateInput, UiEditInput, UiRegisterTest, UiRuleCreateInput, UiRuleEditInput, UiSettings, UiWithdrawInput } from '../shared/contract.ts';
 import { isRecord } from '../shared/contract.ts';
 import type { MemorySource } from './memory-source.ts';
 import type { RpcHandler } from './types.ts';
+import { reviewSkill } from './skill-review.ts';
+import { backtestSkill } from './skill-backtest.ts';
+import { organizeMemory } from './organize-memory.ts';
+import type { createTaskRunner } from './task-runner.ts';
 
 /** The slice of the Host settings service this handler needs. */
 export interface SettingsLike {
   settings(): UiSettings;
   saveInterface(patch: unknown): UiSettings;
   saveConnection(input: { serverUrl?: string; hostId?: string }): Promise<UiSettings>;
-  saveInjection(input: { projectId?: string | null; injectTimeoutMs?: number }): UiSettings;
+  saveInjection(input: { injectTimeoutMs?: number }): UiSettings;
   saveAutoStart(input: { enabled?: boolean }): UiSettings;
+  /** Register the scheduled task; only the settings page's own button calls this. */
+  registerTask(): Promise<UiRegisterTest>;
   testConnection(input: { serverUrl?: string }): Promise<{ ok: boolean; reason: string; detail?: string }>;
   testWake(input?: { baseUrl?: string }): Promise<{ result: string; detail?: string }>;
 }
@@ -47,6 +53,8 @@ const MAX_LIMIT = 200;
 const DEFAULT_LIMIT = 50;
 const MAX_CONTENT_BYTES = 8_000;
 const MAX_REASON = 4_000;
+/** The Server's rule body limit, in characters rather than UTF-8 bytes. */
+const MAX_RULE_BODY = 4_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // The page may only point at this machine; a remote address would leak the service token.
 const SERVER_URL = /^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d{1,5})?\/?$/i;
@@ -66,8 +74,6 @@ function memoriesRequest(payload: unknown): MemoriesRequest {
   if (!isRecord(payload)) invalid('memories payload must be an object');
   const query = payload['query'];
   const limit = payload['limit'];
-  const scope = payload['scope'];
-  const projectId = payload['projectId'];
   const cursor = payload['cursor'];
   if (query !== undefined && (typeof query !== 'string' || query.length > MAX_QUERY)) {
     invalid(`query must be a string of at most ${MAX_QUERY} characters`);
@@ -75,13 +81,6 @@ function memoriesRequest(payload: unknown): MemoriesRequest {
   if (limit !== undefined && (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1 || limit > MAX_LIMIT)) {
     invalid(`limit must be an integer between 1 and ${MAX_LIMIT}`);
   }
-  if (scope !== undefined && scope !== 'all' && scope !== 'global' && scope !== 'project') {
-    invalid('scope must be all, global or project');
-  }
-  if (projectId !== undefined && (typeof projectId !== 'string' || projectId.trim() === '' || projectId.length > 200)) {
-    invalid('projectId must be a non-empty string of at most 200 characters');
-  }
-  if (scope === 'project' && projectId === undefined) invalid('scope=project requires projectId');
   if (cursor !== undefined && (typeof cursor !== 'string' || cursor === '' || cursor.length > 500)) {
     invalid('cursor must be a non-empty string of at most 500 characters');
   }
@@ -104,8 +103,6 @@ function memoriesRequest(payload: unknown): MemoriesRequest {
   return {
     ...(query === undefined ? {} : { query }),
     limit: limit ?? DEFAULT_LIMIT,
-    ...(scope === undefined ? {} : { scope }),
-    ...(projectId === undefined ? {} : { projectId: projectId.trim() }),
     ...(cursor === undefined ? {} : { cursor }),
     ...(category === undefined ? {} : { category: category as (typeof CATEGORIES)[number] }),
     ...(knowledgeType === undefined ? {} : { knowledgeType: knowledgeType as (typeof KNOWLEDGE_TYPES)[number] }),
@@ -133,24 +130,15 @@ function memoryRequest(payload: unknown): MemoryRequest {
  * A withdrawal always needs a reason: it removes the memory from recall and injection, and the
  * reason is what the history shows later about why.
  */
-/** The graph is scoped like the list: same scope semantics, same bounds. */
-function graphRequest(payload: unknown): { scope?: 'all' | 'global' | 'project'; projectId?: string; limit?: number } {
+/** The graph is a whole-catalog read; only the node cap is an argument. */
+function graphRequest(payload: unknown): { limit?: number } {
   if (payload === undefined) return {};
   if (!isRecord(payload)) invalid('graph payload must be an object');
-  const scope = payload['scope'];
-  if (scope !== undefined && scope !== 'all' && scope !== 'global' && scope !== 'project') invalid('scope must be all, global or project');
-  const projectId = payload['projectId'];
-  if (scope === 'project' && typeof projectId !== 'string') invalid('scope=project requires projectId');
-  if (projectId !== undefined && (typeof projectId !== 'string' || projectId.trim() === '' || projectId.trim().length > 200)) {
-    invalid('projectId must be a non-empty string of at most 200 characters');
-  }
   const limit = payload['limit'];
   if (limit !== undefined && (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1 || limit > 500)) {
     invalid('limit must be an integer between 1 and 500');
   }
   return {
-    ...(scope === undefined ? {} : { scope }),
-    ...(projectId === undefined ? {} : { projectId: (projectId as string).trim() }),
     ...(limit === undefined ? {} : { limit }),
   };
 }
@@ -288,6 +276,48 @@ function editRequest(payload: unknown): UiEditInput {
   };
 }
 
+/** A rule needs a scope before it can be budgeted: a project rule competes with global ones. */
+function ruleCreateRequest(payload: unknown): UiRuleCreateInput {
+  if (!isRecord(payload)) invalid('createRule payload must be an object');
+  const body = payload['body'];
+  if (typeof body !== 'string' || body.trim() === '') invalid('body must be a non-empty string');
+  if (body.trim().length > MAX_RULE_BODY) invalid(`body must contain at most ${MAX_RULE_BODY} characters`);
+  const enabled = payload['enabled'];
+  if (enabled !== undefined && typeof enabled !== 'boolean') invalid('enabled must be a boolean');
+  return {
+    body: body.trim(),
+    ...(enabled === undefined ? {} : { enabled }),
+  };
+}
+
+/**
+ * An edit always carries the version it was opened at, so a rule changed by another host is
+ * refused rather than silently overwritten. At least one field must actually change.
+ */
+function ruleEditRequest(payload: unknown): { ruleId: string } & UiRuleEditInput {
+  if (!isRecord(payload) || typeof payload['ruleId'] !== 'string' || !UUID.test(payload['ruleId'])) {
+    invalid('ruleId must be a UUID');
+  }
+  const body = payload['body'];
+  if (body !== undefined) {
+    if (typeof body !== 'string' || body.trim() === '') invalid('body must be a non-empty string');
+    if (body.trim().length > MAX_RULE_BODY) invalid(`body must contain at most ${MAX_RULE_BODY} characters`);
+  }
+  const enabled = payload['enabled'];
+  if (enabled !== undefined && typeof enabled !== 'boolean') invalid('enabled must be a boolean');
+  if (body === undefined && enabled === undefined) invalid('editRule requires body or enabled');
+  const baseVersion = payload['baseVersion'];
+  if (baseVersion !== undefined && (typeof baseVersion !== 'number' || !Number.isInteger(baseVersion) || baseVersion < 0)) {
+    invalid('baseVersion must be a non-negative integer');
+  }
+  return {
+    ruleId: payload['ruleId'],
+    ...(body === undefined ? {} : { body: (body as string).trim() }),
+    ...(enabled === undefined ? {} : { enabled: enabled as boolean }),
+    ...(baseVersion === undefined ? {} : { baseVersion: baseVersion as number }),
+  };
+}
+
 /** Rejection message kept for the page; the Server's own code is passed through unchanged. */
 function failureOf(error: unknown): { message: string; code: string } {
   const code = isRecord(error) && typeof error['code'] === 'string' ? error['code'] : 'PROVIDER_UNAVAILABLE';
@@ -302,8 +332,8 @@ function failureOf(error: unknown): { message: string; code: string } {
  * Settings endpoints go to the Host's own configuration, not to the Server: they change what this
  * plugin and the injection hook read, and the token never travels back to the browser.
  */
-export function createRpcHandler(source: MemorySource, settings?: SettingsLike): RpcHandler {
-  return async (endpoint, payload) => {
+export function createRpcHandler(source: MemorySource, settings?: SettingsLike, task?: ReturnType<typeof createTaskRunner>): RpcHandler {
+  return async (endpoint, payload, signal) => {
     try {
       switch (endpoint) {
         case 'status': return ok(await source.status());
@@ -314,7 +344,7 @@ export function createRpcHandler(source: MemorySource, settings?: SettingsLike):
         }
         case 'saveInterface': {
           if (settings === undefined) return fail('settings are unavailable in this build', 'PROVIDER_UNAVAILABLE');
-          return ok(settings.saveInterface(preferencesPatch(payload, ['defaultTab', 'defaultScope', 'pageSize'])));
+          return ok(settings.saveInterface(preferencesPatch(payload, ['defaultTab', 'pageSize'])));
         }
         case 'saveConnection': {
           if (settings === undefined) return fail('settings are unavailable in this build', 'PROVIDER_UNAVAILABLE');
@@ -323,13 +353,18 @@ export function createRpcHandler(source: MemorySource, settings?: SettingsLike):
         }
         case 'saveInjection': {
           if (settings === undefined) return fail('settings are unavailable in this build', 'PROVIDER_UNAVAILABLE');
-          return ok(settings.saveInjection(preferencesPatch(payload, ['projectId', 'injectTimeoutMs'])));
+          return ok(settings.saveInjection(preferencesPatch(payload, ['injectTimeoutMs'])));
         }
         case 'saveAutoStart': {
           if (settings === undefined) return fail('settings are unavailable in this build', 'PROVIDER_UNAVAILABLE');
           const enabled = isRecord(payload) ? payload['enabled'] : undefined;
           if (typeof enabled !== 'boolean') invalid('enabled must be a boolean');
           return ok(settings.saveAutoStart({ enabled }));
+        }
+        case 'registerTask': {
+          // The only path from the page to an elevation prompt: the user pressed the button.
+          if (settings === undefined) return fail('settings are unavailable in this build', 'PROVIDER_UNAVAILABLE');
+          return ok(await settings.registerTask());
         }
         case 'testConnection': {
           if (settings === undefined) return fail('settings are unavailable in this build', 'PROVIDER_UNAVAILABLE');
@@ -349,8 +384,6 @@ export function createRpcHandler(source: MemorySource, settings?: SettingsLike):
           return ok(await source.memories({
             ...(request.query === undefined ? {} : { query: request.query }),
             limit: request.limit ?? DEFAULT_LIMIT,
-            ...(request.scope === undefined ? {} : { scope: request.scope }),
-            ...(request.projectId === undefined ? {} : { projectId: request.projectId }),
             ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
             ...(request.category === undefined ? {} : { category: request.category }),
             ...(request.knowledgeType === undefined ? {} : { knowledgeType: request.knowledgeType }),
@@ -362,6 +395,32 @@ export function createRpcHandler(source: MemorySource, settings?: SettingsLike):
           const request = memoryRequest(payload);
           return ok(await source.memory(request.memoryId, request.revisionId));
         }
+        case 'skillConversations':
+          return ok(task?.conversations?.() ?? []);
+        case 'skillReview': {
+          if (!task) return fail('DSH skill review is unavailable.', 'PROVIDER_UNAVAILABLE');
+          if (!isRecord(payload)) invalid('Invalid skill review');
+          const { sessionId, baseline } = payload;
+          if (typeof sessionId !== 'string' || !sessionId.trim() || sessionId.length > 200
+            || typeof baseline !== 'string' || baseline.length > 24000) invalid('Invalid conversation or baseline');
+          return ok(await reviewSkill(task, sessionId, baseline, signal));
+        }
+        case 'skillBacktest': {
+          if (!task) return fail('DSH skill evaluation is unavailable.', 'PROVIDER_UNAVAILABLE');
+          if (!isRecord(payload)) invalid('Invalid skill backtest');
+          const { baseline, candidate, scenario, checks } = payload;
+          if (typeof baseline !== 'string' || baseline.length > 24000
+            || typeof candidate !== 'string' || !candidate.trim() || candidate.length > 24000
+            || typeof scenario !== 'string' || !scenario.trim() || scenario.length > 4000
+            || !Array.isArray(checks) || checks.length < 1 || checks.length > 20
+            || checks.some(check => typeof check !== 'string' || !check.trim() || check.length > 500)) {
+            invalid('Invalid skill text, scenario or checks');
+          }
+          return ok(await backtestSkill(task, { baseline, candidate, scenario, checks }, signal));
+        }
+        case 'organizeMemory':
+          if (!task) return fail('DSH memory tasks are unavailable.', 'PROVIDER_UNAVAILABLE');
+          return ok(await organizeMemory(source, task, createRequest(payload), signal));
         case 'create': return ok(await source.create(createRequest(payload)));
         case 'edit': return ok(await source.edit(editRequest(payload)));
         case 'withdraw': return ok(await source.withdraw(withdrawRequest(payload)));
@@ -372,6 +431,23 @@ export function createRpcHandler(source: MemorySource, settings?: SettingsLike):
         }
         case 'injection': return ok(await source.injection());
         case 'rules': return ok(await source.rules());
+        case 'createRule': return ok(await source.createRule(ruleCreateRequest(payload)));
+        case 'editRule': {
+          const request = ruleEditRequest(payload);
+          const { ruleId, ...input } = request;
+          return ok(await source.editRule(ruleId, input));
+        }
+        case 'saveArchive': {
+          if (!isRecord(payload)) invalid('Invalid archive');
+          const { entryId, baseVersion, projectId, title, body, verification, evidence } = payload;
+          if (typeof projectId !== 'string' || typeof title !== 'string' || typeof body !== 'string'
+            || typeof evidence !== 'string' || (verification !== 'open' && verification !== 'verified' && verification !== 'refuted')) invalid('Invalid archive fields');
+          const input = { projectId, title, body, verification, evidence } as const;
+          if (entryId === undefined && baseVersion === undefined) return ok(await source.saveArchive(input));
+          if (typeof entryId !== 'string' || !UUID.test(entryId) || typeof baseVersion !== 'number'
+            || !Number.isSafeInteger(baseVersion) || baseVersion < 1) invalid('Invalid archive version');
+          return ok(await source.saveArchive(input, { entryId, baseVersion }));
+        }
         case 'archives': return ok(await source.archives());
         case 'sync': return ok(await source.sync());
         case 'syncRefresh': return ok(await source.refreshSync());

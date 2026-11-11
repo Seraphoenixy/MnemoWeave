@@ -10,7 +10,7 @@ import type { RememberRequest } from '../../packages/core/contracts/src/index.ts
 
 const DAY_MS = 86_400_000;
 const request = (key: string, knowledgeType: RememberRequest['knowledgeType']): RememberRequest => ({
-  idempotencyKey: key, content: `Review fixture content ${key}.`, knowledgeType, tags: [], scope: 'project',
+  idempotencyKey: key, content: `Review fixture content ${key}.`, knowledgeType, tags: [],
   provenance: {
     source: 'review-test', sourceReference: `fixture:${key}`, evidence: ['fixture'], verificationStatus: 'verified',
     confidence: 0.5, applicability: 'isolated review fixture', limitations: 'not production knowledge', lastVerified: null,

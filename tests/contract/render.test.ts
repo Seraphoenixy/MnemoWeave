@@ -9,7 +9,7 @@ test('the rendered injection keeps the fixed block order', () => {
     guidance: 'Server guidance line.',
     rules: [{ body: '提交前必须运行类型检查。' }, { body: '禁止直接改正式记忆以外的地方。' }],
     workingContext: [{ text: 'Working note one.' }],
-    memories: [{ content: 'Formal memory one.', scope: 'project' }],
+    memories: [{ content: 'Formal memory one.' }],
   });
   const positions = ['Server guidance line.', 'Runtime rules', '提交前必须运行类型检查。', 'Working context', 'Formal memories']
     .map(needle => text.indexOf(needle));

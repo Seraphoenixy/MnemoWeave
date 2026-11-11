@@ -11,7 +11,6 @@ const request = (key: string): RememberRequest => ({
   content: 'Quota fixture content for the governance store.',
   knowledgeType: 'Practice',
   tags: [],
-  scope: 'project',
   provenance: {
     source: 'quota-test', sourceReference: 'fixture:quota', evidence: ['fixture'],
     verificationStatus: 'unverified', confidence: 0.5, applicability: 'isolated quota fixture',

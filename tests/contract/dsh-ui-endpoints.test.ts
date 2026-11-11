@@ -7,18 +7,17 @@ import {
 /** The Host half checks every field: a wrong shape is a protocol error, never rendered as data. */
 
 const rule = {
-  entryId: '11111111-1111-4111-8111-111111111111', scope: 'project', projectId: 'alpha',
+  entryId: '11111111-1111-4111-8111-111111111111',
   body: '提交前必须运行类型检查。', enabled: true, version: 2, withdrawnAt: null,
 };
 
-test('a rule list is parsed field by field, including the project scope', () => {
-  const rules = parseRuleList({ items: [rule, { ...rule, entryId: '22222222-2222-4222-8222-222222222222', scope: 'global', projectId: null }] });
+test('a rule list is parsed field by field', () => {
+  const rules = parseRuleList({ items: [rule, { ...rule, entryId: '22222222-2222-4222-8222-222222222222', enabled: false }] });
   assert.equal(rules.length, 2);
-  assert.equal(rules[0]?.projectId, 'alpha');
   assert.equal(rules[0]?.enabled, true);
-  assert.equal(rules[1]?.projectId, null);
+  assert.equal(rules[1]?.enabled, false);
   assert.throws(() => parseRuleList({ items: [{ ...rule, enabled: 'yes' }] }), (error: unknown) => (error as { code?: string }).code === 'PROVIDER_PROTOCOL');
-  assert.throws(() => parseRuleList({ items: [{ ...rule, scope: 'host' }] }), (error: unknown) => (error as { code?: string }).code === 'PROVIDER_PROTOCOL');
+  assert.throws(() => parseRuleList({ items: [{ ...rule, version: 'two' }] }), (error: unknown) => (error as { code?: string }).code === 'PROVIDER_PROTOCOL');
 });
 
 const archive = {

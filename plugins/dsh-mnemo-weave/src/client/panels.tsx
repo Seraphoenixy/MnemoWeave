@@ -1,26 +1,50 @@
-import type { UiArchive, UiConfigView, UiConnectionTest, UiExplore, UiGraph, UiInjection, UiMemoryList, UiRule, UiSettings, UiStatus, UiSyncPass, UiSyncStatus, UiWakeTest } from '../shared/contract.ts';
+import type { UiArchive, UiConfigView, UiConnectionTest, UiExplore, UiGraph, UiInjection, UiMemoryList, UiRegisterTest, UiRule, UiSettings, UiStatus, UiSyncPass, UiSyncStatus, UiWakeTest } from '../shared/contract.ts';
 import { translate, type Language, type MessageKey } from './i18n.ts';
+import { Modal } from './modal.tsx';
 import { filterEntities, formatDateTime, relativeTime, utf8Bytes } from './view-model.ts';
 import { layoutGraph } from './graph-layout.ts';
 import { useEffect, useState, type ReactNode } from 'react';
 
-export type Tab = 'overview' | 'runtime' | 'archives' | 'memories' | 'entities' | 'explore' | 'graph' | 'sync' | 'settings';
+/**
+ * The page-level classes. dsh-mnemon gives every Source one page and shows only those pages in
+ * its top navigation; a memory Source's own views are tabs of that page, not pages beside it.
+ */
+export type Tab = 'overview' | 'runtime' | 'archives' | 'memories' | 'skills' | 'settings';
 
 export const TAB_KEYS: Record<Tab, MessageKey> = {
   overview: 'tabs.overview',
   runtime: 'tabs.runtime',
   archives: 'tabs.archives',
   memories: 'tabs.memories',
-  entities: 'tabs.entities',
-  explore: 'tabs.explore',
-  graph: 'tabs.graph',
-  sync: 'tabs.sync',
+  skills: 'tabs.skills',
   settings: 'tabs.settings',
 };
 
 // Class order mirrors dsh-mnemon: runtime (100) → documents/archives (200) → memories (300);
-// the cross-class overview stays first as this page's landing view, sync sits with the settings-like tail.
-export const TAB_ORDER: readonly Tab[] = ['overview', 'runtime', 'archives', 'memories', 'entities', 'explore', 'graph', 'sync', 'settings'];
+// the cross-class overview stays first as this page's landing view. Sync is a setting of this
+// machine's Server, so it lives on the settings page rather than beside the memory classes.
+export const TAB_ORDER: readonly Tab[] = ['overview', 'runtime', 'archives', 'memories', 'skills', 'settings'];
+
+export function isTab(value: string): value is Tab {
+  return (TAB_ORDER as readonly string[]).includes(value);
+}
+
+/**
+ * Views of the formal-memory page, in dsh-mnemon's Memory Spaces order: Overview, Recall,
+ * Content, Entities. The graph is part of the overview there, so it is part of the overview here
+ * rather than a view of its own. A stored default tab can only name a page, so these values never
+ * reach the preference file.
+ */
+export type MemoryView = 'overview' | 'recall' | 'content' | 'entities';
+
+export const MEMORY_VIEW_KEYS: Record<MemoryView, MessageKey> = {
+  overview: 'memory.tabs.overview',
+  recall: 'memory.tabs.recall',
+  content: 'memory.tabs.content',
+  entities: 'memory.tabs.entities',
+};
+
+export const MEMORY_VIEW_ORDER: readonly MemoryView[] = ['overview', 'recall', 'content', 'entities'];
 
 function countOf(value: readonly unknown[] | null | undefined): string {
   if (value === undefined) return '—';
@@ -58,13 +82,9 @@ export interface OverviewProps {
 /** One screen: how much of each class exists, what the last injection carried, whether sync runs. */
 export function OverviewPanel(props: OverviewProps): ReactNode {
   const { status, config, injection, memories, rules, archives, sync, language, now } = props;
+  // Projects are an archive dimension: memories and rules no longer carry one.
   const projects = new Set<string>();
-  for (const item of memories?.items ?? []) if (item.projectId !== undefined) projects.add(item.projectId);
-  for (const rule of rules ?? []) if (rule.projectId !== null) projects.add(rule.projectId);
   for (const archive of archives ?? []) projects.add(archive.projectId);
-  const scopes = new Set<string>();
-  for (const item of memories?.items ?? []) scopes.add(item.scope === 'global' ? 'global' : `project:${item.projectId ?? '—'}`);
-  for (const rule of rules ?? []) scopes.add(rule.scope === 'global' ? 'global' : `project:${rule.projectId ?? '—'}`);
 
   return (
     <div className="mwui-page">
@@ -72,7 +92,7 @@ export function OverviewPanel(props: OverviewProps): ReactNode {
         <Card label={translate(language, 'overview.memories')} value={memories === null || memories === undefined ? '—' : String(memories.items.length)} hint={translate(language, 'overview.openMemories')} />
         <Card label={translate(language, 'overview.runtime')} value={countOf(rules)} hint={translate(language, 'overview.openRules')} />
         <Card label={translate(language, 'overview.archives')} value={countOf(archives)} hint={translate(language, 'overview.openArchives')} />
-        <Card label={translate(language, 'overview.projects')} value={String(projects.size)} hint={translate(language, 'overview.scopes', { count: scopes.size })} />
+        <Card label={translate(language, 'overview.projects')} value={String(projects.size)} hint={translate(language, 'overview.scopes', { count: projects.size })} />
       </div>
 
       <section className="mwui-pane">
@@ -124,17 +144,146 @@ export function OverviewPanel(props: OverviewProps): ReactNode {
   );
 }
 
-export interface RuntimeProps { rules: UiRule[] | null | undefined; error: string | null; selected: string | null; language: Language; onSelect(id: string): void }
+export interface RuleDraft {
+  body: string;
+  enabled: boolean;
+}
 
-/** Rules are read-only here: writing them belongs to the operator credential. */
-export function RuntimePanel({ rules, error, selected, language, onSelect }: RuntimeProps): ReactNode {
+export interface RuntimeProps {
+  rules: UiRule[] | null | undefined;
+  error: string | null;
+  selected: string | null;
+  language: Language;
+  onSelect(id: string): void;
+  /** Publishes a new rule; the page refreshes the list and selects it before resolving. */
+  onCreate(draft: RuleDraft): Promise<void>;
+  /** Saves body and enabled state; `baseVersion` is the version the form opened at. */
+  onSave(ruleId: string, input: { body: string; enabled: boolean; baseVersion: number }): Promise<void>;
+}
+
+/**
+ * Runtime rules: read, publish and edit.
+ *
+ * A rule is injected whole, so an edit that pushes the applicable set over the budget is refused
+ * by the Server rather than trimmed; that refusal is shown as an error, not as a saved version.
+ */
+export function RuntimePanel(props: RuntimeProps): ReactNode {
+  const { rules, error, selected, language } = props;
   const current = (rules ?? []).find(rule => rule.entryId === selected) ?? null;
+  const [creating, setCreating] = useState(false);
+  const [draft, setDraft] = useState<RuleDraft>({ body: '', enabled: true });
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [edit, setEdit] = useState<{ ruleId: string; body: string; enabled: boolean; version: number } | null>(null);
+  const [editError, setEditError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const editing = edit !== null && current !== null && edit.ruleId === current.entryId;
+  const dirty = editing && (edit.body !== current.body || edit.enabled !== current.enabled);
+
+  /** A window is open over the list, so selecting a rule simply clears the draft behind it. */
+  const select = (id: string): void => {
+    setEdit(null);
+    setEditError(null);
+    props.onSelect(id);
+  };
+
+  const closeEdit = (): void => {
+    setEdit(null);
+    setEditError(null);
+  };
+
+  const closeCreate = (): void => {
+    setCreating(false);
+    setCreateError(null);
+    // Closing discards the draft, so reopening starts from an empty rule.
+    setDraft({ body: '', enabled: true });
+  };
+
+  const beginEdit = (): void => {
+    if (current === null) return;
+    setEdit({ ruleId: current.entryId, body: current.body, enabled: current.enabled, version: current.version });
+    setEditError(null);
+  };
+
+  const submitCreate = async (): Promise<void> => {
+    if (draft.body.trim() === '') { setCreateError(translate(language, 'runtime.bodyRequired')); return; }
+    setBusy(true);
+    setCreateError(null);
+    try {
+      await props.onCreate(draft);
+      setCreating(false);
+      setDraft({ body: '', enabled: true });
+    } catch (failure) {
+      setCreateError(failure instanceof Error ? failure.message : String(failure));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const submitEdit = async (): Promise<void> => {
+    if (edit === null) return;
+    if (edit.body.trim() === '') { setEditError(translate(language, 'runtime.bodyRequired')); return; }
+    setBusy(true);
+    setEditError(null);
+    try {
+      await props.onSave(edit.ruleId, { body: edit.body, enabled: edit.enabled, baseVersion: edit.version });
+      setEdit(null);
+    } catch (failure) {
+      setEditError(failure instanceof Error ? failure.message : String(failure));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
-    <div className="mwui-body">
+    <div className="mwui-body" data-view={current === null ? 'list' : 'detail'}>
+      {creating ? (
+        <Modal
+          title={translate(language, 'runtime.createTitle')}
+          language={language}
+          busy={busy}
+          dirty={draft.body !== '' || !draft.enabled}
+          onClose={closeCreate}
+        >
+          <div className="mwui-edit">
+            <div className="mwui-edit-hint" data-tone="muted">{translate(language, 'runtime.createHint')}</div>
+            <textarea
+              className="mwui-input mwui-textarea"
+              rows={4}
+              value={draft.body}
+              placeholder={translate(language, 'runtime.bodyPlaceholder')}
+              aria-label={translate(language, 'runtime.bodyPlaceholder')}
+              onChange={event => setDraft(currentDraft => ({ ...currentDraft, body: event.target.value }))}
+            />
+            <div className="mwui-classify">
+              <label className="mwui-classify-field">
+                <input
+                  type="checkbox"
+                  checked={draft.enabled}
+                  onChange={event => setDraft(currentDraft => ({ ...currentDraft, enabled: event.target.checked }))}
+                />
+                <span>{translate(language, 'runtime.enabledLabel')}</span>
+              </label>
+            </div>
+            {createError === null ? null : <div className="mwui-inline-error" role="alert">{createError}</div>}
+            <div className="mwui-edit-actions">
+              <button type="button" className="mwui-button" data-variant="primary" onClick={() => { void submitCreate(); }} disabled={busy || draft.body.trim() === ''}>
+                {translate(language, busy ? 'runtime.creating' : 'runtime.createSubmit')}
+              </button>
+              <button type="button" className="mwui-button" onClick={closeCreate} disabled={busy}>
+                {translate(language, 'detail.cancel')}
+              </button>
+            </div>
+          </div>
+        </Modal>
+      ) : null}
+
       <section className="mwui-pane" aria-label={translate(language, 'runtime.title')}>
         <div className="mwui-pane-header">
           <span className="mwui-pane-title">{translate(language, 'runtime.title')}</span>
           <span className="mwui-pane-count">{countOf(rules)}</span>
+          <button type="button" className="mwui-button mwui-mini" onClick={() => { setCreating(value => !value); setCreateError(null); }} disabled={rules === null}>
+            {translate(language, 'runtime.new')}
+          </button>
         </div>
         <ul className="mwui-list">
           {rules === undefined
@@ -145,12 +294,10 @@ export function RuntimePanel({ rules, error, selected, language, onSelect }: Run
               ? <li className="mwui-empty">{translate(language, 'runtime.empty')}</li>
               : rules.map(rule => (
                 <li key={rule.entryId}>
-                  <button type="button" className="mwui-item" data-active={rule.entryId === selected ? 'true' : 'false'} onClick={() => onSelect(rule.entryId)}>
+                  <button type="button" className="mwui-item" data-active={rule.entryId === selected ? 'true' : 'false'} onClick={() => select(rule.entryId)}>
                     <span className="mwui-item-title">{rule.body.split('\n')[0] ?? rule.entryId}</span>
                     <span className="mwui-item-excerpt">{rule.body}</span>
                     <span className="mwui-item-meta">
-                      <span>{rule.scope === 'global' ? translate(language, 'common.global') : rule.projectId ?? '—'}</span>
-                      <span>·</span>
                       <span>{rule.enabled ? translate(language, 'common.enabled') : translate(language, 'common.disabled')}</span>
                       <span>·</span>
                       <span>{translate(language, 'common.version')} {rule.version}</span>
@@ -162,13 +309,17 @@ export function RuntimePanel({ rules, error, selected, language, onSelect }: Run
       </section>
 
       <section className="mwui-pane" aria-label={translate(language, 'runtime.detail')}>
-        <div className="mwui-pane-header"><span className="mwui-pane-title">{translate(language, 'runtime.detail')}</span></div>
+        <div className="mwui-pane-header">
+          <span className="mwui-pane-title">{translate(language, 'runtime.detail')}</span>
+          {current === null ? null : (
+            <button type="button" className="mwui-button mwui-mini" onClick={beginEdit}>{translate(language, 'detail.edit')}</button>
+          )}
+        </div>
         {current === null
           ? <div className="mwui-empty">{translate(language, 'runtime.placeholder')}</div>
           : (
             <div className="mwui-detail">
               <div className="mwui-chips">
-                <span className="mwui-chip"><span className="mwui-chip-label">{translate(language, 'runtime.scope')}</span><span className="mwui-chip-value">{current.scope === 'global' ? translate(language, 'common.global') : current.projectId ?? '—'}</span></span>
                 <span className="mwui-chip"><span className="mwui-chip-label">{translate(language, 'common.version')}</span><span className="mwui-chip-value">{current.version}</span></span>
                 <span className="mwui-chip" data-tone={current.enabled ? 'ok' : 'warn'}><span className="mwui-chip-label">{translate(language, 'runtime.state')}</span><span className="mwui-chip-value">{current.enabled ? translate(language, 'common.enabled') : translate(language, 'common.disabled')}</span></span>
               </div>
@@ -180,14 +331,71 @@ export function RuntimePanel({ rules, error, selected, language, onSelect }: Run
             </div>
           )}
       </section>
+
+      {edit !== null && editing ? (
+        <Modal
+          title={translate(language, 'runtime.editTitle')}
+          subtitle={`${translate(language, 'common.version')} v${edit.version}`}
+          language={language}
+          busy={busy}
+          dirty={dirty}
+          onClose={closeEdit}
+        >
+          <div className="mwui-edit">
+            <textarea
+              className="mwui-input mwui-textarea"
+              rows={6}
+              value={edit.body}
+              aria-label={translate(language, 'runtime.body')}
+              onChange={event => setEdit(currentEdit => currentEdit === null ? currentEdit : { ...currentEdit, body: event.target.value })}
+            />
+            <div className="mwui-classify">
+              <label className="mwui-classify-field">
+                <input
+                  type="checkbox"
+                  checked={edit.enabled}
+                  onChange={event => setEdit(currentEdit => currentEdit === null ? currentEdit : { ...currentEdit, enabled: event.target.checked })}
+                />
+                <span>{translate(language, 'runtime.enabledLabel')}</span>
+              </label>
+            </div>
+            <div className="mwui-edit-hint" data-tone="muted">{translate(language, 'runtime.editHint')}</div>
+            {dirty ? null : <div className="mwui-edit-hint" data-tone="muted">{translate(language, 'runtime.unchanged')}</div>}
+            {editError === null ? null : <div className="mwui-inline-error" role="alert">{editError}</div>}
+            <div className="mwui-edit-actions">
+              <button type="button" className="mwui-button" data-variant="primary" onClick={() => { void submitEdit(); }} disabled={busy || edit.body.trim() === '' || !dirty}>
+                {translate(language, busy ? 'runtime.saving' : 'runtime.save')}
+              </button>
+              <button type="button" className="mwui-button" onClick={closeEdit} disabled={busy}>
+                {translate(language, 'detail.cancel')}
+              </button>
+            </div>
+          </div>
+        </Modal>
+      ) : null}
     </div>
   );
 }
 
-export interface ArchivesProps { archives: UiArchive[] | null | undefined; error: string | null; selected: string | null; language: Language; onSelect(id: string): void }
-
-/** Archives are read-only here: writing them belongs to the operator credential. */
-export function ArchivesPanel({ archives, error, selected, language, onSelect }: ArchivesProps): ReactNode {
+export interface ArchivesProps { archives: UiArchive[] | null | undefined; error: string | null; selected: string | null; language: Language; onSelect(id: string): void; onSave?(draft: import("../shared/contract.ts").UiArchiveDraft, target: UiArchive | null): Promise<void> }
+export function ArchivesPanel({ archives, error, selected, language, onSelect, onSave }: ArchivesProps): ReactNode {
+  const [draft, setDraft] = useState<UiArchive | null | undefined>(undefined);
+  const [query, setQuery] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string>();
+  /** The archive form is uncontrolled, so any input in it marks the window as dirty. */
+  const [dirty, setDirty] = useState(false);
+  const open = (value: UiArchive | null): void => {
+    setSaveError(undefined);
+    setDirty(false);
+    setDraft(value);
+  };
+  const close = (): void => {
+    setDraft(undefined);
+    setDirty(false);
+  };
+  const visible = (archives ?? []).filter(item =>
+    [item.title, item.projectId, item.body].some(value => value.toLowerCase().includes(query.trim().toLowerCase())));
   const current = (archives ?? []).find(archive => archive.entryId === selected) ?? null;
   return (
     <div className="mwui-body">
@@ -195,17 +403,19 @@ export function ArchivesPanel({ archives, error, selected, language, onSelect }:
         <div className="mwui-pane-header">
           <span className="mwui-pane-title">{translate(language, 'archives.title')}</span>
           <span className="mwui-pane-count">{countOf(archives)}</span>
+          {onSave && <button type="button" className="mwui-button mwui-mini" onClick={() => open(null)}>{translate(language, 'archives.create')}</button>}
         </div>
+        <input type="search" aria-label={translate(language, 'archives.search')} placeholder={translate(language, 'archives.search')} value={query} onChange={event => setQuery(event.currentTarget.value)} />
         <ul className="mwui-list">
           {archives === undefined
             ? <li className="mwui-empty">{translate(language, 'list.loading')}</li>
             : archives === null
               ? <li className="mwui-empty">{translate(language, 'panel.unavailable')}{error === null ? '' : ` · ${error}`}</li>
-            : archives.length === 0
+            : visible.length === 0
               ? <li className="mwui-empty">{translate(language, 'archives.empty')}</li>
-              : archives.map(archive => (
+              : visible.map(archive => (
                 <li key={archive.entryId}>
-                  <button type="button" className="mwui-item" data-active={archive.entryId === selected ? 'true' : 'false'} onClick={() => onSelect(archive.entryId)}>
+                  <button type="button" className="mwui-item" data-active={archive.entryId === selected ? 'true' : 'false'} disabled={draft !== undefined} onClick={() => onSelect(archive.entryId)}>
                     <span className="mwui-item-title">{archive.title}</span>
                     <span className="mwui-item-excerpt">{archive.body}</span>
                     <span className="mwui-item-meta">
@@ -225,6 +435,7 @@ export function ArchivesPanel({ archives, error, selected, language, onSelect }:
           ? <div className="mwui-empty">{translate(language, 'archives.placeholder')}</div>
           : (
             <div className="mwui-detail">
+              {onSave && <div className="mwui-edit-actions"><button type="button" className="mwui-button" onClick={() => open(current)}>{translate(language, 'archives.edit')}</button></div>}
               <div className="mwui-chips">
                 <span className="mwui-chip"><span className="mwui-chip-label">{translate(language, 'common.project')}</span><span className="mwui-chip-value">{current.projectId}</span></span>
                 <span className="mwui-chip"><span className="mwui-chip-label">{translate(language, 'archives.source')}</span><span className="mwui-chip-value">{current.source}</span></span>
@@ -242,6 +453,65 @@ export function ArchivesPanel({ archives, error, selected, language, onSelect }:
             </div>
           )}
       </section>
+
+      {draft !== undefined && onSave ? (
+        <Modal
+          title={translate(language, draft === null ? 'archives.create' : 'archives.edit')}
+          language={language}
+          busy={saving}
+          dirty={dirty}
+          onClose={close}
+        >
+          <form className="mwui-edit" onInput={() => setDirty(true)} onChange={() => setDirty(true)} onSubmit={async event => {
+            event.preventDefault();
+            const data = new FormData(event.currentTarget);
+            setSaving(true);
+            setSaveError(undefined);
+            try {
+              await onSave({
+                projectId: draft?.projectId ?? String(data.get('projectId') ?? ''),
+                title: String(data.get('title') ?? ''),
+                body: String(data.get('body') ?? ''),
+                evidence: String(data.get('evidence') ?? ''),
+                verification: data.get('verification') as UiArchive['verification'],
+              }, draft);
+              close();
+            } catch (cause) {
+              setSaveError(cause instanceof Error ? cause.message : String(cause));
+            } finally {
+              setSaving(false);
+            }
+          }}>
+            <label className="mwui-field">
+              <span>{translate(language, 'common.project')}</span>
+              <input className="mwui-input" name="projectId" required maxLength={200} readOnly={draft !== null} defaultValue={draft?.projectId} disabled={saving} />
+            </label>
+            <label className="mwui-field">
+              <span>{translate(language, 'archives.title')}</span>
+              <input className="mwui-input" name="title" required maxLength={200} defaultValue={draft?.title} disabled={saving} />
+            </label>
+            <label className="mwui-field">
+              <span>{translate(language, 'archives.body')}</span>
+              <textarea className="mwui-input mwui-textarea" name="body" required maxLength={8000} defaultValue={draft?.body} disabled={saving} />
+            </label>
+            <label className="mwui-field">
+              <span>{translate(language, 'archives.evidence')}</span>
+              <textarea className="mwui-input mwui-textarea" name="evidence" required maxLength={2000} defaultValue={draft?.evidence} disabled={saving} />
+            </label>
+            <label className="mwui-field">
+              <span>{translate(language, 'archives.verification')}</span>
+              <select className="mwui-input mwui-select" name="verification" defaultValue={draft?.verification ?? 'open'} disabled={saving}>
+                {(['open', 'verified', 'refuted'] as const).map(value => <option key={value} value={value}>{verificationText(value, language)}</option>)}
+              </select>
+            </label>
+            <div className="mwui-edit-actions">
+              <button type="submit" className="mwui-button" data-variant="primary" disabled={saving}>{translate(language, 'archives.save')}</button>
+              <button type="button" className="mwui-button" onClick={close} disabled={saving}>{translate(language, 'archives.cancel')}</button>
+            </div>
+            {saveError === undefined ? null : <div className="mwui-inline-error" role="alert">{saveError}</div>}
+          </form>
+        </Modal>
+      ) : null}
     </div>
   );
 }
@@ -261,20 +531,18 @@ export interface SyncProps {
   onRefresh(): void;
 }
 
-/** This local Server against the remote sync Server, one row per scope. */
-export function SyncPanel({ sync, error, pass, language, busy, onRefresh }: SyncProps): ReactNode {
+/**
+ * This local Server against the remote sync Server, one row per scope.
+ *
+ * Sync is a setting of this machine's Server, so the group sits inside the settings card rather
+ * than in a pane of its own. A second pane beside the settings pane would compete with it for the
+ * page height: panes may shrink but never scroll, so the loser is clipped instead of shown.
+ */
+export function SyncGroup({ sync, error, pass, language, busy, onRefresh }: SyncProps): ReactNode {
   const enabled = sync !== null && sync !== undefined && sync.enabled;
   return (
-    <div className="mwui-page">
-      <section className="mwui-pane">
-        <div className="mwui-pane-header">
-          <span className="mwui-pane-title">{translate(language, 'sync.title')}</span>
-          <span className="mwui-pane-count">{sync === null || sync === undefined ? '' : relativeTime(sync.updatedAt, Date.now(), language)}</span>
-          <button type="button" className="mwui-button mwui-mini" onClick={onRefresh} disabled={busy || !enabled}>
-            {busy ? translate(language, 'sync.refreshing') : translate(language, 'sync.refresh')}
-          </button>
-        </div>
-        <div className="mwui-pane-body">
+      <div className="mwui-settings-group">
+        <h4 className="mwui-section-title">{translate(language, 'sync.title')}</h4>
           {sync === undefined
             ? <span className="mwui-muted">{translate(language, 'list.loading')}</span>
             : sync === null
@@ -319,9 +587,17 @@ export function SyncPanel({ sync, error, pass, language, busy, onRefresh }: Sync
                 ) : <span className="mwui-muted">{translate(language, 'sync.off')}</span>}
               </>
             )}
+        <div className="mwui-edit-actions">
+          <button type="button" className="mwui-button" onClick={onRefresh} disabled={busy || !enabled}>
+            {busy ? translate(language, 'sync.refreshing') : translate(language, 'sync.refresh')}
+          </button>
+          {sync === null || sync === undefined ? null : (
+            <span className="mwui-edit-hint" data-tone="muted">
+              {translate(language, 'sync.updated')} · {formatDateTime(sync.updatedAt)} · {relativeTime(sync.updatedAt, Date.now(), language)}
+            </span>
+          )}
         </div>
-      </section>
-    </div>
+      </div>
   );
 }
 
@@ -340,12 +616,19 @@ export interface SettingsProps {
   notice: string | null;
   connectionTest: UiConnectionTest | null;
   wakeTest: UiWakeTest | null;
-  onSaveInterface(patch: { defaultTab?: string; defaultScope?: string; pageSize?: number }): void;
+  registerTest: UiRegisterTest | null;
+  /** The local Server against the remote sync Server; the settings page owns this status. */
+  sync: UiSyncStatus | null | undefined;
+  syncError: string | null;
+  syncPass: UiSyncPass | null;
+  onSaveInterface(patch: { defaultTab?: string; pageSize?: number }): void;
   onSaveConnection(input: { serverUrl: string; hostId: string }): void;
-  onSaveInjection(input: { projectId: string | null; injectTimeoutMs: number }): void;
+  onSaveInjection(input: { injectTimeoutMs: number }): void;
   onSaveAutoStart(enabled: boolean): void;
+  onRegisterTask(): void;
   onTestConnection(serverUrl: string): void;
   onTestWake(): void;
+  onRefreshSync(): void;
 }
 
 function sourceText(source: string, language: Language): string {
@@ -354,15 +637,13 @@ function sourceText(source: string, language: Language): string {
 }
 
 export function SettingsPanel(props: SettingsProps): ReactNode {
-  const { settings, language, busy, notice, connectionTest, wakeTest } = props;
+  const { settings, language, busy, notice, connectionTest, wakeTest, registerTest } = props;
   const [serverUrl, setServerUrl] = useState(settings.connection.serverUrl);
   const [hostId, setHostId] = useState(settings.connection.hostId);
-  const [projectId, setProjectId] = useState(settings.injection.projectId ?? '');
   const [timeoutMs, setTimeoutMs] = useState(String(settings.injection.injectTimeoutMs));
   // Follow the saved values when a group is applied elsewhere; the drafts are what the user typed.
   useEffect(() => { setServerUrl(settings.connection.serverUrl); }, [settings.connection.serverUrl]);
   useEffect(() => { setHostId(settings.connection.hostId); }, [settings.connection.hostId]);
-  useEffect(() => { setProjectId(settings.injection.projectId ?? ''); }, [settings.injection.projectId]);
   useEffect(() => { setTimeoutMs(String(settings.injection.injectTimeoutMs)); }, [settings.injection.injectTimeoutMs]);
 
   const parsedTimeout = Number(timeoutMs);
@@ -386,16 +667,6 @@ export function SettingsPanel(props: SettingsProps): ReactNode {
               >
                 {TAB_ORDER.map(id => <option key={id} value={id}>{translate(language, TAB_KEYS[id])}</option>)}
               </select>
-              <span className="mwui-source">{sourceText(settings.interface.source, language)}</span>
-            </div>
-            <div className="mwui-settings-row">
-              <label htmlFor="mwui-default-scope">{translate(language, 'settings.defaultScope')}</label>
-              <input
-                id="mwui-default-scope"
-                className="mwui-input"
-                value={settings.interface.defaultScope}
-                onChange={event => props.onSaveInterface({ defaultScope: event.target.value })}
-              />
               <span className="mwui-source">{sourceText(settings.interface.source, language)}</span>
             </div>
             <div className="mwui-settings-row">
@@ -461,6 +732,16 @@ export function SettingsPanel(props: SettingsProps): ReactNode {
             <div className="mwui-edit-hint" data-tone="muted">{translate(language, 'settings.tokenHint')}</div>
           </div>
 
+          {/* Sync status belongs to this machine's Server settings, so it is one group of this card. */}
+          <SyncGroup
+            sync={props.sync}
+            error={props.syncError}
+            pass={props.syncPass}
+            language={language}
+            busy={busy}
+            onRefresh={props.onRefreshSync}
+          />
+
           {/* Auto-start: the task name is fixed and read-only. */}
           <div className="mwui-settings-group">
             <h4 className="mwui-section-title">{translate(language, 'settings.autoStart')}</h4>
@@ -481,27 +762,26 @@ export function SettingsPanel(props: SettingsProps): ReactNode {
             {wakeTest === null ? null : (
               <div className="mwui-inline-notice" role="status">{translate(language, `settings.wake.${wakeTest.result}` as MessageKey)}</div>
             )}
+            {registerTest === null ? null : (
+              <div className="mwui-inline-notice" role="status">
+                {translate(language, `settings.register.${registerTest.result}` as MessageKey)}
+                {registerTest.detail === undefined ? '' : ` · ${registerTest.detail}`}
+              </div>
+            )}
             <div className="mwui-edit-actions">
               <button type="button" className="mwui-button" onClick={props.onTestWake} disabled={busy}>
                 {translate(language, 'settings.testWake')}
               </button>
+              <button type="button" className="mwui-button" data-variant="primary" onClick={props.onRegisterTask} disabled={busy}>
+                {translate(language, 'settings.registerTask')}
+              </button>
             </div>
+            <div className="mwui-edit-hint" data-tone="muted">{translate(language, 'settings.registerHint')}</div>
           </div>
 
-          {/* Injection: project and budget apply together, as one group. */}
+          {/* Injection: the wait budget is the only injection setting left. */}
           <div className="mwui-settings-group">
             <h4 className="mwui-section-title">{translate(language, 'settings.injection')}</h4>
-            <div className="mwui-settings-row">
-              <label htmlFor="mwui-inject-project">{translate(language, 'settings.injectProject')}</label>
-              <input
-                id="mwui-inject-project"
-                className="mwui-input"
-                value={projectId}
-                placeholder={translate(language, 'settings.injectProjectNone')}
-                onChange={event => setProjectId(event.target.value)}
-              />
-              <span className="mwui-source">{sourceText(settings.injection.source, language)}</span>
-            </div>
             <div className="mwui-settings-row">
               <label htmlFor="mwui-inject-timeout">{translate(language, 'settings.injectTimeout')}</label>
               <input
@@ -524,7 +804,7 @@ export function SettingsPanel(props: SettingsProps): ReactNode {
                 type="button"
                 className="mwui-button"
                 data-variant="primary"
-                onClick={() => props.onSaveInjection({ projectId: projectId.trim() === '' ? null : projectId.trim(), injectTimeoutMs: parsedTimeout })}
+                onClick={() => props.onSaveInjection({ injectTimeoutMs: parsedTimeout })}
                 disabled={busy || !timeoutValid}
               >
                 {translate(language, 'settings.applyInjection')}
@@ -532,7 +812,7 @@ export function SettingsPanel(props: SettingsProps): ReactNode {
             </div>
           </div>
 
-          {/* Diagnostics: read-only; the sync tab owns the actions. */}
+          {/* Diagnostics: read-only; the sync section owns the actions. */}
           <div className="mwui-settings-group">
             <h4 className="mwui-section-title">{translate(language, 'settings.diagnostics')}</h4>
             <div className="mwui-settings-row">
@@ -631,11 +911,14 @@ export interface GraphProps {
   onOpen(memoryId: string): void;
 }
 
-export function GraphPanel(props: GraphProps): ReactNode {
+/**
+ * The graph as a section of a page. dsh-mnemon draws the merged graph below the memory overview's
+ * own cards; the overview owns the section, so it has no page wrapper of its own.
+ */
+export function GraphSection(props: GraphProps): ReactNode {
   const { graph, loading, error, language, focusId } = props;
   const layout = graph === null ? null : layoutGraph(graph, focusId === null ? {} : { focusId });
   return (
-    <div className="mwui-page">
       <section className="mwui-pane">
         <div className="mwui-pane-header">
           <span className="mwui-pane-title">{translate(language, 'graphs.title')}</span>
@@ -698,7 +981,132 @@ export function GraphPanel(props: GraphProps): ReactNode {
           )}
         </div>
       </section>
+  );
+}
+
+/** The graph on its own page, for a page that is only the graph. */
+
+export interface MemoryOverviewProps {
+  memories: UiMemoryList | null;
+  entities: Array<{ value: string; count: number }>;
+  graph: UiGraph | null;
+  graphLoading: boolean;
+  graphError: string | null;
+  focusId: string | null;
+  language: Language;
+  onReloadGraph(): void;
+  onOpen(memoryId: string): void;
+}
+
+/**
+ * The formal-memory page's Overview: what the set holds, then the relation graph.
+ *
+ * dsh-mnemon's Memory Spaces overview lists its spaces and draws one merged graph below them; this
+ * store has no space directory, so the overview counts what the memory set contains and keeps the
+ * graph in the same view. The graph draws the memories themselves, which is why it belongs here
+ * rather than beside the memory page.
+ */
+export function MemoryOverviewPanel(props: MemoryOverviewProps): ReactNode {
+  const { memories, entities, graph, graphLoading, graphError, focusId, language } = props;
+  const projects = new Set<string>();
+  const categories = new Set<string>();
+  for (const item of memories?.items ?? []) if (item.category !== undefined) categories.add(item.category);
+  const nodes = graph === null ? null : graph.nodes.length;
+  return (
+    <div className="mwui-page">
+      <div className="mwui-grid">
+        <Card
+          label={translate(language, 'memory.overview.memories')}
+          value={memories === null ? '—' : String(memories.items.length)}
+          hint={translate(language, 'memory.overview.memoriesHint')}
+        />
+        <Card
+          label={translate(language, 'memory.overview.entities')}
+          value={String(entities.length)}
+          hint={translate(language, 'memory.overview.entitiesHint')}
+        />
+        <Card
+          label={translate(language, 'memory.overview.projects')}
+          value={String(projects.size)}
+          hint={translate(language, 'memory.overview.projectsHint')}
+        />
+        <Card
+          label={translate(language, 'memory.overview.categories')}
+          value={String(categories.size)}
+          hint={translate(language, 'memory.overview.categoriesHint')}
+        />
+        <Card
+          label={translate(language, 'memory.overview.nodes')}
+          value={nodes === null ? (graphLoading ? translate(language, 'toolbar.loading') : '—') : String(nodes)}
+          hint={translate(language, 'memory.overview.nodesHint')}
+        />
+      </div>
+      <GraphSection
+        graph={graph}
+        loading={graphLoading}
+        error={graphError}
+        language={language}
+        focusId={focusId}
+        onReload={props.onReloadGraph}
+        onOpen={props.onOpen}
+      />
     </div>
+  );
+}
+
+export interface MemoryPageHeaderProps {
+  /** The loaded-count line, already formatted, so the header does not re-read the list. */
+  count: string;
+  language: Language;
+  active: MemoryView;
+  creating: boolean;
+  saving: boolean;
+  onSelect(view: MemoryView): void;
+  onCreate(): void;
+}
+
+/**
+ * The formal-memory page's compound header: title, description, count, the page-level action, and
+ * the page's own view tabs. dsh-mnemon frames a memory Source the same way, and its secondary
+ * tabs are the underline strip a settings page uses rather than the page-level pill bar.
+ */
+export function MemoryPageHeader(props: MemoryPageHeaderProps): ReactNode {
+  const { count, language, active, creating, saving } = props;
+  return (
+    <section className="mwui-memory-workspace" aria-label={translate(language, 'memory.workspace')}>
+      <div className="mwui-memory-head">
+        <div className="mwui-memory-heading">
+          <h2 className="mwui-memory-title">{translate(language, 'tabs.memories')}</h2>
+          <p className="mwui-memory-description">{translate(language, 'memory.description')}</p>
+        </div>
+        <div className="mwui-memory-actions">
+          <span className="mwui-memory-meta">{count}</span>
+          <button
+            type="button"
+            className="mwui-button"
+            data-variant="primary"
+            onClick={props.onCreate}
+            disabled={creating || saving}
+          >
+            {translate(language, 'create.title')}
+          </button>
+        </div>
+      </div>
+      <nav className="mwui-memory-tabs" role="tablist" aria-label={translate(language, 'memory.tabs.label')}>
+        {MEMORY_VIEW_ORDER.map(id => (
+          <button
+            key={id}
+            type="button"
+            role="tab"
+            aria-selected={active === id}
+            data-active={active === id ? 'true' : 'false'}
+            onClick={() => props.onSelect(id)}
+          >
+            {translate(language, MEMORY_VIEW_KEYS[id])}
+          </button>
+        ))}
+      </nav>
+    </section>
   );
 }
 
@@ -716,8 +1124,6 @@ export interface CreateDraft {
   importance: string;
   tags: string;
   entities: string;
-  scope: 'global' | 'project';
-  projectId: string;
   reason: string;
 }
 
@@ -729,6 +1135,7 @@ export interface CreateMemoryFormProps {
   onChange(patch: Partial<CreateDraft>): void;
   onCancel(): void;
   onSubmit(): void;
+  onOrganize?(): void;
 }
 
 const KNOWLEDGE_TYPES = ['Concept', 'Practice', 'Architecture', 'Troubleshooting', 'Constraint', 'Procedure', 'Reference'] as const;
@@ -738,17 +1145,10 @@ export function CreateMemoryForm(props: CreateMemoryFormProps): ReactNode {
   const { draft, busy, error, language } = props;
   const bytes = utf8Bytes(draft.content);
   return (
-    <section className="mwui-create" aria-label={translate(language, 'create.title')}>
-      <div className="mwui-pane-header">
-        <span className="mwui-pane-title">{translate(language, 'create.title')}</span>
-        <span className="mwui-pane-count" data-tone={bytes > 8000 ? 'bad' : 'muted'}>
-          {bytes}/8000 B
-        </span>
-      </div>
-      <div className="mwui-detail">
-        <div className="mwui-edit-hint" data-tone="muted">{translate(language, 'create.hint')}</div>
-        <textarea
-          className="mwui-textarea"
+    <div className="mwui-edit">
+      <div className="mwui-edit-hint" data-tone="muted">{translate(language, 'create.hint')}</div>
+      <textarea
+        className="mwui-input mwui-textarea"
           rows={6}
           value={draft.content}
           placeholder={translate(language, 'create.contentPlaceholder')}
@@ -807,31 +1207,6 @@ export function CreateMemoryForm(props: CreateMemoryFormProps): ReactNode {
           aria-label={translate(language, 'create.entities')}
           onChange={event => props.onChange({ entities: event.target.value })}
         />
-        <div className="mwui-classify">
-          <label className="mwui-classify-field">
-            <span>{translate(language, 'create.scope')}</span>
-            <select
-              className="mwui-input mwui-select"
-              value={draft.scope}
-              onChange={event => props.onChange({ scope: event.target.value === 'project' ? 'project' : 'global' })}
-            >
-              <option value="global">{translate(language, 'detail.global')}</option>
-              <option value="project">{translate(language, 'detail.project')}</option>
-            </select>
-          </label>
-          {draft.scope === 'project' ? (
-            <label className="mwui-classify-field">
-              <span>{translate(language, 'create.projectId')}</span>
-              <input
-                className="mwui-input"
-                type="text"
-                value={draft.projectId}
-                placeholder="alpha"
-                onChange={event => props.onChange({ projectId: event.target.value })}
-              />
-            </label>
-          ) : null}
-        </div>
         <input
           className="mwui-input"
           type="text"
@@ -840,17 +1215,20 @@ export function CreateMemoryForm(props: CreateMemoryFormProps): ReactNode {
           aria-label={translate(language, 'detail.reason')}
           onChange={event => props.onChange({ reason: event.target.value })}
         />
+        <div className="mwui-edit-hint" data-tone={bytes > 8000 ? 'warn' : 'muted'}>{bytes}/8000 B</div>
         {error === null ? null : <div className="mwui-inline-error" role="alert">{error}</div>}
-        <div className="mwui-actions">
+        <div className="mwui-edit-actions">
           <button type="button" className="mwui-button" data-variant="primary" onClick={props.onSubmit} disabled={busy || draft.content.trim() === ''}>
             {translate(language, busy ? 'create.saving' : 'create.submit')}
           </button>
+          {props.onOrganize && <button type="button" className="mwui-button" onClick={props.onOrganize} disabled={busy || draft.content.trim() === ''}>
+            {translate(language, 'create.organize')}
+          </button>}
           <button type="button" className="mwui-button" onClick={props.onCancel} disabled={busy}>
             {translate(language, 'detail.cancel')}
           </button>
         </div>
-      </div>
-    </section>
+    </div>
   );
 }
 
@@ -936,7 +1314,6 @@ export function ExplorePanel(props: ExploreProps): ReactNode {
                       <li key={hit.memoryId} className="mwui-subrow">
                         <button type="button" className="mwui-subrow-button" onClick={() => props.onOpen(hit.memoryId)}>
                           <span className="mwui-subrow-main">{hit.content.split('\n')[0] || hit.memoryId}</span>
-                          <span className="mwui-chip-slim">{translate(language, hit.scope === 'global' ? 'detail.global' : 'detail.project')}</span>
                           <span className="mwui-chip-slim">{translate(language, `state.${hit.state}` as MessageKey)}</span>
                           <span className="mwui-subrow-tail mwui-mono">{translate(language, 'explore.score')} {hit.score.toFixed(2)}</span>
                         </button>

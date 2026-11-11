@@ -15,8 +15,6 @@ import type { ApplyOutcome, SyncInboxRecord } from './sync.ts';
 export interface LocalRuleRow {
   entryId: string;
   body: string;
-  scope: 'global' | 'project';
-  projectId: string | null;
   enabled: boolean;
   version: number;
   withdrawnAt: string | null;
@@ -119,12 +117,9 @@ function projectIdOf(entry: SyncEntryValue): string | null {
 
 function ruleRow(entry: SyncEntryValue, body: string): LocalRuleRow {
   const payload = entry.payload as { enabled?: boolean };
-  const projectId = projectIdOf(entry);
   return {
     entryId: entry.entryId,
     body,
-    scope: projectId === null ? 'global' : 'project',
-    projectId,
     enabled: payload.enabled !== false,
     version: entry.version,
     withdrawnAt: entry.withdrawnAt,

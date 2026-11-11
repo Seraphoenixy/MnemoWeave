@@ -29,6 +29,7 @@ export type ServerPhaseReason =
   | 'timeout'
   | 'address_conflict'
   | 'unauthorized'
+  | 'task_missing'
   | 'task_failed';
 
 /** Reported alongside the health status so the page can distinguish "starting" from "broken". */
@@ -59,8 +60,6 @@ export interface UiMemorySummary {
   memoryId: string;
   revisionId: string;
   providerMemoryId: string;
-  scope: 'project' | 'global';
-  projectId?: string;
   applicability: string;
   publishedAt: string;
   content: string;
@@ -83,9 +82,7 @@ export interface UiMemoryList {
   items: UiMemorySummary[];
   /** Opaque continuation; absent when the scan is exhausted. */
   nextCursor?: string;
-  /** Every project that has memories, so the filter can reach all of them. */
-  projects?: Array<{ projectId: string; count: number }>;
-  /** Classification values present in the scoped set, with counts, for the filter picker. */
+  /** Classification values present in the set, with counts, for the filter picker. */
   categories?: Array<{ value: string; count: number }>;
   knowledgeTypes?: Array<{ value: string; count: number }>;
   /** Entities named by current revisions, in their recorded spelling. */
@@ -151,8 +148,6 @@ export interface UiMemoryDetail {
   currentRevisionId: string;
   isCurrent: boolean;
   providerMemoryId: string;
-  scope: 'project' | 'global';
-  projectId?: string;
   applicability: string;
   state: 'active' | 'superseded' | 'unverified';
   content: string;
@@ -168,8 +163,6 @@ export interface UiExploreHit {
   memoryId: string;
   revisionId: string;
   providerMemoryId: string;
-  scope: 'project' | 'global';
-  projectId?: string;
   state: 'active' | 'superseded' | 'unverified';
   content: string;
   score: number;
@@ -182,8 +175,6 @@ export interface UiExploreHit {
 /** Structure-only graph: nodes are memories, edges are catalogued relations. */
 export interface UiGraphNode {
   memoryId: string;
-  scope: 'project' | 'global';
-  projectId?: string;
   /** A supersede edge points at a retired memory, so those are nodes too. */
   state: 'active' | 'superseded' | 'unverified';
   publishedAt: string;
@@ -228,7 +219,10 @@ export interface UiCreateInput {
   importance?: number;
   tags?: string[];
   entities?: string[];
-  scope?: 'global' | 'project';
+  /**
+   * Only the archive branch of a task-organized save needs a project; the formal memory and the
+   * runtime rule it can also produce are global.
+   */
   projectId?: string;
   reason?: string;
 }
@@ -276,6 +270,14 @@ export interface UiEditResult {
   entryVersion: number;
 }
 
+/** Outcome of asking to register the local Server task (one elevation prompt). */
+export type UiRegisterResult = 'registered' | 'already_registered' | 'denied' | 'failed';
+export interface UiRegisterTest {
+  result: UiRegisterResult;
+  /** Why it failed, or what the system said; shown as written. */
+  detail?: string;
+}
+
 /** What the last View for this host delivered; `null` when the host never injected. */
 export interface UiInjection {
   id: string;
@@ -290,15 +292,28 @@ export interface UiInjection {
 /** One runtime rule: `RuleRecord` from the Server contract. */
 export interface UiRule {
   entryId: string;
-  scope: 'global' | 'project';
-  projectId: string | null;
   body: string;
   enabled: boolean;
   version: number;
   withdrawnAt: string | null;
 }
 
+/** `POST /v1/rules`: publish a runtime rule directly, without a review round. */
+export interface UiRuleCreateInput {
+  body: string;
+  enabled?: boolean;
+}
+
+/** `PATCH /v1/rules/{ruleId}`: body and enabled state; `baseVersion` refuses a stale write. */
+export interface UiRuleEditInput {
+  body?: string;
+  enabled?: boolean;
+  baseVersion?: number;
+}
+
 /** One project archive: `ArchiveRecord` from the Server contract. */
+export type UiArchiveDraft = Pick<UiArchive, 'projectId' | 'title' | 'body' | 'verification' | 'evidence'>;
+
 export interface UiArchive {
   entryId: string;
   projectId: string;
@@ -352,9 +367,8 @@ export type UiConfigSource = 'preference' | 'profile' | 'environment' | 'default
 /** Page preferences: browser-only behaviour, saved to the DSH profile. */
 export interface UiPreferences {
   defaultTab: string;
-  defaultScope: string;
   pageSize: number;
-  projectId: string | null;
+  /** The injection wait budget; a session no longer names a project for injection. */
   injectTimeoutMs: number;
   autoStart: boolean;
 }
@@ -362,7 +376,7 @@ export interface UiPreferences {
 /** The whole settings surface, grouped the way the page presents it. */
 export interface UiSettings {
   /** Interface preferences, applied immediately. */
-  interface: { defaultTab: string; defaultScope: string; pageSize: number; source: UiConfigSource };
+  interface: { defaultTab: string; pageSize: number; source: UiConfigSource };
   /** Local connection: address and Host identity, applied after a successful test. */
   connection: { serverUrl: string; hostId: string; source: UiConfigSource; hostSource: UiConfigSource };
   /** Token presence and the last authentication result; the value is never returned. */
@@ -375,7 +389,7 @@ export interface UiSettings {
   autoStart: { enabled: boolean; taskName: string; source: UiConfigSource };
   /** Injection settings; applied as a group with the project and budget together. */
   injection: { projectId: string | null; injectTimeoutMs: number; source: UiConfigSource; timeoutSource: UiConfigSource };
-  /** Read-only diagnostics; the sync tab owns the actions. */
+  /** Read-only diagnostics; the settings page's sync section owns the actions. */
   diagnostics: { serverReady: boolean; providerReady: boolean; syncEnabled: boolean; settingsPath: string };
 }
 
@@ -402,15 +416,35 @@ export interface RpcOk<T> { ok: true; value: T }
 export interface RpcFailure { ok: false; error: { message: string; code?: string } }
 export type RpcResult<T> = RpcOk<T> | RpcFailure;
 
-export type RpcEndpoint = 'status' | 'memories' | 'memory' | 'create' | 'edit' | 'withdraw' | 'explore' | 'graph' | 'graph' | 'config' | 'injection' | 'rules' | 'archives' | 'sync' | 'syncRefresh'
+export type SkillReviewResult = { kind: 'none' } | {
+  kind: 'draft';
+  input: SkillBacktestInput;
+  reason: string;
+  evidence: { step: number; role: 'user' | 'assistant'; text: string }[];
+  report?: SkillBacktestResult;
+  backtestError?: string;
+};
+export interface SkillBacktestInput { baseline: string; candidate: string; scenario: string; checks: string[] }
+export interface SkillBacktestSide {
+  answer: string;
+  steps: string;
+  checks: { passed: boolean; reason: string }[];
+}
+export interface SkillBacktestResult {
+  baseline: SkillBacktestSide;
+  candidate: SkillBacktestSide;
+  regressions: string[];
+}
+
+export type UiSaveResult = { kind: 'formal' | 'runtime' | 'archive'; entryId: string }
+  | { kind: 'review'; reason: string } | { kind: 'duplicate' };
+
+export type RpcEndpoint = 'status' | 'memories' | 'memory' | 'create' | 'organizeMemory' | 'skillBacktest' | 'skillConversations' | 'skillReview' | 'edit' | 'withdraw' | 'explore' | 'graph' | 'graph' | 'config' | 'injection' | 'rules' | 'createRule' | 'editRule' | 'saveArchive' | 'archives' | 'sync' | 'syncRefresh' | 'registerTask'
   | 'settings' | 'saveInterface' | 'saveConnection' | 'saveInjection' | 'saveAutoStart' | 'testConnection' | 'testWake';
 
 export interface MemoriesRequest {
   query?: string;
   limit?: number;
-  /** `all` when omitted. Filtering happens before body matching. */
-  scope?: 'all' | 'global' | 'project';
-  projectId?: string;
   /** Opaque continuation from a previous page. */
   cursor?: string;
   /** Keep only memories whose current revision carries this classification. */

@@ -51,12 +51,12 @@ async function harness(): Promise<{
 test('the list request forwards every filter it validated', async () => {
   const { rpc, source } = await harness();
   const result = await rpc('memories', {
-    limit: 20, scope: 'project', projectId: 'alpha', cursor: 'abc',
+    limit: 20, cursor: 'abc',
     category: 'decision', knowledgeType: 'Practice', entity: 'MnemoWeave', sort: 'importance', query: '关键词',
   });
   assert.equal(result.ok, true);
   assert.deepEqual(source['memories']?.[0], {
-    limit: 20, scope: 'project', projectId: 'alpha', cursor: 'abc',
+    limit: 20, cursor: 'abc',
     category: 'decision', knowledgeType: 'Practice', entity: 'MnemoWeave', sort: 'importance', query: '关键词',
   });
 });
@@ -69,12 +69,12 @@ test('the detail, edit, withdraw, graph and explore requests forward their field
 
   await rpc('create', {
     content: '新记忆的正文', knowledgeType: 'Practice', category: 'decision', importance: 4,
-    tags: ['a'], entities: ['MnemoWeave'], scope: 'project', projectId: ' alpha ', reason: '理由',
+    tags: ['a'], entities: ['MnemoWeave'], reason: '理由',
   });
   assert.deepEqual(source['create']?.[0], {
     content: '新记忆的正文', knowledgeType: 'Practice', category: 'decision', importance: 4,
-    tags: ['a'], entities: ['MnemoWeave'], scope: 'project', projectId: 'alpha', reason: '理由',
-  }, 'a new memory keeps every field, and the project id is trimmed');
+    tags: ['a'], entities: ['MnemoWeave'], reason: '理由',
+  }, 'a new memory keeps every field');
 
   await rpc('edit', { memoryId: UUID, content: '新正文', entryVersion: 3, reason: '理由', category: 'decision', importance: 4, tags: ['a'] });
   assert.deepEqual(source['edit']?.[0], {
@@ -84,21 +84,33 @@ test('the detail, edit, withdraw, graph and explore requests forward their field
   await rpc('withdraw', { memoryId: UUID, reason: '撤回原因', entryVersion: 4 });
   assert.deepEqual(source['withdraw']?.[0], { memoryId: UUID, reason: '撤回原因', entryVersion: 4 });
 
-  await rpc('graph', { scope: 'global', limit: 120 });
-  assert.deepEqual(source['graph']?.[0], { scope: 'global', limit: 120 });
+  await rpc('graph', { limit: 120 });
+  assert.deepEqual(source['graph']?.[0], { limit: 120 }, 'the node cap is the graph\'s only argument');
 
   await rpc('explore', { query: '语义检索', limit: 15, minScore: 0.4 });
   assert.deepEqual(source['explore']?.[0], { query: '语义检索', limit: 15, minScore: 0.4 }, 'the score floor reaches the source');
 });
 
+test('rule writes forward every validated field, including the base version', async () => {
+  const { rpc, source } = await harness();
+
+  await rpc('createRule', { body: '  提交前必须运行类型检查。  ', enabled: false });
+  assert.deepEqual(source['createRule']?.[0], {
+    body: '提交前必须运行类型检查。', enabled: false,
+  }, 'the body is trimmed and the enabled flag is kept');
+
+  await rpc('editRule', { ruleId: UUID, body: '新的准则', enabled: true, baseVersion: 2 });
+  assert.deepEqual(source['editRule'], [UUID, { body: '新的准则', enabled: true, baseVersion: 2 }], 'the base version reaches the source');
+});
+
 test('each settings request forwards only the fields it owns', async () => {
   const { rpc, settings } = await harness();
 
-  await rpc('saveInterface', { defaultTab: 'memories', defaultScope: 'global', pageSize: 40 });
-  assert.deepEqual(settings['saveInterface']?.[0], { defaultTab: 'memories', defaultScope: 'global', pageSize: 40 });
+  await rpc('saveInterface', { defaultTab: 'memories', pageSize: 40 });
+  assert.deepEqual(settings['saveInterface']?.[0], { defaultTab: 'memories', pageSize: 40 });
 
-  await rpc('saveInjection', { projectId: 'alpha', injectTimeoutMs: 2500 });
-  assert.deepEqual(settings['saveInjection']?.[0], { projectId: 'alpha', injectTimeoutMs: 2500 });
+  await rpc('saveInjection', { injectTimeoutMs: 2500 });
+  assert.deepEqual(settings['saveInjection']?.[0], { injectTimeoutMs: 2500 });
 
   await rpc('saveAutoStart', { enabled: true });
   assert.deepEqual(settings['saveAutoStart']?.[0], { enabled: true });
@@ -116,17 +128,21 @@ test('each settings request forwards only the fields it owns', async () => {
 test('a rejected request forwards nothing at all', async () => {
   const { rpc, source, settings } = await harness();
   for (const [endpoint, payload] of [
-    ['memories', { scope: 'nonsense' }],
+    ['memories', { limit: 0 }],
     ['memories', { sort: 'sideways' }],
-    ['graph', { scope: 'project' }],
+    ['graph', { limit: 900 }],
     ['explore', { query: '' }],
     ['create', { content: '', knowledgeType: 'Practice' }],
     ['create', { content: 'x' }],
     ['create', { content: 'x', knowledgeType: 'Nope' }],
-    ['create', { content: 'x', knowledgeType: 'Practice', scope: 'project' }],
     ['create', { content: 'x', knowledgeType: 'Practice', importance: 9 }],
     ['edit', { memoryId: UUID, content: '', entryVersion: 0 }],
     ['withdraw', { memoryId: UUID, reason: '   ', entryVersion: 0 }],
+    ['createRule', { body: '   ' }],
+    ['createRule', { body: 'x'.repeat(4001) }],
+    ['editRule', { ruleId: 'not-a-uuid', enabled: false }],
+    ['editRule', { ruleId: UUID }],
+    ['editRule', { ruleId: UUID, enabled: false, baseVersion: -1 }],
     ['saveAutoStart', { enabled: 'yes' }],
   ] as const) {
     const result = await rpc(endpoint, payload);
@@ -134,4 +150,21 @@ test('a rejected request forwards nothing at all', async () => {
   }
   assert.deepEqual(source, {}, 'a rejected request never reaches the memory source');
   assert.deepEqual(settings, {}, 'a rejected request never reaches the settings service');
+});
+
+test('the registration action is forwarded and unavailable without the settings service', async () => {
+  const { rpc, settings } = await harness();
+  const registered = await rpc('registerTask', {});
+  assert.equal(registered.ok, true);
+  assert.deepEqual(settings['registerTask'], [], 'the action takes no request fields');
+
+  const source = recorder<MemorySource>();
+  const handler = createRpcHandler(source.stub) as unknown as (
+    endpoint: string,
+    payload?: unknown,
+  ) => Promise<{ ok: true; value: unknown } | { ok: false; error: { code: string } }>;
+  const missing = await handler('registerTask', {});
+  assert.equal(missing.ok, false);
+  assert.equal(missing.ok ? '' : missing.error.code, 'PROVIDER_UNAVAILABLE');
+  assert.deepEqual(source.calls, {}, 'registration never touches the memory source');
 });

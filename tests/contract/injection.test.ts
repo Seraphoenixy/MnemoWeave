@@ -18,8 +18,8 @@ function makeEntry(content: string): { descriptor: MemoryCatalogRecord; content:
   return {
     content,
     descriptor: {
-      id: memoryId, currentRevisionId: revisionId, state: 'active', scope: 'project', applicability: 'injection fixture',
-      revisions: [{ id: revisionId, memoryId, number: 1, parentId: null, providerMemoryId, contentHash: sha(content), candidateId: randomUUID(), publishedAt: '2026-11-08T00:00:00.000Z', effectiveAt: '2026-11-08T00:00:00.000Z', applicability: 'injection fixture', scope: 'project' as const }],
+      id: memoryId, currentRevisionId: revisionId, state: 'active', applicability: 'injection fixture',
+      revisions: [{ id: revisionId, memoryId, number: 1, parentId: null, providerMemoryId, contentHash: sha(content), candidateId: randomUUID(), publishedAt: '2026-11-08T00:00:00.000Z', effectiveAt: '2026-11-08T00:00:00.000Z', applicability: 'injection fixture' }],
       relations: [], conflicts: [],
     },
   };

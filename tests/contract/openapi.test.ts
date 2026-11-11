@@ -1,3 +1,4 @@
+import { MnemoWeaveError } from '../../packages/core/contracts/src/index.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHttpServer, httpRoutes, statusForCode } from '../../packages/protocols/http/src/index.ts';
@@ -80,6 +81,10 @@ test('Every documented route is actually handled by the HTTP server', async () =
     createRule: async () => ({ entryId: uuid, scope: 'global', projectId: null, body: 'probe rule', enabled: true, version: 1, withdrawnAt: null }),
     editRule: async () => ({ entryId: uuid, scope: 'global', projectId: null, body: 'probe rule v2', enabled: false, version: 2, withdrawnAt: null }),
     createArchive: async () => ({ entryId: uuid, projectId: 'probe', title: 'probe', body: 'probe body', source: 'session', verification: 'open', evidence: 'probe evidence', version: 1, withdrawnAt: null }),
+    editArchive: async (entryId, input) => {
+      if (input.baseVersion !== 1) throw new MnemoWeaveError('VERSION_CONFLICT');
+      return { entryId, projectId: 'probe', title: input.title, body: input.body, source: 'user', verification: input.verification, evidence: input.evidence, version: 2, withdrawnAt: null };
+    },
     archives: async () => ({ items: [] }),
   };
   const server = createHttpServer(stub, token, operatorToken, client, () => ({ usedBytes: 0, state: 'ok' }));
@@ -133,20 +138,38 @@ test('Every documented route is actually handled by the HTTP server', async () =
     const refresh = await fetch(`${base}/v1/sync/refresh`, { method: 'POST', headers: { authorization: `Bearer ${operatorToken}`, 'content-type': 'application/json' }, body: '{}' });
     assert.equal(refresh.status, 200);
     assert.equal((await refresh.json() as { skipped: boolean }).skipped, false);
-    // Rules and archives: readable by a named Host across every project, writable only by the operator.
+    // A named Host can read and write rules and project archives.
     const hostRules = await fetch(`${base}/v1/rules`, { headers: { authorization: `Bearer ${token}`, 'x-mnemoweave-host': 'host-probe' } });
     assert.equal(hostRules.status, 200);
     const anonymousRules = await fetch(`${base}/v1/rules`, { headers: { authorization: `Bearer ${token}` } });
     assert.equal(anonymousRules.status, 401);
     const hostRuleWrite = await fetch(`${base}/v1/rules`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'x-mnemoweave-host': 'host-probe', 'content-type': 'application/json' }, body: bodies['/v1/rules']! });
-    assert.equal(hostRuleWrite.status, 401, 'writing a rule stays operator-only');
+    assert.equal(hostRuleWrite.status, 201, 'a Host may publish a rule');
+    const anonymousRuleWrite = await fetch(`${base}/v1/rules`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', connection: 'close' }, body: bodies['/v1/rules']! });
+    assert.equal(anonymousRuleWrite.status, 401, 'a rule write without a Host is refused');
+    const hostRuleEdit = await fetch(`${base}/v1/rules/${uuid}`, { method: 'PATCH', headers: { authorization: `Bearer ${token}`, 'x-mnemoweave-host': 'host-probe', 'content-type': 'application/json', connection: 'close' }, body: bodies['/v1/rules/{ruleId}']! });
+    assert.equal(hostRuleEdit.status, 200, 'a Host may edit a rule');
+    const operatorRuleEdit = await fetch(`${base}/v1/rules/${uuid}`, { method: 'PATCH', headers: { authorization: `Bearer ${operatorToken}`, 'content-type': 'application/json', connection: 'close' }, body: bodies['/v1/rules/{ruleId}']! });
+    assert.equal(operatorRuleEdit.status, 200, 'the operator still edits without a Host');
     const hostArchives = await fetch(`${base}/v1/archives`, { headers: { authorization: `Bearer ${token}`, 'x-mnemoweave-host': 'host-probe' } });
     assert.equal(hostArchives.status, 200);
     assert.deepEqual((await hostArchives.json() as { items: unknown[] }).items, []);
     const anonymousArchives = await fetch(`${base}/v1/archives`, { headers: { authorization: `Bearer ${token}` } });
     assert.equal(anonymousArchives.status, 401);
     const hostArchiveWrite = await fetch(`${base}/v1/archives`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'x-mnemoweave-host': 'host-probe', 'content-type': 'application/json' }, body: bodies['/v1/archives']! });
-    assert.equal(hostArchiveWrite.status, 401, 'writing an archive stays operator-only');
+    assert.equal(hostArchiveWrite.status, 201);
+    const archiveEdit = { title: 'updated', body: 'updated body', evidence: 'updated evidence', verification: 'open', baseVersion: 1 };
+    const editArchive = (body: unknown, host = true) => fetch(`${base}/v1/archives/${uuid}`, {
+      method: 'PATCH',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', ...(host ? { 'x-mnemoweave-host': 'host-probe' } : {}) },
+      body: JSON.stringify(body),
+    });
+    assert.equal((await editArchive(archiveEdit, false)).status, 401);
+    assert.equal((await editArchive({ ...archiveEdit, baseVersion: undefined })).status, 400);
+    assert.equal((await editArchive({ ...archiveEdit, baseVersion: 2 })).status, 409);
+    const editedArchive = await editArchive(archiveEdit);
+    assert.equal(editedArchive.status, 200);
+    assert.equal((await editedArchive.json() as { version: number }).version, 2);
     const allRules = await fetch(`${base}/v1/rules?scope=all`, { headers: { authorization: `Bearer ${operatorToken}` } });
     assert.equal(allRules.status, 200);
     const operatorArchives = await fetch(`${base}/v1/archives`, { headers: { authorization: `Bearer ${operatorToken}` } });

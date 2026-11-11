@@ -139,7 +139,6 @@ export function detailMeta(detail: UiMemoryDetail, language: Language): Array<{ 
         ? translate(language, 'detail.viewingCurrent')
         : translate(language, 'detail.viewingHistory', { number: current === undefined ? '—' : `#${current.number}` }),
     },
-    { key: 'scope', label: translate(language, 'detail.project'), value: detail.scope === 'global' ? translate(language, 'detail.global') : detail.projectId ?? '—' },
     { key: 'applicability', label: translate(language, 'detail.applicability'), value: detail.applicability },
     { key: 'published', label: translate(language, 'detail.published'), value: formatDateTime(detail.publishedAt) },
   ];
@@ -161,20 +160,6 @@ export function editBlocker(draft: string, original: string): 'empty' | 'tooLong
   if (utf8Bytes(draft) > EDIT_LIMIT_BYTES) return 'tooLong';
   if (draft === original) return 'unchanged';
   return null;
-}
-
-/** Scope options for the filter, derived from what the Server reports as browsable. */
-export function scopeOptions(projects: Array<{ projectId: string; count: number }> | undefined): Array<{ value: string; projectId?: string }> {
-  const options: Array<{ value: string; projectId?: string }> = [{ value: 'all' }, { value: 'global' }];
-  for (const project of projects ?? []) options.push({ value: `project:${project.projectId}`, projectId: project.projectId });
-  return options;
-}
-
-/** Parse a filter value back into the request parameters the API expects. */
-export function scopeParams(value: string): { scope: 'all' | 'global' | 'project'; projectId?: string } {
-  if (value === 'global') return { scope: 'global' };
-  if (value.startsWith('project:')) return { scope: 'project', projectId: value.slice('project:'.length) };
-  return { scope: 'all' };
 }
 
 /**

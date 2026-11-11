@@ -10,7 +10,7 @@ const count = Number(countArg);
 const request = (index: number): RememberRequest => ({
   idempotencyKey: `${keyPrefix}-${String(index).padStart(4, '0')}`,
   content: `${contentArg} writer=${process.pid} index=${index}`,
-  knowledgeType: 'Practice', tags: [], scope: 'project',
+  knowledgeType: 'Practice', tags: [],
   provenance: { source: 'parallel-writer', sourceReference: `fixture:${process.pid}:${index}`, evidence: ['multi-process fixture'], verificationStatus: 'unverified', confidence: 0.5, applicability: 'hardening fixture', limitations: 'test only', lastVerified: null },
 });
 const repo = new SqliteCandidates(join(path));

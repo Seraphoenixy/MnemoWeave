@@ -34,8 +34,7 @@ async function seeded(root: string): Promise<{ client: MemoryClient; ids: string
   const publish = async (content: string, projectId: string | null, at: string): Promise<{ memoryId: string; revisionId: string }> => {
     const request = RememberInput.parse({
       idempotencyKey: `graph-${randomUUID()}`, content, knowledgeType: 'Practice', tags: [],
-      ...(projectId === null ? { scope: 'global' } : { scope: 'project', projectId }),
-      provenance: {
+            provenance: {
         source: 'local-user', sourceReference: 'graph:fixture', evidence: ['graph'], verificationStatus: 'verified',
         confidence: 1, applicability: projectId ?? 'global', limitations: '无（验收固定值）', lastVerified: '2026-11-10T00:00:00.000Z',
       },
@@ -57,7 +56,6 @@ async function seeded(root: string): Promise<{ client: MemoryClient; ids: string
     second.memoryId,
     RememberInput.parse({
       idempotencyKey: 'graph-second-version', content: '图节点二的第二版。', knowledgeType: 'Practice', tags: [],
-      scope: 'project', projectId: 'alpha',
       provenance: {
         source: 'sync', sourceReference: 'graph:fixture:2', evidence: ['graph'], verificationStatus: 'verified',
         confidence: 1, applicability: 'alpha', limitations: '无（验收固定值）', lastVerified: '2026-11-10T00:00:00.000Z',
@@ -121,24 +119,13 @@ test('the graph carries nodes and only drawable edges', async () => {
         'edges whose endpoint was dropped are not returned');
     }
 
-    // Scope filtering is applied before the cap, so a project view is not an empty global view.
-    const project = await client.graph({ scope: 'project', projectId: 'alpha', limit: 50 });
-    assert.equal(project.ok, true);
-    if (project.ok) {
-      assert.equal(project.value.nodes.length, 1);
-      assert.equal(project.value.nodes[0]?.['projectId'], 'alpha');
-    }
   } finally { await close(); }
 });
 
-test('the graph rejects a project scope without a project and an out-of-range limit', async () => {
+test('the graph rejects an out-of-range limit', async () => {
   const root = resolve('work', 'graph-invalid', randomUUID());
   const { client, close } = await seeded(root);
   try {
-    const noProject = await client.graph({ scope: 'project' });
-    assert.equal(noProject.ok, false);
-    if (!noProject.ok) assert.equal(noProject.error.code, 'INVALID_INPUT');
-
     const tooMany = await client.graph({ limit: 501 });
     assert.equal(tooMany.ok, false);
     if (!tooMany.ok) assert.equal(tooMany.error.code, 'INVALID_INPUT');

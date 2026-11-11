@@ -1,4 +1,4 @@
-import { PinInput, RuntimeContextInput, RuleCreate, RuleEdit } from '../../../core/contracts/src/index.ts';
+import { ArchiveCreate, ArchiveEdit, type ArchiveEditInput, PinInput, RuntimeContextInput, RuleCreate, RuleEdit } from '../../../core/contracts/src/index.ts';
 import type { MemoryCreateRecord, MemoryGraphRecord, MemoryListRecord, MemoryEditRecord, RuntimeContext, PinRecord } from '../../../core/contracts/src/index.ts';
 import { createServer } from 'node:http';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
@@ -62,6 +62,7 @@ export const httpRoutes: ReadonlyArray<{ method: 'GET' | 'POST' | 'PATCH'; path:
   { method: 'PATCH', path: '/v1/rules/{ruleId}' },
   { method: 'GET', path: '/v1/archives' },
   { method: 'POST', path: '/v1/archives' },
+  { method: 'PATCH', path: '/v1/archives/{entryId}' },
 ];
 
 /** Error code → HTTP status mapping from the contract error model. */
@@ -79,7 +80,7 @@ export interface ClientHttpEndpoints {
   closeSession(hostId: string, sessionId: string): void;
   events(hostId: string, input: unknown): { status: 'stored' | 'replayed' | 'skipped'; eventId: string };
   memories(query: {
-    query?: string; limit: number; scope?: 'all' | 'global' | 'project'; projectId?: string; cursor?: string;
+    query?: string; limit: number; cursor?: string;
     /** Keep only memories whose current revision carries this classification. */
     category?: 'preference' | 'decision' | 'fact' | 'insight' | 'context' | 'general';
     knowledgeType?: 'Concept' | 'Practice' | 'Architecture' | 'Troubleshooting' | 'Constraint' | 'Procedure' | 'Reference';
@@ -91,7 +92,7 @@ export interface ClientHttpEndpoints {
   /** Direct creation: publishes a formal memory without a review round. */
   createMemory?(input: unknown): Promise<MemoryCreateRecord>;
   /** Relation graph over the visible catalog: structure only, no bodies. */
-  graph?(hostId: string, query: { scope: 'all' | 'global' | 'project'; projectId?: string; limit: number }): Promise<MemoryGraphRecord>;
+  graph?(hostId: string, query: { limit: number }): Promise<MemoryGraphRecord>;
   /** Provider-ranked search, mapped to memories this machine knows. */
   recall?(hostId: string, input: unknown): Promise<{ memories: Array<{ id: string; content: string; score?: number | undefined; superseded?: boolean | undefined }> }>;
   explore?(hostId: string, input: { query: string; limit: number; minScore?: number }): Promise<{ query: string; hits: Array<Record<string, unknown>>; unregistered: number; truncated: boolean }>;
@@ -103,10 +104,11 @@ export interface ClientHttpEndpoints {
   syncRefresh?(): Promise<SyncRefreshValue>;
   /** Last injection result, or null before any injection happened. */
   lastInjection?(hostId?: string, sessionId?: string): Promise<InjectionReportRecord | null>;
-  rules?(query: { scope: 'global' | 'project' | 'all'; projectId?: string }): Promise<RuleListRecord>;
+  rules?(query: Record<string, never>): Promise<RuleListRecord>;
   archives?(query: { projectId?: string; includeWithdrawn?: boolean }): Promise<ArchiveListRecord>;
   createRule?(input: RuleCreateInput): Promise<RuleRecordValue>;
   editRule?(ruleId: string, input: RuleEditInput): Promise<RuleRecordValue>;
+  editArchive?(entryId: string, input: ArchiveEditInput): Promise<ArchiveRecordValue>;
   createArchive?(input: ArchiveCreateInput): Promise<ArchiveRecordValue>;
 }
 
@@ -118,11 +120,13 @@ export function createHttpServer(app: MemoryApplication, token: string, operator
   const expected = Buffer.from(`Bearer ${token}`);
   const operatorExpected = operatorToken ? Buffer.from(`Bearer ${operatorToken}`) : undefined;
   /**
-   * User-facing writes are gated by the operator token, not by a confirmation value.
+   * Two identities exist: the service token plus a declared Host header (what a host plugin
+   * uses), and an operator token for management routes that do not belong to a host — review,
+   * conflicts, runtime pins, archives.
    *
-   * A confirmation issued to the same caller that consumes it proves nothing: any holder of the
-   * service token could ask for one and use it, so the audit trail would still claim a person
-   * acted when only code did. The check lives on the routes themselves.
+   * Memory and rule writes are user writes: they require an identity but no second credential.
+   * A confirmation value was removed earlier because the caller that requests it is also the
+   * caller that consumes it, so it proved nothing about a person being present.
    */
   return createServer(async (req, res) => {
     const traceId = randomUUID();
@@ -173,23 +177,21 @@ export function createHttpServer(app: MemoryApplication, token: string, operator
       }
       if (req.method === 'GET' && req.url !== undefined && (req.url === '/v1/rules' || req.url.startsWith('/v1/rules?'))) {
         if (!client?.rules) throw new MnemoWeaveError('REVIEW_REQUIRED');
-        const params = new URL(req.url, 'http://localhost').searchParams;
-        const scope = params.get('scope') ?? (isOperator ? 'global' : 'all');
-        if (scope !== 'global' && scope !== 'project' && scope !== 'all') throw new MnemoWeaveError('INVALID_INPUT');
-        const projectId = params.get('projectId')?.trim() || undefined;
-        if (scope === 'project' && !projectId) throw new MnemoWeaveError('INVALID_INPUT');
-        // An operator may narrow by scope or project; a host reads every rule.
+        // Rules apply to every session, so there is nothing to narrow.
         if (!isOperator) requireHost();
-        return reply(200, await client.rules({ scope, ...(projectId ? { projectId } : {}) }));
+        return reply(200, await client.rules({}));
       }
       if (req.method === 'POST' && req.url === '/v1/rules') {
-        if (!isOperator) throw new MnemoWeaveError('UNAUTHORIZED');
+        // A rule is a user write like a memory: the caller must identify itself, and no second
+        // credential is required on a single-user deployment.
+        if (!isOperator) requireHost();
         if (!client?.createRule) throw new MnemoWeaveError('REVIEW_REQUIRED');
         return reply(201, await client.createRule(RuleCreate.parse(await readJson(req))));
       }
       const ruleMatch = /^\/v1\/rules\/([a-f0-9-]+)$/.exec(req.url ?? '');
       if (req.method === 'PATCH' && ruleMatch) {
-        if (!isOperator) throw new MnemoWeaveError('UNAUTHORIZED');
+        // Same rule: the audit trail records who sent the change, not that a person was present.
+        if (!isOperator) requireHost();
         if (!client?.editRule) throw new MnemoWeaveError('REVIEW_REQUIRED');
         return reply(200, await client.editRule(ruleMatch[1]!, RuleEdit.parse(await readJson(req))));
       }
@@ -205,9 +207,15 @@ export function createHttpServer(app: MemoryApplication, token: string, operator
         return reply(200, await client.archives({ ...(projectId ? { projectId } : {}), includeWithdrawn: rawWithdrawn === 'true' }));
       }
       if (req.method === 'POST' && req.url === '/v1/archives') {
-        if (!isOperator) throw new MnemoWeaveError('UNAUTHORIZED');
+        if (!isOperator) requireHost();
         if (!client?.createArchive) throw new MnemoWeaveError('REVIEW_REQUIRED');
-        return reply(201, await client.createArchive(await readJson(req) as ArchiveCreateInput));
+        return reply(201, await client.createArchive(ArchiveCreate.parse(await readJson(req))));
+      }
+      const archiveMatch = /^\/v1\/archives\/([a-f0-9-]{36})$/.exec(req.url ?? '');
+      if (req.method === 'PATCH' && archiveMatch) {
+        if (!isOperator) requireHost();
+        if (!client?.editArchive) throw new MnemoWeaveError('REVIEW_REQUIRED');
+        return reply(200, await client.editArchive(archiveMatch[1]!, ArchiveEdit.parse(await readJson(req))));
       }
       if (req.method === 'GET' && req.url === '/v1/reviews/due') {
         if (!isOperator) throw new MnemoWeaveError('UNAUTHORIZED');
@@ -222,13 +230,6 @@ export function createHttpServer(app: MemoryApplication, token: string, operator
         const rawLimit = params.get('limit');
         const limit = rawLimit === null ? 50 : Number(rawLimit);
         if (!Number.isInteger(limit) || limit < 1 || limit > 200 || (query !== undefined && query.length > 500)) throw new MnemoWeaveError('INVALID_INPUT');
-        const rawScope = params.get('scope');
-        const scope = (rawScope === null ? 'all' : rawScope) as 'all' | 'global' | 'project';
-        if (scope !== 'all' && scope !== 'global' && scope !== 'project') throw new MnemoWeaveError('INVALID_INPUT');
-        const projectId = params.get('projectId')?.trim() || undefined;
-        if (projectId !== undefined && projectId.length > 200) throw new MnemoWeaveError('INVALID_INPUT');
-        // A project filter without a project would silently list everything, so reject it.
-        if (scope === 'project' && projectId === undefined) throw new MnemoWeaveError('INVALID_INPUT');
         const cursor = params.get('cursor')?.trim() || undefined;
         if (cursor !== undefined && cursor.length > 500) throw new MnemoWeaveError('INVALID_INPUT');
         // Classification filters are validated here so an unknown value is a 400, not a silently
@@ -245,8 +246,7 @@ export function createHttpServer(app: MemoryApplication, token: string, operator
         const rawSort = params.get('sort')?.trim() || undefined;
         if (rawSort !== undefined && !(SORTS as readonly string[]).includes(rawSort)) throw new MnemoWeaveError('INVALID_INPUT');
         return reply(200, await client.memories({
-          ...(query === undefined ? {} : { query }), limit, scope,
-          ...(projectId === undefined ? {} : { projectId }),
+          ...(query === undefined ? {} : { query }), limit,
           ...(cursor === undefined ? {} : { cursor }),
           ...(rawCategory === undefined ? {} : { category: rawCategory as (typeof CATEGORIES)[number] }),
           ...(rawKnowledge === undefined ? {} : { knowledgeType: rawKnowledge as (typeof KNOWLEDGE)[number] }),
@@ -259,18 +259,10 @@ export function createHttpServer(app: MemoryApplication, token: string, operator
       if (req.method === 'GET' && (req.url ?? '').startsWith('/v1/memories/graph')) {
         if (!client?.graph) throw new MnemoWeaveError('REVIEW_REQUIRED');
         const params = new URL(req.url ?? '', 'http://127.0.0.1').searchParams;
-        const graphScope = params.get('scope') ?? 'all';
-        if (graphScope !== 'all' && graphScope !== 'global' && graphScope !== 'project') throw new MnemoWeaveError('INVALID_INPUT');
-        const graphProject = params.get('projectId')?.trim() || undefined;
-        if (graphScope === 'project' && graphProject === undefined) throw new MnemoWeaveError('INVALID_INPUT');
         const rawGraphLimit = params.get('limit');
         const graphLimit = rawGraphLimit === null ? 200 : Number(rawGraphLimit);
         if (!Number.isInteger(graphLimit) || graphLimit < 1 || graphLimit > 500) throw new MnemoWeaveError('INVALID_INPUT');
-        return reply(200, await client.graph(requireHost(), {
-          scope: graphScope,
-          ...(graphProject === undefined ? {} : { projectId: graphProject }),
-          limit: graphLimit,
-        }));
+        return reply(200, await client.graph(requireHost(), { limit: graphLimit }));
       }
       if (req.method === 'POST' && req.url === '/v1/memories') {
         if (!client?.createMemory) throw new MnemoWeaveError('REVIEW_REQUIRED');

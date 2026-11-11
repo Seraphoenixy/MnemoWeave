@@ -241,11 +241,9 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
   let client: ClientHttpEndpoints | undefined;
     if (candidates && config.MNEMOWEAVE_STATE_DIR) {
       // VIEW-01/02: assembly re-checks publication state and budget; grants are implicit now.
-      // Rules are read per assembly: global ones always, project ones only for a project request.
-      const ruleSource = ({ projectId }: { projectId?: string }) => [
-        ...candidates.memory.rulesFor('global', null),
-        ...(projectId ? candidates.memory.rulesFor('project', projectId) : []),
-      ].map(row => ({ entryId: row.entryId, version: row.version, body: row.body }));
+      // Rules carry no scope: every enabled rule applies to every session.
+      const ruleSource = () => candidates.memory.rulesFor()
+        .map(row => ({ entryId: row.entryId, version: row.version, body: row.body }));
       const assembler = new ViewAssembler(app, { rules: ruleSource });
       const memoryRuntime = new MemoryRuntime(candidates.runtime, assembler);
       /**
@@ -299,6 +297,22 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
           if (editLocks.get(memoryId) === settled) editLocks.delete(memoryId);
         }
       };
+      const writeArchive = async (row: ReturnType<typeof planArchive>, baseVersion: number) => {
+        if (!coordinator || !formalProvider) {
+          candidates.memory.upsertArchive(row, new Date().toISOString());
+          return toArchiveRecord(row);
+        }
+        const confirmed = candidates.memory.entryVersion(row.entryId);
+        if (confirmed !== 0 && confirmed !== baseVersion) throw new MnemoWeaveError('VERSION_CONFLICT');
+        const scope = `project:${row.projectId}`;
+        const result = await submitLocal(scope, confirmed === 0 ? 'create' : 'update', archiveDraft(row), confirmed, () => undefined);
+        if (result === 'queued') throw new MnemoWeaveError('SYNC_QUEUED');
+        if (result === 'unknown') throw new MnemoWeaveError('SYNC_OUTCOME_UNKNOWN');
+        await coordinator.applyScope(scope, record => applyInboxEntry(record, { store: candidates.memory, provider: formalProvider! }));
+        const current = candidates.memory.archive(row.entryId);
+        if (!current || current.version <= confirmed) throw new MnemoWeaveError('SYNC_OUTCOME_UNKNOWN');
+        return toArchiveRecord(current);
+      };
       client = {
         view: async (hostId, input) => {
           const request = ViewRequest.parse(input);
@@ -335,12 +349,12 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
          * page whose candidates are all skipped does not stall — the next page continues from
          * where the scan stopped rather than from how many items were returned.
          */
-        memories: async ({ query, limit, scope, projectId, category, knowledgeType, entity, sort, cursor }) => {
+        memories: async ({ query, limit, category, knowledgeType, entity, sort, cursor }) => {
           const terms = query ? query.toLowerCase().split(/\s+/).filter(Boolean) : [];
           // The scan order is chosen first; the cursor then records a position in that order.
           const order: ListSort = sort ?? 'newest';
           const scoped: {
-            memoryId: string; providerId: string; projectId: string | null; scope: 'project' | 'global'; publishedAt: string;
+            memoryId: string; providerId: string; publishedAt: string;
             importance: number | null;
             current: { knowledgeType?: string; category?: string; importance?: number; tags?: string[]; entities?: string[] };
           }[] = [];
@@ -350,13 +364,8 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
               if (descriptor.state !== 'active') continue;
               const current = descriptor.revisions.find(revision => revision.id === descriptor.currentRevisionId);
               if (!current) continue;
-              // Scope filter before any Provider read: this is what makes every project reachable.
-              if (scope === 'global' && descriptor.scope !== 'global') continue;
-              if (scope === 'project' && (descriptor.projectId ?? null) !== (projectId ?? null)) continue;
               scoped.push({
                 memoryId, providerId,
-                projectId: descriptor.projectId ?? null,
-                scope: descriptor.scope === 'global' ? 'global' : 'project',
                 publishedAt: current.publishedAt,
                 importance: current.importance ?? null,
                 current: {
@@ -379,7 +388,6 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
           const entityNames = new Map<string, string>();
           const entityCounts = new Map<string, number>();
           for (const entry of scoped) {
-            if (entry.projectId !== null) projects.set(entry.projectId, (projects.get(entry.projectId) ?? 0) + 1);
             if (entry.current.category !== undefined) categories.set(entry.current.category, (categories.get(entry.current.category) ?? 0) + 1);
             if (entry.current.knowledgeType !== undefined) knowledgeTypes.set(entry.current.knowledgeType, (knowledgeTypes.get(entry.current.knowledgeType) ?? 0) + 1);
             for (const value of entry.current.entities ?? []) {
@@ -444,7 +452,6 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
               if (!current) continue;
               items.push({
                 memoryId: entry.memoryId, revisionId: current.id, providerMemoryId: entry.providerId,
-                scope: entry.scope, ...(entry.projectId ? { projectId: entry.projectId } : {}),
                 applicability: descriptor.applicability, publishedAt: current.publishedAt, content,
                 entryVersion: candidates.memory.entryVersion(entry.memoryId),
                 // Carried from the candidate so the card can label the memory without a second read.
@@ -466,7 +473,6 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
           return MemoryList.parse({
             items,
             ...(hasMore ? { nextCursor: encodeListCursor({ sort: order, publishedAt: cursorEntry.publishedAt, importance: cursorEntry.importance, memoryId: cursorEntry.memoryId }) } : {}),
-            projects: [...projects].map(([id, count]) => ({ projectId: id, count })).sort((left, right) => left.projectId.localeCompare(right.projectId)),
             categories: [...categories].map(([value, count]) => ({ value, count })).sort((left, right) => left.value.localeCompare(right.value)),
             entities: [...entityNames].map(([key, value]) => ({ value, count: entityCounts.get(key) ?? 0 })).sort((left, right) => left.value.localeCompare(right.value)),
             knowledgeTypes: [...knowledgeTypes].map(([value, count]) => ({ value, count })).sort((left, right) => left.value.localeCompare(right.value)),
@@ -495,8 +501,6 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
               if (!current) continue;
               hits.push({
                 memoryId, revisionId: current.id, providerMemoryId: memory.id,
-                scope: descriptor.scope === 'global' ? 'global' : 'project',
-                ...(descriptor.projectId ? { projectId: descriptor.projectId } : {}),
                 state: descriptor.state,
                 content: memory.content,
                 score: memory.score ?? 0,
@@ -534,10 +538,10 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
          * both endpoints are present, so nothing in the answer is undrawable. Bodies are left out
          * on purpose — reading them would cost one Provider process per node.
          */
-        graph: async (hostId: string, { scope, projectId, limit }: { scope: 'all' | 'global' | 'project'; projectId?: string; limit: number }) => {
+        graph: async (hostId: string, { limit }: { limit: number }) => {
           void hostId;
           const nodes: Array<{
-            memoryId: string; scope: 'global' | 'project'; projectId?: string; publishedAt: string;
+            memoryId: string; publishedAt: string;
             state: 'active' | 'superseded' | 'unverified';
             category?: string; knowledgeType?: string; importance?: number;
           }> = [];
@@ -546,14 +550,10 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
             // A withdrawn memory is not somewhere to navigate to; a superseded one has to stay,
             // because a supersede edge points at it.
             if (descriptor.state === 'superseded' && descriptor.revisions.length === 0) return null;
-            if (scope === 'global' && descriptor.scope !== 'global') return null;
-            if (scope === 'project' && (descriptor.projectId ?? null) !== (projectId ?? null)) return null;
             const current = descriptor.revisions.find(revision => revision.id === descriptor.currentRevisionId);
             if (!current) return null;
             return {
               memoryId,
-              scope: descriptor.scope === 'global' ? 'global' : 'project',
-              ...(descriptor.projectId ? { projectId: descriptor.projectId } : {}),
               state: descriptor.state === 'active' ? 'active' : descriptor.state === 'unverified' ? 'unverified' : 'superseded',
               publishedAt: current.publishedAt,
               ...(current.category === undefined ? {} : { category: current.category }),
@@ -623,7 +623,7 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
           const now = new Date().toISOString();
           const reason = parsed.reason ?? 'user edit from DSH memory page';
           const hash = createHash('sha256').update(parsed.content).digest('hex');
-          const scope = descriptor.scope === 'global' ? 'global' : `project:${descriptor.projectId}`;
+          const scope = 'global';
           let providerId: string;
           let entryVersion: number;
           let publishedRevisionId: string | null = null;
@@ -666,7 +666,6 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
           }
           const request = RememberInput.parse({
             idempotencyKey: `edit-${randomUUID()}`.slice(0, 128), content: parsed.content, knowledgeType: 'Practice', tags: [],
-            scope: descriptor.scope, ...(descriptor.projectId ? { projectId: descriptor.projectId } : {}),
             provenance: {
               source: 'local-user', sourceReference: `dsh-edit:${memoryId}`, evidence: [reason], verificationStatus: 'verified',
               confidence: 1, applicability: descriptor.applicability, limitations: '无（用户直接编辑）', lastVerified: now,
@@ -717,12 +716,10 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
             ...(parsed.category === undefined ? {} : { category: parsed.category }),
             ...(parsed.importance === undefined ? {} : { importance: parsed.importance }),
             ...(parsed.entities === undefined ? {} : { entities: parsed.entities }),
-            scope: parsed.scope === 'global' ? 'global' : 'project',
-            ...(parsed.scope === 'project' && parsed.projectId !== undefined ? { projectId: parsed.projectId } : {}),
             provenance: {
               source: 'local-user', sourceReference: `dsh-create:${randomUUID()}`,
               evidence: [reason], verificationStatus: 'verified', confidence: 1,
-              applicability: parsed.projectId ?? 'global', limitations: '无（用户直接新增）', lastVerified: now,
+              applicability: 'global', limitations: '无（用户直接新增）', lastVerified: now,
             },
           });
           const candidate = candidates.submit(request);
@@ -764,7 +761,7 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
           assertEntryVersion(currentVersion, parsed.entryVersion);
           const now = new Date().toISOString();
           if (coordinator && formalProvider) {
-            const scope = descriptor.scope === 'global' ? 'global' : `project:${descriptor.projectId}`;
+            const scope = 'global';
             // The change envelope still carries a body: the contract requires one, and other
             // machines need the local read-back check to match. The withdrawal itself is
             // expressed by `withdrawnAt`, not by dropping the content.
@@ -800,26 +797,23 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
           candidates.memory.setEntryVersion(memoryId, nextVersion, now);
           return { memoryId, revisionId: withdrawn.revisionId, entryVersion: nextVersion, withdrawnAt: now };
         }),
-        lastInjection: async (hostId, sessionId) => candidates.memory.lastInjection(hostId, sessionId),        rules: async ({ scope, projectId }) => RuleList.parse({
-          items: (scope === 'all' ? candidates.memory.everyRule() : candidates.memory.allRules(scope, projectId ?? null)).map(toRuleRecord),
-        }),
+        lastInjection: async (hostId, sessionId) => candidates.memory.lastInjection(hostId, sessionId),
+        rules: async () => RuleList.parse({ items: candidates.memory.everyRule().map(toRuleRecord) }),
         createRule: async (input) => {
-          const existing = input.scope === 'global'
-            ? candidates.memory.allRules('global', null)
-            : [...candidates.memory.allRules('global', null), ...candidates.memory.allRules('project', input.projectId!)];
-          const row = planRuleCreate(input, existing);
-          await submitLocal(ruleScope(row), 'create', ruleDraft(row), 0, () => candidates.memory.upsertRule(row, new Date().toISOString()));
+          const row = planRuleCreate(input, candidates.memory.allRules());
+          await submitLocal(ruleScope(), 'create', ruleDraft(row), 0, () => candidates.memory.upsertRule(row, new Date().toISOString()));
           return toRuleRecord(row);
         },
         editRule: async (ruleId, input) => {
           const current = candidates.memory.rule(ruleId);
           if (!current) throw new MnemoWeaveError('NOT_FOUND');
-          const existing = current.scope === 'global'
-            ? candidates.memory.allRules('global', null)
-            : [...candidates.memory.allRules('global', null), ...candidates.memory.allRules('project', current.projectId)];
-          const row = planRuleEdit(current, input, existing);
+          // The editor carries the version it was opened at. Without this check two hosts would
+          // both succeed and the later write would silently replace a rule the first one never
+          // saw — the same class of overwrite the memory edit path refuses.
+          if (input.baseVersion !== undefined && input.baseVersion !== current.version) throw new MnemoWeaveError('VERSION_CONFLICT');
+          const row = planRuleEdit(current, input, candidates.memory.allRules());
           const baseVersion = candidates.memory.entryVersion(ruleId);
-          await submitLocal(ruleScope(row), baseVersion === 0 ? 'create' : 'update', ruleDraft(row), baseVersion, () => candidates.memory.upsertRule(row, new Date().toISOString()));
+          await submitLocal(ruleScope(), baseVersion === 0 ? 'create' : 'update', ruleDraft(row), baseVersion, () => candidates.memory.upsertRule(row, new Date().toISOString()));
           return toRuleRecord(row);
         },
         archives: async ({ projectId, includeWithdrawn }) => ({
@@ -827,11 +821,13 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
             ? candidates.memory.allArchives(includeWithdrawn ?? false)
             : candidates.memory.archivesFor(projectId, includeWithdrawn ?? false)).map(toArchiveRecord),
         }),
-        createArchive: async (input) => {
-          const row = planArchive(ArchiveCreate.parse(input));
-          await submitLocal(`project:${row.projectId}`, 'create', archiveDraft(row), 0, () => candidates.memory.upsertArchive(row, new Date().toISOString()));
-          return toArchiveRecord(row);
-        },
+        editArchive: async (entryId, { baseVersion, ...input }) => withEditLock(entryId, async () => {
+          const current = candidates.memory.archive(entryId);
+          if (!current || current.withdrawnAt !== null) throw new MnemoWeaveError('NOT_FOUND');
+          if (current.version !== baseVersion) throw new MnemoWeaveError('VERSION_CONFLICT');
+          return writeArchive({ ...current, ...input, version: current.version + 1 }, baseVersion);
+        }),
+        createArchive: async (input) => writeArchive(planArchive(ArchiveCreate.parse(input)), 0),
       };
       if (config.MNEMOWEAVE_SYNC_URL && config.MNEMOWEAVE_SYNC_DEVICE_ID && config.MNEMOWEAVE_SYNC_TOKEN) {
         const syncClient = new SyncClient({ baseUrl: config.MNEMOWEAVE_SYNC_URL, deviceId: config.MNEMOWEAVE_SYNC_DEVICE_ID, token: config.MNEMOWEAVE_SYNC_TOKEN, timeoutMs: config.MNEMOWEAVE_SYNC_TIMEOUT_MS });

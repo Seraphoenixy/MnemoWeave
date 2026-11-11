@@ -105,8 +105,6 @@ test('a runtime change is written locally', async () => {
   assert.deepEqual(await applyInboxEntry(inbox(), p), { status: 'applied' });
   assert.equal(p.store.rules.length, 1);
   assert.equal(p.store.rules[0]?.body, '提交前必须运行类型检查。');
-  assert.equal(p.store.rules[0]?.scope, 'project');
-  assert.equal(p.store.rules[0]?.projectId, 'alpha');
   assert.equal(p.store.rules[0]?.enabled, true);
 });
 

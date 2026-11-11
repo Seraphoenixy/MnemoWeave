@@ -71,7 +71,6 @@ test('no candidate is ever approved automatically, whatever its scope or verific
     try {
       const input = request();
       if (kind === 'architecture') input.knowledgeType = 'Architecture';
-      if (kind === 'global') input.scope = 'global';
       if (kind === 'unverified') input.provenance.verificationStatus = 'unverified';
       const candidate = t.repo.submit(input);
       await new MemoryWorkflow(t.repo, t.provider).tick();
@@ -278,9 +277,9 @@ test('A v1 database with real candidate data upgrades, backs up, and preserves l
   const legacy = new DatabaseSync(path);
   legacy.exec(`CREATE TABLE governance_candidates(id TEXT PRIMARY KEY,idempotency_key TEXT NOT NULL UNIQUE,request_hash TEXT NOT NULL,request_json TEXT NOT NULL,status TEXT NOT NULL CHECK(status='pending_review'),submitted_at TEXT NOT NULL) STRICT;
     CREATE TABLE governance_submission_receipts(id TEXT PRIMARY KEY,candidate_id TEXT NOT NULL UNIQUE REFERENCES governance_candidates(id),status TEXT NOT NULL CHECK(status='candidate')) STRICT; PRAGMA user_version=1;`);
-  const input = request('legacy-input-001'); const { scope: _newDefault, ...oldInput } = input;
+  const input = request('legacy-input-001');
   const id = randomUUID(); const receiptId = randomUUID();
-  legacy.prepare('INSERT INTO governance_candidates VALUES(?,?,?,?,?,?)').run(id, input.idempotencyKey, 'legacy-hash', JSON.stringify(oldInput), 'pending_review', '2026-11-08T00:00:00Z');
+  legacy.prepare('INSERT INTO governance_candidates VALUES(?,?,?,?,?,?)').run(id, input.idempotencyKey, 'legacy-hash', JSON.stringify(input), 'pending_review', '2026-11-08T00:00:00Z');
   legacy.prepare('INSERT INTO governance_submission_receipts VALUES(?,?,?)').run(receiptId, id, 'candidate'); legacy.close();
   const upgraded = new SqliteCandidates(path);
   try { assert.equal(upgraded.submit(input).id, id); assert.equal(upgraded.get(id).receipt.id, receiptId); } finally { upgraded.close(); }

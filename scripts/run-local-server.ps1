@@ -22,8 +22,11 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 if (-not (Test-Path -LiteralPath $EnvFile)) { throw "environment file not found: $EnvFile" }
-$main = Join-Path $ServerDir 'dist/apps/server/src/main.js'
-if (-not (Test-Path -LiteralPath $main)) { throw "compiled Server entry not found: $main" }
+# Published directory: apps/ directly (scripts/publish-server.mjs), or a checkout that has it
+# under dist/. Both layouts are accepted so the wrapper works before and after publishing.
+$main = Join-Path $ServerDir 'apps/server/src/main.js'
+if (-not (Test-Path -LiteralPath $main)) { $main = Join-Path $ServerDir 'dist/apps/server/src/main.js' }
+if (-not (Test-Path -LiteralPath $main)) { throw "compiled Server entry not found under $ServerDir (run tsc and scripts/publish-server.mjs)" }
 
 # .env-style KEY=VALUE, one per line; comments and blank lines ignored. Values are not echoed.
 #

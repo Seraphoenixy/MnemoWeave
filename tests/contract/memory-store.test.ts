@@ -12,17 +12,17 @@ async function open() {
   return new SqliteCandidates(path);
 }
 
-test('runtime rules stay inside their scope and disappear when withdrawn', async () => {
+test('rules apply to every session and disappear when withdrawn', async () => {
   const repo = await open();
   try {
-    repo.memory.upsertRule({ entryId: 'r1', body: '提交前必须运行类型检查。', scope: 'project', projectId: 'alpha', enabled: true, version: 1, withdrawnAt: null }, NOW);
-    repo.memory.upsertRule({ entryId: 'r2', body: '全局：不得改写架构决策。', scope: 'global', projectId: null, enabled: true, version: 1, withdrawnAt: null }, NOW);
-    repo.memory.upsertRule({ entryId: 'r3', body: '已停用准则。', scope: 'project', projectId: 'alpha', enabled: false, version: 2, withdrawnAt: null }, NOW);
-    assert.deepEqual(repo.memory.rulesFor('project', 'alpha').map((row) => row.entryId), ['r1']);
-    assert.deepEqual(repo.memory.rulesFor('project', 'beta'), []);
-    assert.deepEqual(repo.memory.rulesFor('global', null).map((row) => row.entryId), ['r2']);
+    repo.memory.upsertRule({ entryId: 'r1', body: '提交前必须运行类型检查。', enabled: true, version: 1, withdrawnAt: null }, NOW);
+    repo.memory.upsertRule({ entryId: 'r2', body: '不得改写架构决策。', enabled: true, version: 1, withdrawnAt: null }, NOW);
+    repo.memory.upsertRule({ entryId: 'r3', body: '已停用准则。', enabled: false, version: 2, withdrawnAt: null }, NOW);
+    // A disabled rule is still listed for the operator, but it is never injected.
+    assert.deepEqual(repo.memory.rulesFor().map((row) => row.entryId), ['r1', 'r2']);
+    assert.deepEqual(repo.memory.everyRule().map((row) => row.entryId), ['r1', 'r2', 'r3']);
     repo.memory.withdrawRule('r1', NOW);
-    assert.deepEqual(repo.memory.rulesFor('project', 'alpha'), []);
+    assert.deepEqual(repo.memory.rulesFor().map((row) => row.entryId), ['r2']);
   } finally {
     repo.close();
   }
@@ -80,12 +80,12 @@ test('the latest injection report is readable and empty before the first one', a
 test('a rule and an archive can be read back by id, and disabled rules are listed', async () => {
   const repo = await open();
   try {
-    repo.memory.upsertRule({ entryId: 'r1', body: '启用中的准则', scope: 'project', projectId: 'alpha', enabled: true, version: 1, withdrawnAt: null }, NOW);
-    repo.memory.upsertRule({ entryId: 'r2', body: '停用的准则', scope: 'project', projectId: 'alpha', enabled: false, version: 2, withdrawnAt: null }, NOW);
+    repo.memory.upsertRule({ entryId: 'r1', body: '启用中的准则', enabled: true, version: 1, withdrawnAt: null }, NOW);
+    repo.memory.upsertRule({ entryId: 'r2', body: '停用的准则', enabled: false, version: 2, withdrawnAt: null }, NOW);
     assert.equal(repo.memory.rule('r1')?.body, '启用中的准则');
     assert.equal(repo.memory.rule('missing'), null);
-    assert.deepEqual(repo.memory.allRules('project', 'alpha').map((row) => row.entryId).sort(), ['r1', 'r2']);
-    assert.deepEqual(repo.memory.rulesFor('project', 'alpha').map((row) => row.entryId), ['r1']);
+    assert.deepEqual(repo.memory.allRules().map((row) => row.entryId).sort(), ['r1', 'r2']);
+    assert.deepEqual(repo.memory.rulesFor().map((row) => row.entryId), ['r1']);
     repo.memory.upsertArchive({ entryId: 'a1', projectId: 'alpha', title: '标题', body: '正文', source: 'user', verification: 'verified', evidence: '证据', version: 1, withdrawnAt: null }, NOW);
     assert.equal(repo.memory.archive('a1')?.verification, 'verified');
     assert.equal(repo.memory.archive('missing'), null);

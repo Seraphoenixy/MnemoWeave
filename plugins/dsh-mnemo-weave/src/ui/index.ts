@@ -11,6 +11,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MemoryClient, ensureServer, prewarmBudgetMs } from '../../../../packages/client/src/index.ts';
 import { createRpcHandler } from './rpc.ts';
+import { createTaskRunner } from './task-runner.ts';
 import { SettingsService } from './settings.ts';
 import { MemorySource } from './memory-source.ts';
 import { BUNDLE_NAME, isHostArtifact, reloadBundle, shouldWatch, watchLib } from './hot-reload.ts';
@@ -150,6 +151,10 @@ export function apply(ctx: HostContext, config?: unknown): void {
   // The local Server is hosted by the "MnemoWeave Local Server" scheduled task, so DSH may be
   // opened before it. Prewarm in the background: a refused connection wakes the task once, and
   // the memory page shows the phase while it comes up. Failures never abort the DSH boot.
+  //
+  // Registration is an install step (`node scripts/publish-server.mjs --register`), not something
+  // a host does at startup: asking for elevation on every launch would make the permission
+  // prompt part of normal operation. A missing task is reported as `task_missing`.
   const ensure = (budgetMs: number) => {
     const live = settings.snapshot;
     return ensureServer({
@@ -171,6 +176,14 @@ export function apply(ctx: HostContext, config?: unknown): void {
     client, serverUrl: resolved.serverUrl, hasToken: true, ensureServer: ensure,
     sources: { ...resolved.description.sources },
   });
+  let getAgents: (() => unknown) | undefined;
+  ctx.inject?.(['agents'], agentContext => {
+    const accessor = () => agentContext.get('agents');
+    getAgents = accessor;
+    agentContext.effect(() => () => {
+      if (getAgents === accessor) getAgents = undefined;
+    }, 'dsh-mnemo-weave: task agents');
+  });
   ctx.effect(() => {
     const connection = ctx.connection;
     const webServer = ctx.get('webServer');
@@ -180,7 +193,7 @@ export function apply(ctx: HostContext, config?: unknown): void {
     const owner = ctx.extend === undefined ? ctx : ctx.extend({ webServer });
     const target = owner.connection;
     if (target === undefined) return;
-    const dispose = target.rpc.handle(RPC_CHANNEL, createRpcHandler(source, settings));
+    const dispose = target.rpc.handle(RPC_CHANNEL, createRpcHandler(source, settings, createTaskRunner(() => getAgents?.())));
     return () => { if (typeof dispose === 'function') (dispose as () => void)(); };
   }, 'dsh-mnemo-weave: memory channel');
 }

@@ -59,6 +59,7 @@ test('a session-start call may wait long enough to wake and connect', async () =
   const result = await ensureServerForTurn({
     baseUrl: 'http://127.0.0.1:4317', token: TOKEN, hostId: 'dsh',
     waitMs: 2_000, pollMs: 1,
+    taskExists: async () => true,
     runTask: async (name: string) => { triggered.push(name); return { ok: true, detail: 'SUCCESS' }; },
     fetchImpl: impl,
   } as never);
@@ -73,6 +74,7 @@ test('the wait budget is capped by the caller deadline, never extended by it', a
     baseUrl: 'http://127.0.0.1:4317', token: TOKEN, hostId: 'chatgpt',
     waitMs: 60_000, pollMs: 20, probeTimeoutMs: 50,
     deadline: started + 120, now: () => Date.now(),
+    taskExists: async () => true,
     runTask: async () => ({ ok: true, detail: '' }),
     fetchImpl: refused.fetchImpl,
   } as never);

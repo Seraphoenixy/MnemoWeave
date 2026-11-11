@@ -104,16 +104,14 @@ export class MemoryClient {
   }
 
   /**
-   * Browse published memories. `scope`/`projectId` narrow the candidate set before matching,
-   * and `cursor` continues a previous page. Omit `cursor` to start over.
+   * Browse published memories. `cursor` continues a previous page; omit it to start over.
    */
   listMemories(query: {
-    query?: string; limit?: number; scope?: 'all' | 'global' | 'project'; projectId?: string; cursor?: string;
+    query?: string; limit?: number; cursor?: string;
     category?: string; knowledgeType?: string; entity?: string; sort?: 'newest' | 'oldest' | 'importance';
   } = {}): Promise<ClientResponse<{
     items: MemoryListItem[];
     nextCursor?: string;
-    projects?: { projectId: string; count: number }[];
     categories?: { value: string; count: number }[];
     knowledgeTypes?: { value: string; count: number }[];
     entities?: { value: string; count: number }[];
@@ -121,8 +119,6 @@ export class MemoryClient {
     const params = new URLSearchParams();
     if (query.query !== undefined) params.set('query', query.query);
     if (query.limit !== undefined) params.set('limit', String(query.limit));
-    if (query.scope !== undefined) params.set('scope', query.scope);
-    if (query.projectId !== undefined) params.set('projectId', query.projectId);
     if (query.cursor !== undefined) params.set('cursor', query.cursor);
     if (query.category !== undefined) params.set('category', query.category);
     if (query.knowledgeType !== undefined) params.set('knowledgeType', query.knowledgeType);
@@ -151,14 +147,12 @@ export class MemoryClient {
   }
 
   /** Relation graph over the visible catalog: structure only, no bodies. */
-  graph(query: { scope?: 'all' | 'global' | 'project'; projectId?: string; limit?: number } = {}): Promise<ClientResponse<{
+  graph(query: { limit?: number } = {}): Promise<ClientResponse<{
     nodes: Array<Record<string, unknown>>;
     edges: Array<Record<string, unknown>>;
     truncated: boolean;
   }>> {
     const params = new URLSearchParams();
-    if (query.scope !== undefined) params.set('scope', query.scope);
-    if (query.projectId !== undefined) params.set('projectId', query.projectId);
     if (query.limit !== undefined) params.set('limit', String(query.limit));
     const suffix = params.toString() === '' ? '' : `?${params.toString()}`;
     return this.call('GET', `/v1/memories/graph${suffix}`);
@@ -168,7 +162,7 @@ export class MemoryClient {
   createMemory(input: {
     content: string; knowledgeType: string;
     category?: string; importance?: number; tags?: string[]; entities?: string[];
-    scope?: 'global' | 'project'; projectId?: string; reason?: string;
+    reason?: string;
   }): Promise<ClientResponse<{ memoryId: string; revisionId: string; providerMemoryId: string; contentHash: string; entryVersion: number }>> {
     return this.call('POST', '/v1/memories', input);
   }
@@ -176,9 +170,9 @@ export class MemoryClient {
   /**
    * Edit a formal memory.
    *
-   * This records a `local-user` decision, which claims a person made the change, so the Server
-   * requires the operator token. The client sends it when configured; without it the call is
-   * refused rather than downgraded to an unattributable host write.
+   * The write records a `local-user` decision, so the Server requires the caller to identify
+   * itself: the service token plus the Host header. No second credential is involved; the audit
+   * trail attributes the change to the host that sent it.
    */
   editMemory(memoryId: string, input: {
     content: string; reason?: string; entryVersion: number;
@@ -196,13 +190,19 @@ export class MemoryClient {
     return this.call('GET', '/health/ready');
   }
 
-  /** Every rule across projects, or one scope when the operator asks for it. */
-  rules(query: { scope?: 'global' | 'project' | 'all'; projectId?: string } = {}): Promise<ClientResponse<{ items: RuleListItem[] }>> {
-    const params = new URLSearchParams();
-    if (query.scope !== undefined) params.set('scope', query.scope);
-    if (query.projectId !== undefined) params.set('projectId', query.projectId);
-    const suffix = params.toString() === '' ? '' : `?${params.toString()}`;
-    return this.call('GET', `/v1/rules${suffix}`);
+  /** Every rule: rules apply to every session. */
+  rules(): Promise<ClientResponse<{ items: RuleListItem[] }>> {
+    return this.call('GET', '/v1/rules');
+  }
+
+  /** Publish a runtime rule. The Server treats user input as already confirmed. */
+  createRule(input: { body: string; enabled?: boolean }): Promise<ClientResponse<RuleListItem>> {
+    return this.call('POST', '/v1/rules', input);
+  }
+
+  /** Edit a runtime rule; `baseVersion` is the version the caller read before editing. */
+  editRule(ruleId: string, input: { body?: string; enabled?: boolean; baseVersion?: number }): Promise<ClientResponse<RuleListItem>> {
+    return this.call('PATCH', `/v1/rules/${encodeURIComponent(ruleId)}`, input);
   }
 
   /** Project archives; without projectId the Server returns every project. */
@@ -212,6 +212,14 @@ export class MemoryClient {
     if (query.includeWithdrawn !== undefined) params.set('includeWithdrawn', String(query.includeWithdrawn));
     const suffix = params.toString() === '' ? '' : `?${params.toString()}`;
     return this.call('GET', `/v1/archives${suffix}`);
+  }
+
+  createArchive(input: Pick<ArchiveItem, 'projectId' | 'title' | 'body' | 'source' | 'verification' | 'evidence'>): Promise<ClientResponse<ArchiveItem>> {
+    return this.call('POST', '/v1/archives', input);
+  }
+
+  editArchive(entryId: string, input: Pick<ArchiveItem, 'title' | 'body' | 'verification' | 'evidence'> & { baseVersion: number }): Promise<ClientResponse<ArchiveItem>> {
+    return this.call('PATCH', `/v1/archives/${encodeURIComponent(entryId)}`, input);
   }
 
   /** This local Server's sync state with the remote sync Server, per scope. */
@@ -265,6 +273,7 @@ export interface SyncStatus {
 
 export * from './render.ts';
 export * from './ensure-server.ts';
+export * from './registration.ts';
 
 export interface MemoryListItem {
   memoryId: string; revisionId: string; providerMemoryId: string;

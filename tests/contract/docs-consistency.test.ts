@@ -69,7 +69,7 @@ test('the documented tab count matches the tab bar', async () => {
   const panels = read('plugins/dsh-mnemo-weave/src/client/panels.tsx');
   const order = /export const TAB_ORDER: readonly Tab\[\] = \[([^\]]+)\]/.exec(panels)?.[1] ?? '';
   const tabs = order.split(',').map(entry => entry.trim().replace(/^'|'$/g, '')).filter(Boolean);
-  assert.equal(tabs.length, 9, 'the tab bar has nine entries');
+  assert.equal(tabs.length, 6, 'the page has six page-level tabs');
 
   const zh = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十'];
   const text = read('docs/dsh-ui.md');
@@ -80,13 +80,21 @@ test('the documented tab count matches the tab bar', async () => {
   }
 
   // The acceptance checklist must cover every tab. A tab that exists but is never listed is a tab
-  // nobody has agreed how to verify, which is how the entity, explore and graph views shipped
-  // without anyone clicking them.
+  // nobody has agreed how to verify. The formal-memory page's views are checked with their own
+  // labels, because they are tabs of that page rather than page-level entries.
   const i18n = read('plugins/dsh-mnemo-weave/src/client/i18n.ts');
   const acceptance = read('docs/host-acceptance.md');
   for (const tab of tabs) {
     const label = new RegExp(`'tabs\\.${tab}': '([^']+)'`).exec(i18n)?.[1];
     assert.ok(label, `the tab ${tab} has a label`);
     assert.ok(acceptance.includes(label!), `host-acceptance.md must list the "${label}" tab`);
+  }
+  const viewOrder = /export const MEMORY_VIEW_ORDER: readonly MemoryView\[\] = \[([^\]]+)\]/.exec(panels)?.[1] ?? '';
+  const views = viewOrder.split(',').map(entry => entry.trim().replace(/^'|'$/g, '')).filter(Boolean);
+  assert.equal(views.length, 4, 'the formal-memory page has four views');
+  for (const view of views) {
+    const label = new RegExp(`'memory\\.tabs\\.${view}': '([^']+)'`).exec(i18n)?.[1];
+    assert.ok(label, `the view ${view} has a label`);
+    assert.ok(acceptance.includes(label!), `host-acceptance.md must list the "${label}" view`);
   }
 });

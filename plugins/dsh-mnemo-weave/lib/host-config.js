@@ -55,7 +55,7 @@ export const DEFAULT_PREFERENCES = {
   hostId: null,
 };
 
-const TABS = new Set(['overview', 'memories', 'runtime', 'archives', 'sync', 'settings']);
+const TABS = new Set(['overview', 'memories', 'runtime', 'archives', 'skills', 'settings']);
 
 /**
  * Validate a preference patch. A bad value is rejected with a message instead of being clamped
@@ -67,6 +67,9 @@ export function validatePreferences(patch) {
   for (const [key, value] of Object.entries(patch)) {
     switch (key) {
       case 'defaultTab':
+        // Sync moved from a page-level tab into the settings page; an old preference follows it
+        // instead of being rejected (a rejected stored value would reset every preference).
+        if (value === 'sync') { next.defaultTab = 'settings'; break; }
         if (typeof value !== 'string' || !TABS.has(value)) throw new Error('defaultTab must be a known tab');
         next.defaultTab = value;
         break;
