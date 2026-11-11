@@ -179,7 +179,7 @@ test('Amend preserves original input and records both sides; provider binding pr
     assert.equal(t.repo.get(original.id).status, 'rejected'); assert.equal(replacement.status, 'pending_review');
     assert.ok(replacement.reviews.length > 0);
     t.repo.bindProvider('store-A'); assert.throws(() => t.repo.bindProvider('store-B'));
-    const backups = (await readdir(t.root)).filter(name => name.includes('pre-v2'));
+    const backups = (await readdir(t.root)).filter(name => name.includes('.pre-v2.'));
     assert.equal(backups.length, 1);
     const backup = new DatabaseSync(join(t.root, backups[0]!), { readOnly: true });
     try { assert.equal(backup.prepare('PRAGMA user_version').get()!['user_version'], 1); } finally { backup.close(); }

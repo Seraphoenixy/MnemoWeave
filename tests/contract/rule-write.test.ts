@@ -32,11 +32,11 @@ async function harness(): Promise<{ calls: Calls; base: string; close: () => Pro
     rules: async () => ({ items: [] }),
     createRule: async (input: unknown) => {
       calls.created.push(input);
-      return { entryId: RULE_ID, scope: 'global', projectId: null, body: 'rule body', enabled: true, version: 1, withdrawnAt: null };
+      return { entryId: RULE_ID, body: 'rule body', enabled: true, version: 1, withdrawnAt: null };
     },
     editRule: async (ruleId: string, input: unknown) => {
       calls.edited.push({ ruleId, input });
-      return { entryId: ruleId, scope: 'global', projectId: null, body: 'rule body v2', enabled: false, version: 2, withdrawnAt: null };
+      return { entryId: ruleId, body: 'rule body v2', enabled: false, version: 2, withdrawnAt: null };
     },
   } as unknown as Parameters<typeof createHttpServer>[3];
   const server: Server = createHttpServer(app, TOKEN, OPERATOR, client);
@@ -53,10 +53,10 @@ test('the service token plus a Host header may publish and edit a rule', async (
     const created = await fetch(`${base}/v1/rules`, {
       method: 'POST',
       headers: { authorization: `Bearer ${TOKEN}`, 'x-mnemoweave-host': HOST, ...json },
-      body: JSON.stringify({ scope: 'project', projectId: ' alpha ', body: '  提交前必须运行类型检查。  ' }),
+      body: JSON.stringify({ body: '  提交前必须运行类型检查。  ' }),
     });
     assert.equal(created.status, 201);
-    assert.deepEqual(calls.created[0], { scope: 'project', projectId: 'alpha', body: '提交前必须运行类型检查。', enabled: true });
+    assert.deepEqual(calls.created[0], { body: '提交前必须运行类型检查。', enabled: true, importance: 'normal', pinned: false });
 
     const edited = await fetch(`${base}/v1/rules/${RULE_ID}`, {
       method: 'PATCH',
@@ -98,7 +98,7 @@ test('the operator may write without a Host; a wrong token may not, whatever Hos
     const operator = await fetch(`${base}/v1/rules`, {
       method: 'POST',
       headers: { authorization: `Bearer ${OPERATOR}`, ...json },
-      body: JSON.stringify({ scope: 'global', body: '管理端写入' }),
+      body: JSON.stringify({ body: '管理端写入' }),
     });
     assert.equal(operator.status, 201);
     assert.equal(calls.created.length, 1);
@@ -106,7 +106,7 @@ test('the operator may write without a Host; a wrong token may not, whatever Hos
     const unknown = await fetch(`${base}/v1/rules`, {
       method: 'POST',
       headers: { authorization: `Bearer ${'x'.repeat(32)}`, 'x-mnemoweave-host': HOST, ...json },
-      body: JSON.stringify({ scope: 'global', body: '冒名写入' }),
+      body: JSON.stringify({ body: '冒名写入' }),
     });
     assert.equal(unknown.status, 401);
     assert.equal(calls.created.length, 1, 'an unknown token must not reach the store');
@@ -117,9 +117,9 @@ test('an invalid rule request is rejected before the store is touched', async ()
   const { calls, base, close } = await harness();
   try {
     const cases: unknown[] = [
-      { scope: 'project', body: '缺少项目标识' },
-      { scope: 'global', body: '   ' },
-      { scope: 'galaxy', body: '未知范围' },
+      { body: '   ' },
+      {},
+      { body: '合法正文', enabled: 'yes' },
     ];
     for (const payload of cases) {
       const response = await fetch(`${base}/v1/rules`, {

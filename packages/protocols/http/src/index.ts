@@ -1,10 +1,10 @@
-import { ArchiveCreate, ArchiveEdit, type ArchiveEditInput, PinInput, RuntimeContextInput, RuleCreate, RuleEdit } from '../../../core/contracts/src/index.ts';
+import { ArchiveCreate, ArchiveEdit, ArchiveSearchInput, ArchiveStateInput, type ArchiveEditInput, PinInput, RuntimeContextInput, RuleCreate, RuleEdit } from '../../../core/contracts/src/index.ts';
 import type { MemoryCreateRecord, MemoryGraphRecord, MemoryListRecord, MemoryEditRecord, RuntimeContext, PinRecord } from '../../../core/contracts/src/index.ts';
 import { createServer } from 'node:http';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import type { MemoryApplication } from '../../../core/application/src/index.ts';
-import { ExploreInput, MnemoWeaveError, openapi, publicError, statusForCode } from '../../../core/contracts/src/index.ts';
-import type { ArchiveCreateInput, ArchiveListRecord, ArchiveRecordValue, InjectionReportRecord, RuleCreateInput, RuleEditInput, RuleListRecord, RuleRecordValue, StorageStatusRecord, SyncRefreshValue, SyncStatusValue, ViewRecord } from '../../../core/contracts/src/index.ts';
+import { ExploreInput, MnemoWeaveError, openapi, publicError, REQUEST_BODY_MAX_BYTES, statusForCode } from '../../../core/contracts/src/index.ts';
+import type { ArchiveCreateInput, ArchiveHistoryRecordValue, ArchiveListRecord, ArchiveRecordValue, ArchiveSearchInputRecord, ArchiveSearchOutputRecord, ArchiveStateInputRecord, DiagnosticJobRecord, EmbeddingDiagnosticsRecord, IdleReviewPendingRecord, IdleReviewRunRecord, IdleReviewScanRecord, IdleReviewSignalRecord, InjectionReportRecord, RuleArchiveRecordValue, RuleCreateInput, RuleEditInput, RuleListRecord, RuleRecordValue, StorageStatusRecord, SyncRefreshValue, SyncStatusValue, ViewRecord } from '../../../core/contracts/src/index.ts';
 
 /** Liveness identity: hosts require these fields before trusting the address as MnemoWeave. */
 export const LIVE_SERVICE = 'mnemoweave';
@@ -33,8 +33,18 @@ export const httpRoutes: ReadonlyArray<{ method: 'GET' | 'POST' | 'PATCH'; path:
   { method: 'GET', path: '/health/ready' },
   { method: 'GET', path: '/openapi.json' },
   { method: 'GET', path: '/v1/storage' },
+  { method: 'GET', path: '/v1/diagnostics/embeddings' },
+  { method: 'POST', path: '/v1/diagnostics/embeddings/backfill' },
+  { method: 'POST', path: '/v1/idle-review/scan' },
+  { method: 'GET', path: '/v1/idle-review/signals' },
+  { method: 'POST', path: '/v1/idle-review/runs' },
+  { method: 'GET', path: '/v1/idle-review/runs' },
+  { method: 'GET', path: '/v1/idle-review/pending' },
+  { method: 'POST', path: '/v1/idle-review/runs/{runId}/items' },
+  { method: 'POST', path: '/v1/idle-review/runs/{runId}/finish' },
   { method: 'GET', path: '/v1/reviews/due' },
   { method: 'GET', path: '/v1/candidates/{candidateId}' },
+  { method: 'GET', path: '/v1/projects' },
   { method: 'GET', path: '/v1/memories' },
   { method: 'POST', path: '/v1/memories' },
   { method: 'GET', path: '/v1/memories/{memoryId}' },
@@ -60,9 +70,13 @@ export const httpRoutes: ReadonlyArray<{ method: 'GET' | 'POST' | 'PATCH'; path:
   { method: 'GET', path: '/v1/rules' },
   { method: 'POST', path: '/v1/rules' },
   { method: 'PATCH', path: '/v1/rules/{ruleId}' },
+  { method: 'GET', path: '/v1/rules/archive' },
   { method: 'GET', path: '/v1/archives' },
   { method: 'POST', path: '/v1/archives' },
   { method: 'PATCH', path: '/v1/archives/{entryId}' },
+  { method: 'POST', path: '/v1/archives/{entryId}/state' },
+  { method: 'GET', path: '/v1/archives/{entryId}/history' },
+  { method: 'GET', path: '/v1/archives/search' },
 ];
 
 /** Error code → HTTP status mapping from the contract error model. */
@@ -88,14 +102,31 @@ export interface ClientHttpEndpoints {
     entity?: string;
     /** Scan order; a cursor only applies to the order it was issued for. */
     sort?: 'newest' | 'oldest' | 'importance';
+    /** Management-page project filter; general memory is included unless excluded. */
+    projectId?: string | undefined;
+    includeGlobal?: boolean | undefined;
   }): Promise<MemoryListRecord>;
   /** Direct creation: publishes a formal memory without a review round. */
   createMemory?(input: unknown): Promise<MemoryCreateRecord>;
+  /** Official embedding coverage and derived recall mode, for the status page. */
+  embeddingDiagnostics?(hostId: string): Promise<EmbeddingDiagnosticsRecord>;
+  /** Start one vector backfill; a running job is refused rather than queued. */
+  embeddingBackfill?(hostId: string): Promise<DiagnosticJobRecord>;
+  /** Deterministic idle-review signal selection over completed turns. */
+  idleReviewScan?(hostId: string, input: unknown): Promise<IdleReviewScanRecord>;
+  idleReviewSignals?(hostId: string, sessionId: string): Promise<{ items: IdleReviewSignalRecord[] }>;
+  idleReviewRunStart?(hostId: string, input: unknown): Promise<{ run: IdleReviewRunRecord; signals: IdleReviewSignalRecord[] }>;
+  idleReviewRuns?(hostId: string, sessionId: string): Promise<{ items: IdleReviewRunRecord[] }>;
+  idleReviewRunItem?(hostId: string, runId: string, input: unknown): Promise<IdleReviewRunRecord>;
+  idleReviewRunFinish?(hostId: string, runId: string, input: unknown): Promise<IdleReviewRunRecord>;
+  idleReviewPending?(hostId: string): Promise<IdleReviewPendingRecord>;
   /** Relation graph over the visible catalog: structure only, no bodies. */
-  graph?(hostId: string, query: { limit: number }): Promise<MemoryGraphRecord>;
+  graph?(hostId: string, query: { limit: number; projectId?: string; includeGlobal?: boolean }): Promise<MemoryGraphRecord>;
+  /** Project ids this Server knows, for the management page's selector. */
+  projects?(hostId: string): Promise<{ projects: string[] }>;
   /** Provider-ranked search, mapped to memories this machine knows. */
   recall?(hostId: string, input: unknown): Promise<{ memories: Array<{ id: string; content: string; score?: number | undefined; superseded?: boolean | undefined }> }>;
-  explore?(hostId: string, input: { query: string; limit: number; minScore?: number }): Promise<{ query: string; hits: Array<Record<string, unknown>>; unregistered: number; truncated: boolean }>;
+  explore?(hostId: string, input: { query: string; limit: number; minScore?: number; projectId?: string | undefined }): Promise<{ query: string; hits: Array<Record<string, unknown>>; unregistered: number; truncated: boolean }>;
   editMemory(memoryId: string, input: { content: string; reason?: string; entryVersion: number }): Promise<MemoryEditRecord>;
   /** Withdraw a memory: it leaves recall and injection, its history stays readable. */
   withdrawMemory?(memoryId: string, input: { reason: string; entryVersion: number }): Promise<{ memoryId: string; revisionId: string; entryVersion: number; withdrawnAt: string }>;
@@ -105,7 +136,11 @@ export interface ClientHttpEndpoints {
   /** Last injection result, or null before any injection happened. */
   lastInjection?(hostId?: string, sessionId?: string): Promise<InjectionReportRecord | null>;
   rules?(query: Record<string, never>): Promise<RuleListRecord>;
-  archives?(query: { projectId?: string; includeWithdrawn?: boolean }): Promise<ArchiveListRecord>;
+  ruleArchive?(): Promise<{ items: RuleArchiveRecordValue[] }>;
+  archives?(query: { projectId?: string; includeWithdrawn?: boolean; limit?: number; cursor?: string }): Promise<ArchiveListRecord>;
+  searchArchives?(hostId: string, input: ArchiveSearchInputRecord): Promise<ArchiveSearchOutputRecord>;
+  archiveHistory?(entryId: string): Promise<{ entryId: string; items: ArchiveHistoryRecordValue[] }>;
+  editArchiveState?(entryId: string, input: ArchiveStateInputRecord): Promise<ArchiveRecordValue>;
   createRule?(input: RuleCreateInput): Promise<RuleRecordValue>;
   editRule?(ruleId: string, input: RuleEditInput): Promise<RuleRecordValue>;
   editArchive?(entryId: string, input: ArchiveEditInput): Promise<ArchiveRecordValue>;
@@ -155,6 +190,52 @@ export function createHttpServer(app: MemoryApplication, token: string, operator
         if (!storage) throw new MnemoWeaveError('REVIEW_REQUIRED');
         return reply(200, storage());
       }
+      if (req.method === 'GET' && req.url === '/v1/diagnostics/embeddings') {
+        if (!client?.embeddingDiagnostics) throw new MnemoWeaveError('REVIEW_REQUIRED');
+        // Read-only diagnosis: the Host identity is required like any other management read, but
+        // the answer describes the local Provider, not that Host's memories.
+        return reply(200, await client.embeddingDiagnostics(requireHost()));
+      }
+      if (req.method === 'POST' && req.url === '/v1/idle-review/runs') {
+        if (!client?.idleReviewRunStart) throw new MnemoWeaveError('REVIEW_REQUIRED');
+        return reply(201, await client.idleReviewRunStart(requireHost(), await readJson(req)));
+      }
+      if (req.method === 'GET' && req.url !== undefined && (req.url === '/v1/idle-review/runs' || req.url.startsWith('/v1/idle-review/runs?'))) {
+        if (!client?.idleReviewRuns) throw new MnemoWeaveError('REVIEW_REQUIRED');
+        const sessionId = new URL(req.url, 'http://localhost').searchParams.get('sessionId')?.trim() ?? '';
+        if (sessionId === '' || sessionId.length > 256) throw new MnemoWeaveError('INVALID_INPUT');
+        return reply(200, await client.idleReviewRuns(requireHost(), sessionId));
+      }
+      if (req.method === 'GET' && req.url === '/v1/idle-review/pending') {
+        if (!client?.idleReviewPending) throw new MnemoWeaveError('REVIEW_REQUIRED');
+        return reply(200, await client.idleReviewPending(requireHost()));
+      }
+      const idleRunItem = /^\/v1\/idle-review\/runs\/([a-f0-9-]{36})\/items$/.exec(req.url ?? '');
+      if (req.method === 'POST' && idleRunItem) {
+        if (!client?.idleReviewRunItem) throw new MnemoWeaveError('REVIEW_REQUIRED');
+        return reply(200, await client.idleReviewRunItem(requireHost(), idleRunItem[1]!, await readJson(req)));
+      }
+      const idleRunFinish = /^\/v1\/idle-review\/runs\/([a-f0-9-]{36})\/finish$/.exec(req.url ?? '');
+      if (req.method === 'POST' && idleRunFinish) {
+        if (!client?.idleReviewRunFinish) throw new MnemoWeaveError('REVIEW_REQUIRED');
+        return reply(200, await client.idleReviewRunFinish(requireHost(), idleRunFinish[1]!, await readJson(req)));
+      }
+      if (req.method === 'POST' && req.url === '/v1/idle-review/scan') {
+        if (!client?.idleReviewScan) throw new MnemoWeaveError('REVIEW_REQUIRED');
+        return reply(200, await client.idleReviewScan(requireHost(), await readJson(req)));
+      }
+      if (req.method === 'GET' && req.url !== undefined && (req.url === '/v1/idle-review/signals' || req.url.startsWith('/v1/idle-review/signals?'))) {
+        if (!client?.idleReviewSignals) throw new MnemoWeaveError('REVIEW_REQUIRED');
+        const sessionId = new URL(req.url, 'http://localhost').searchParams.get('sessionId')?.trim() ?? '';
+        if (sessionId === '' || sessionId.length > 256) throw new MnemoWeaveError('INVALID_INPUT');
+        return reply(200, await client.idleReviewSignals(requireHost(), sessionId));
+      }
+      if (req.method === 'POST' && req.url === '/v1/diagnostics/embeddings/backfill') {
+        if (!client?.embeddingBackfill) throw new MnemoWeaveError('REVIEW_REQUIRED');
+        // A local maintenance write, like a rule write: the Host identifies the initiator and the
+        // Server owns the single-flight job.
+        return reply(202, await client.embeddingBackfill(requireHost()));
+      }
       if (req.method === 'GET' && req.url === '/v1/sync/status') {
         if (!isOperator) requireHost();
         if (!client?.syncStatus) throw new MnemoWeaveError('REVIEW_REQUIRED');
@@ -181,6 +262,26 @@ export function createHttpServer(app: MemoryApplication, token: string, operator
         if (!isOperator) requireHost();
         return reply(200, await client.rules({}));
       }
+      if (req.method === 'GET' && req.url === '/v1/rules/archive') {
+        if (!isOperator) requireHost();
+        if (!client?.ruleArchive) throw new MnemoWeaveError('REVIEW_REQUIRED');
+        return reply(200, await client.ruleArchive());
+      }
+      if (req.method === 'GET' && req.url !== undefined && (req.url === '/v1/archives/search' || req.url.startsWith('/v1/archives/search?'))) {
+        if (!client?.searchArchives) throw new MnemoWeaveError('REVIEW_REQUIRED');
+        const params = new URL(req.url, 'http://localhost').searchParams;
+        if (!isOperator) requireHost();
+        const limit = params.get('limit');
+        return reply(200, await client.searchArchives(
+          req.headers['x-mnemoweave-host']?.toString() || 'operator',
+          ArchiveSearchInput.parse({
+            projectId: params.get('projectId') ?? '',
+            query: params.get('query') ?? params.get('q') ?? '',
+            ...(limit === null ? {} : { limit: Number(limit) }),
+            includeArchived: params.get('includeArchived') === 'true',
+          }),
+        ));
+      }
       if (req.method === 'POST' && req.url === '/v1/rules') {
         // A rule is a user write like a memory: the caller must identify itself, and no second
         // credential is required on a single-user deployment.
@@ -204,7 +305,13 @@ export function createHttpServer(app: MemoryApplication, token: string, operator
         if (rawWithdrawn !== null && rawWithdrawn !== 'true' && rawWithdrawn !== 'false') throw new MnemoWeaveError('INVALID_INPUT');
         // Without a project the read covers every project; hosts must still identify themselves.
         if (!isOperator) requireHost();
-        return reply(200, await client.archives({ ...(projectId ? { projectId } : {}), includeWithdrawn: rawWithdrawn === 'true' }));
+        const limit = params.get('limit');
+        const cursor = params.get('cursor') ?? undefined;
+        return reply(200, await client.archives({
+          ...(projectId ? { projectId } : {}), includeWithdrawn: rawWithdrawn === 'true',
+          ...(limit === null ? {} : { limit: Number(limit) }),
+          ...(cursor === undefined ? {} : { cursor }),
+        }));
       }
       if (req.method === 'POST' && req.url === '/v1/archives') {
         if (!isOperator) requireHost();
@@ -217,12 +324,29 @@ export function createHttpServer(app: MemoryApplication, token: string, operator
         if (!client?.editArchive) throw new MnemoWeaveError('REVIEW_REQUIRED');
         return reply(200, await client.editArchive(archiveMatch[1]!, ArchiveEdit.parse(await readJson(req))));
       }
+      const archiveStateMatch = /^\/v1\/archives\/([a-f0-9-]{36})\/state$/.exec(req.url ?? '');
+      if (req.method === 'POST' && archiveStateMatch) {
+        if (!isOperator) requireHost();
+        if (!client?.editArchiveState) throw new MnemoWeaveError('REVIEW_REQUIRED');
+        return reply(200, await client.editArchiveState(archiveStateMatch[1]!, ArchiveStateInput.parse(await readJson(req))));
+      }
+      const archiveHistoryMatch = /^\/v1\/archives\/([a-f0-9-]{36})\/history$/.exec(req.url ?? '');
+      if (req.method === 'GET' && archiveHistoryMatch) {
+        if (!isOperator) requireHost();
+        if (!client?.archiveHistory) throw new MnemoWeaveError('REVIEW_REQUIRED');
+        return reply(200, await client.archiveHistory(archiveHistoryMatch[1]!));
+      }
       if (req.method === 'GET' && req.url === '/v1/reviews/due') {
         if (!isOperator) throw new MnemoWeaveError('UNAUTHORIZED');
         return reply(200, await app.reviewDue());
       }
       const candidateMatch = /^\/v1\/candidates\/([a-f0-9-]+)$/.exec(req.url ?? '');
       if (req.method === 'GET' && candidateMatch) return reply(200, await app.candidateStatus({ candidateId: candidateMatch[1] }));
+      if (req.method === 'GET' && req.url === '/v1/projects') {
+        if (!client?.projects) throw new MnemoWeaveError('REVIEW_REQUIRED');
+        // Read-only: any identified Host may list the projects so the page can offer a selector.
+        return reply(200, await client.projects(requireHost()));
+      }
       if (req.method === 'GET' && req.url !== undefined && (req.url === '/v1/memories' || req.url.startsWith('/v1/memories?'))) {
         if (!client) throw new MnemoWeaveError('REVIEW_REQUIRED');
         const params = new URL(req.url, 'http://localhost').searchParams;
@@ -245,6 +369,12 @@ export function createHttpServer(app: MemoryApplication, token: string, operator
         const SORTS = ['newest', 'oldest', 'importance'] as const;
         const rawSort = params.get('sort')?.trim() || undefined;
         if (rawSort !== undefined && !(SORTS as readonly string[]).includes(rawSort)) throw new MnemoWeaveError('INVALID_INPUT');
+        // The management page's project is a view filter, not the session scope. It selects one
+        // owner; `includeGlobal=false` hides general memory from that view.
+        const rawProject = params.get('projectId')?.trim() || undefined;
+        if (rawProject !== undefined && rawProject.length > 200) throw new MnemoWeaveError('INVALID_INPUT');
+        const rawIncludeGlobal = params.get('includeGlobal');
+        if (rawIncludeGlobal !== null && rawIncludeGlobal !== 'true' && rawIncludeGlobal !== 'false') throw new MnemoWeaveError('INVALID_INPUT');
         return reply(200, await client.memories({
           ...(query === undefined ? {} : { query }), limit,
           ...(cursor === undefined ? {} : { cursor }),
@@ -252,6 +382,8 @@ export function createHttpServer(app: MemoryApplication, token: string, operator
           ...(rawKnowledge === undefined ? {} : { knowledgeType: rawKnowledge as (typeof KNOWLEDGE)[number] }),
           ...(rawEntity === undefined ? {} : { entity: rawEntity }),
           ...(rawSort === undefined ? {} : { sort: rawSort as (typeof SORTS)[number] }),
+          ...(rawProject === undefined ? {} : { projectId: rawProject }),
+          ...(rawIncludeGlobal === null ? {} : { includeGlobal: rawIncludeGlobal === 'true' }),
         }));
       }
       const memoryMatch = /^\/v1\/memories\/([a-f0-9-]+)(?:\?revisionId=([a-f0-9-]+))?$/.exec(req.url ?? '');
@@ -262,7 +394,15 @@ export function createHttpServer(app: MemoryApplication, token: string, operator
         const rawGraphLimit = params.get('limit');
         const graphLimit = rawGraphLimit === null ? 200 : Number(rawGraphLimit);
         if (!Number.isInteger(graphLimit) || graphLimit < 1 || graphLimit > 500) throw new MnemoWeaveError('INVALID_INPUT');
-        return reply(200, await client.graph(requireHost(), { limit: graphLimit }));
+        const rawGraphProject = params.get('projectId')?.trim() || undefined;
+        if (rawGraphProject !== undefined && rawGraphProject.length > 200) throw new MnemoWeaveError('INVALID_INPUT');
+        const rawGraphGlobal = params.get('includeGlobal');
+        if (rawGraphGlobal !== null && rawGraphGlobal !== 'true' && rawGraphGlobal !== 'false') throw new MnemoWeaveError('INVALID_INPUT');
+        return reply(200, await client.graph(requireHost(), {
+          limit: graphLimit,
+          ...(rawGraphProject === undefined ? {} : { projectId: rawGraphProject }),
+          ...(rawGraphGlobal === null ? {} : { includeGlobal: rawGraphGlobal === 'true' }),
+        }));
       }
       if (req.method === 'POST' && req.url === '/v1/memories') {
         if (!client?.createMemory) throw new MnemoWeaveError('REVIEW_REQUIRED');
@@ -359,7 +499,7 @@ async function readJson(req: import('node:http').IncomingMessage): Promise<unkno
   let size = 0;
   for await (const chunk of req) {
     const bytes = Buffer.from(chunk as Uint8Array); size += bytes.length;
-    if (size > 256000) throw new MnemoWeaveError('INVALID_INPUT');
+    if (size > REQUEST_BODY_MAX_BYTES) throw new MnemoWeaveError('INVALID_INPUT');
     chunks.push(bytes);
   }
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw new MnemoWeaveError('INVALID_INPUT'); }

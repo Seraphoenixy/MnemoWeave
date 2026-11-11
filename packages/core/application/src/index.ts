@@ -1,13 +1,14 @@
-import { mayRead, assertGrant } from './access.ts';
+import { mayRead, mayReadMemory, assertGrant, assertProjectReadable } from './access.ts';
 
 export * from './sync.ts';
 export * from './sync-apply.ts';
 export * from './rules.ts';
+export * from './idle-review.ts';
 export * from './local-write.ts';
 import type { ReadGrantRecord } from '../../contracts/src/index.ts';
-import { MnemoWeaveError, RecallInput, RecallOutput, ProviderHealth, RememberInput, CandidateIdInput, HumanReviewInput, RetryInput, MemoryIdInput, PublishedMemoryOutput,ConflictResolutionInput,ConflictIdInput,CancelVersionInput, ReviewCompleteInput, ReviewDueItem, ReviewDueOutput } from '../../contracts/src/index.ts';
+import { MnemoWeaveError, RecallInput, RecallOutput, ProviderHealth, RememberInput, CandidateIdInput, HumanReviewInput, RetryInput, MemoryIdInput, PublishedMemoryOutput,ConflictResolutionInput,ConflictIdInput,CancelVersionInput, ReviewCompleteInput, ReviewDueItem, ReviewDueOutput, EmbeddingDiagnostics } from '../../contracts/src/index.ts';
 import type {ConflictResolutionRequest} from '../../contracts/src/index.ts';
-import type { ReviewDueItemRecord } from '../../contracts/src/index.ts';
+import type { EmbeddingDiagnosticsRecord, ProviderEmbeddingStatusRecord, ReviewDueItemRecord } from '../../contracts/src/index.ts';
 import { createHash } from 'node:crypto';
 import type { MemoryCatalogReader } from './catalog-ports.ts';
 import type { WorkflowRepository } from './workflow-ports.ts';
@@ -17,6 +18,10 @@ import type { CandidateRecord, RememberRequest } from '../../contracts/src/index
 export interface MemoryProvider {
   health(): Promise<Health>;
   recall(request: RecallRequest): Promise<RecallResult>;
+  /** Official embedding coverage report; absent when the Provider has no such interface. */
+  embeddingStatus?(): Promise<ProviderEmbeddingStatusRecord>;
+  /** Backfill missing vectors; absent when the Provider cannot do it. */
+  embedAll?(): Promise<{ error: string | null }>;
   readMemory?(id: string): Promise<{ id: string; content: string }>;
   /**
    * Read several bodies in one call. Optional so a test provider can omit it; the list view uses
@@ -49,6 +54,41 @@ export class MemoryApplication {
   /** Publication metadata reader for View assembly; undefined without candidate storage. */
   get catalogReader(): MemoryCatalogReader | undefined { return this.candidates?.catalog; }
   async health(): Promise<Health> { return ProviderHealth.parse(await this.provider.health()); }
+
+  /**
+   * Recall diagnosis: what the Provider reports about its embedding backend, interpreted into a
+   * recall mode. The Server does not probe the embedding service itself; it only reports the
+   * Provider's own answer and says `unknown` when the interface cannot answer.
+   */
+  async embeddingDiagnostics(grant?: ReadGrantRecord): Promise<EmbeddingDiagnosticsRecord> {
+    if (grant) { assertGrant(grant); if (!mayRead(grant)) throw new MnemoWeaveError('UNAUTHORIZED'); }
+    const checkedAt = new Date().toISOString();
+    const unknown = (lastError: string) => EmbeddingDiagnostics.parse({
+      provider: 'mnemon', model: 'unknown', protocol: 'unknown', serviceAvailable: false, modelAvailable: false,
+      embedded: 0, total: 0, coverage: 0, recallMode: 'unknown', degraded: true, lastError, checkedAt,
+    });
+    if (!this.provider.embeddingStatus) return unknown('the Provider does not expose embedding status');
+    let status: ProviderEmbeddingStatusRecord;
+    try {
+      status = await this.provider.embeddingStatus();
+    } catch (error) {
+      return unknown(error instanceof MnemoWeaveError ? error.code : 'PROVIDER_UNAVAILABLE');
+    }
+    const coverage = status.total === 0 ? 0 : Math.min(1, status.embedded / status.total);
+    const semantic = status.serviceAvailable && status.modelAvailable && status.embedded > 0;
+    return EmbeddingDiagnostics.parse({
+      provider: 'mnemon', model: status.model, protocol: status.protocol,
+      serviceAvailable: status.serviceAvailable, modelAvailable: status.modelAvailable,
+      embedded: status.embedded, total: status.total, coverage,
+      recallMode: semantic ? 'semantic' : 'keyword',
+      degraded: !status.serviceAvailable || !status.modelAvailable || status.embedded < status.total,
+      lastError: !status.serviceAvailable ? 'embedding service unreachable'
+        : !status.modelAvailable ? 'embedding model unavailable'
+          : status.embedded < status.total ? 'some insights have no vector yet'
+            : null,
+      checkedAt,
+    });
+  }
   async recall(input: unknown, grant?: ReadGrantRecord): Promise<RecallResult> {
     const { unregistered: _unregistered, ...result } = await this.recallDetailed(input, grant);
     return result;
@@ -62,12 +102,27 @@ export class MemoryApplication {
   async recallDetailed(input: unknown, grant?: ReadGrantRecord): Promise<RecallResult & { unregistered: string[] }> {
     if (grant) assertGrant(grant);
     const request = RecallInput.parse(input);
+    if (grant) assertProjectReadable(grant, request.projectId);
+    /**
+     * General knowledge plus the requested project. A project memory is never returned to a
+     * session working elsewhere, even when the Provider ranked it highly. A catalogue that does
+     * not record attribution (older test doubles) is treated as general-only.
+     */
+    const ownerOf = (logicalId: string): string | null => this.candidates?.catalog?.memoryProject?.(logicalId) ?? null;
+    const inScope = (logicalId: string): boolean => {
+      const owner = ownerOf(logicalId);
+      if (owner === null) return true;
+      return owner === request.projectId;
+    };
     if (this.candidates?.catalog) {
       // Filter-first pagination: expand the Provider window until the requested page is
       // filled from the visible set or the Provider list is exhausted, so a large visible
       // pool can no longer push matching results out of a fixed 100-record fetch.
       const catalog = this.candidates.catalog;
-      const visible = new Set(catalog.visibleProviderIds().filter(id => !grant || catalog.currentMemoryIds(id).some(logicalId => mayRead(grant))));
+      const visible = new Set(catalog.visibleProviderIds().filter(id => !grant || catalog.currentMemoryIds(id).some(logicalId => {
+        if (!mayReadMemory(grant, ownerOf(logicalId))) return false;
+        return inScope(logicalId);
+      })));
       const unmatched = new Set<string>();
       const page = 100;
       const maxWindow = 1000;
@@ -88,7 +143,15 @@ export class MemoryApplication {
         window += page;
       }
       if (grant) assertGrant(grant);
-      const authorized = selected.filter(memory => !grant || catalog.currentMemoryIds(memory.id).some(id => { const descriptor = catalog.get(id); return descriptor.state === 'active' && mayRead(grant); }));
+      const authorized = selected.flatMap((memory) => {
+        const logicalIds = catalog.currentMemoryIds(memory.id);
+        const readable = grant
+          ? logicalIds.filter(id => catalog.get(id).state === 'active' && mayReadMemory(grant, ownerOf(id)))
+          : logicalIds;
+        const chosen = readable.find(id => inScope(id));
+        if (chosen === undefined) return [];
+        return [{ ...memory, projectId: ownerOf(chosen) }];
+      });
       return { ...RecallOutput.parse({ memories: authorized, complete: exhausted }), unregistered: [...unmatched] };
     }
     if (grant) throw new MnemoWeaveError('REVIEW_REQUIRED');
@@ -98,6 +161,8 @@ export class MemoryApplication {
     if (!this.candidates) throw new MnemoWeaveError('REVIEW_REQUIRED');
     const request = RememberInput.parse(input);
     if (grant && !mayRead(grant)) throw new MnemoWeaveError('UNAUTHORIZED');
+    // Attribution is a write into that project's scope, so the writing Host must hold it.
+    if (grant) assertProjectReadable(grant, request.projectId ?? undefined);
     if (grant && request.change) { if (!this.candidates.catalog?.get(request.change.targetMemoryId) || !mayRead(grant)) throw new MnemoWeaveError('UNAUTHORIZED'); }
     return this.candidates.submit(request);
   }
@@ -111,7 +176,7 @@ export class MemoryApplication {
     if (!this.candidates?.catalog || !this.provider.readMemory) throw new MnemoWeaveError('REVIEW_REQUIRED');
     const request = MemoryIdInput.parse(input);
     const descriptor = this.candidates.catalog.get(request.memoryId);
-    if (grant) { assertGrant(grant); if (!mayRead(grant)) throw new MnemoWeaveError('UNAUTHORIZED'); }
+    if (grant) { assertGrant(grant); if (!mayReadMemory(grant, descriptor.projectId ?? null)) throw new MnemoWeaveError('UNAUTHORIZED'); }
     const revisionId = request.revisionId ?? descriptor.currentRevisionId;
     const revision = descriptor.revisions.find(value => value.id === revisionId);
     if (!revision) throw new MnemoWeaveError('NOT_FOUND');

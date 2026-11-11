@@ -21,6 +21,7 @@ export class SqliteRuntime implements RuntimeRepository {
     this.db.prepare('INSERT OR IGNORE INTO runtime_projects VALUES(?)').run(projectId);
   }
   registered(projectId: string): boolean { return !!this.db.prepare('SELECT id FROM runtime_projects WHERE id=?').get(projectId); }
+  list(): string[] { return this.db.prepare('SELECT id FROM runtime_projects ORDER BY id').all().map(row => String(row['id'])); }
   pin(input: PinRecord): void {
     const pin = PinInput.parse(input);
     if (pin.projectId && !this.registered(pin.projectId)) throw new MnemoWeaveError('INVALID_INPUT');

@@ -48,7 +48,7 @@ test('every endpoint the page uses answers through the Host channel', async () =
   for (const [index, shape] of shapes.entries()) {
     const request = RememberInput.parse({
       idempotencyKey: `page-smoke-${index}`, content: shape.content, knowledgeType: 'Practice', tags: shape.meta.tags ?? [],
-      ...(shape.scope === 'global' ? { scope: 'global' } : { scope: 'project', projectId: shape.projectId }),
+      ...(shape.scope === 'global' ? {} : { projectId: shape.projectId }),
       provenance: {
         source: 'local-user', sourceReference: `page-smoke:${index}`, evidence: ['fixture'], verificationStatus: 'verified',
         confidence: 1, applicability: 'global', limitations: '无', lastVerified: '2026-11-10T00:00:00.000Z',
@@ -130,7 +130,7 @@ test('every endpoint the page uses answers through the Host channel', async () =
     // Graph tab.
     const graph = await ok('graph', { limit: 100 }) as { nodes: unknown[] };
     assert.equal(graph.nodes.length, 3);
-    await ok('graph', { scope: 'project', projectId: 'alpha', limit: 100 });
+    await ok('graph', { projectId: 'alpha', limit: 100 });
 
     // Sync tab: nothing configured here, so the page must get a definite answer either way.
     const sync = await rpc('sync', {});

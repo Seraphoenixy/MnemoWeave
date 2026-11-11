@@ -56,8 +56,7 @@ test('a memory written on one machine is editable on the other and returns updat
   const seed = new SqliteCandidates(resolve(join(stateA, 'governance.db')));
   const seedProvider = new MnemonCliProvider({ binary: mnemonBinary(), dataDir: providerA, store: 'machine_a' });
   const request = RememberInput.parse({
-    idempotencyKey: `seed-${randomUUID()}`, content: '机器 A 写入的初始正文。', knowledgeType: 'Practice', tags: [],
-    scope: 'project', projectId: 'alpha',
+    idempotencyKey: `seed-${randomUUID()}`, content: '机器 A 写入的初始正文。', knowledgeType: 'Practice', tags: [], projectId: 'alpha',
     provenance: {
       source: 'local-user', sourceReference: 'e2e:two-machine', evidence: ['seed'], verificationStatus: 'verified',
       confidence: 1, applicability: 'alpha', limitations: '无（验收固定值）', lastVerified: '2026-11-10T08:00:00.000Z',

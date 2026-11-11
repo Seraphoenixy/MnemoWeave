@@ -39,7 +39,7 @@ async function harness(): Promise<{
   const seed = new SqliteCandidates(resolve(join(root, 'state', 'governance.db')));
   const seedProvider = new MnemonCliProvider({ binary: mnemonBinary(), dataDir: resolve(join(root, 'provider')), store: 'race' });
   const request = RememberInput.parse({
-    idempotencyKey: `race-${randomUUID()}`, content: '并发写入的初始正文。', knowledgeType: 'Practice', tags: [], scope: 'global',
+    idempotencyKey: `race-${randomUUID()}`, content: '并发写入的初始正文。', knowledgeType: 'Practice', tags: [],
     provenance: {
       source: 'local-user', sourceReference: 'race:fixture', evidence: ['race'], verificationStatus: 'verified',
       confidence: 1, applicability: 'global', limitations: '无（验收固定值）', lastVerified: '2026-11-10T00:00:00.000Z',

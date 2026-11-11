@@ -70,6 +70,8 @@ export interface UiMemorySummary {
   importance?: number;
   tags?: string[];
   entities?: string[];
+  /** Owning project; null is general knowledge. */
+  projectId: string | null;
 }
 
 /** Orders the list can be scanned in. */
@@ -87,6 +89,8 @@ export interface UiMemoryList {
   knowledgeTypes?: Array<{ value: string; count: number }>;
   /** Entities named by current revisions, in their recorded spelling. */
   entities?: Array<{ value: string; count: number }>;
+  /** Owning projects present in the set; null is general knowledge. */
+  projects?: Array<{ projectId: string | null; count: number }>;
 }
 
 export interface UiMemoryRevision {
@@ -150,6 +154,8 @@ export interface UiMemoryDetail {
   providerMemoryId: string;
   applicability: string;
   state: 'active' | 'superseded' | 'unverified';
+  /** Owning project; null is general knowledge. */
+  projectId: string | null;
   content: string;
   publishedAt: string;
   revisions: UiMemoryRevision[];
@@ -167,6 +173,7 @@ export interface UiExploreHit {
   content: string;
   score: number;
   publishedAt: string;
+  projectId: string | null;
   category?: string;
   knowledgeType?: string;
   tags?: string[];
@@ -178,6 +185,7 @@ export interface UiGraphNode {
   /** A supersede edge points at a retired memory, so those are nodes too. */
   state: 'active' | 'superseded' | 'unverified';
   publishedAt: string;
+  projectId: string | null;
   category?: string;
   knowledgeType?: string;
   importance?: number;
@@ -284,30 +292,155 @@ export interface UiInjection {
   sessionId: string;
   rulesInjected: number;
   rulesOmitted: 'budget_exceeded' | null;
+  rulesOmittedCount?: number;
+  rulesOmissionReason?: string;
   memoriesInjected: number;
   usedTokens: number;
   createdAt: string;
 }
 
 /** One runtime rule: `RuleRecord` from the Server contract. */
+export interface UiEmbeddingDiagnostics {
+  provider: 'mnemon';
+  model: string;
+  protocol: string;
+  serviceAvailable: boolean;
+  modelAvailable: boolean;
+  embedded: number;
+  total: number;
+  coverage: number;
+  recallMode: 'semantic' | 'keyword' | 'unknown';
+  degraded: boolean;
+  lastError: string | null;
+  checkedAt: string;
+  /** Latest vector backfill job, when one has ever run. */
+  backfill?: UiDiagnosticJob | null;
+}
+
+export interface UiIdleReviewSignal {
+  id: string; sessionId: string; turnId: number; eventId: string; text: string;
+  projectId: string | null; reason: 'correction' | 'standing-instruction' | 'durable-fact'; createdAt: string;
+}
+
+export interface UiIdleReviewItem {
+  index: number; action: 'create' | 'edit' | 'archive' | 'unarchive' | 'withdraw' | 'skip';
+  state: 'applied' | 'failed' | 'skipped'; targetId?: string; detail?: Record<string, unknown>;
+}
+
+export interface UiSkillEntry {
+  name: string; description: string; path: string; root: string;
+  scope: 'project' | 'user'; hash: string; bodyBytes: number; shadowedBy?: string;
+}
+
+export interface UiSkillReport {
+  items: UiSkillEntry[];
+  invalid: Array<{ path: string; reason: string }>;
+  roots: string[];
+}
+
+export interface UiSkillVersion {
+  id: string; hash: string; savedAt: string; source: 'adopt' | 'restore';
+}
+
+export interface UiSkillWrite { hash: string; version: UiSkillVersion }
+
+export interface UiSkillCreateResult { path: string; hash: string }
+
+export interface UiSkillsPreferences { autoAdopt: boolean }
+
+export interface UiAdoptionResult { adopted: boolean; reason: string; hash?: string }
+
+export interface UiSkillDraft {
+  id: string;
+  /** The workspace the review ran in; a draft keeps pointing at it after switching projects. */
+  workspace: string;
+  /** The skill file the draft was reviewed against, or null for a new skill. */
+  skillPath: string | null;
+  createdAt: string;
+  reason: string;
+  evidence: Array<{ step: number; role: 'user' | 'assistant'; text: string }>;
+  baseline: string;
+  candidate: string;
+  scenario: string;
+  checks: string[];
+  report: SkillBacktestResult | null;
+  backtestError: string | null;
+  adoptedAt: string | null;
+  dismissedAt: string | null;
+}
+
+export interface UiSkillText { text: string; hash: string }
+
+export interface UiTrashEntry {
+  id: string; name: string; originalPath: string; root: string; removedAt: string;
+}
+
+export interface UiOrganizeItem {
+  index: number;
+  action: 'create' | 'edit' | 'withdraw' | 'skip';
+  state: 'applied' | 'failed' | 'skipped';
+  targetId?: string;
+  detail?: Record<string, unknown>;
+}
+
+export interface UiOrganizeResult { items: UiOrganizeItem[] }
+
+export interface UiIdleReviewRun {  id: string; sessionId: string; state: 'running' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted';
+  attempt: number; startedAt: string; finishedAt: string | null; error: string | null; items: UiIdleReviewItem[];
+}
+
+export interface UiDiagnosticJob {  state: 'running' | 'succeeded' | 'failed' | 'interrupted';
+  startedAt: string;
+  finishedAt: string | null;
+  detail?: Record<string, unknown>;
+}
+
 export interface UiRule {
   entryId: string;
   body: string;
   enabled: boolean;
   version: number;
   withdrawnAt: string | null;
+  importance: 'critical' | 'normal' | 'low';
+  pinned: boolean;
+  bodyBytes: number;
+}
+
+export interface UiRuleUsage {
+  limitBytes: number;
+  itemMaxBytes: number;
+  targetBytes: number;
+  usedBytes: number;
+  entryCount: number;
+  exceeded: boolean;
+  overByBytes: number;
+}
+
+export interface UiRuleArchive {
+  archiveId: string;
+  ruleId: string;
+  ruleVersion: number;
+  body: string;
+  importance: 'critical' | 'normal' | 'low';
+  pinned: boolean;
+  archivedAt: string;
+  reason: 'capacity' | 'manual';
 }
 
 /** `POST /v1/rules`: publish a runtime rule directly, without a review round. */
 export interface UiRuleCreateInput {
   body: string;
   enabled?: boolean;
+  importance?: 'critical' | 'normal' | 'low';
+  pinned?: boolean;
 }
 
 /** `PATCH /v1/rules/{ruleId}`: body and enabled state; `baseVersion` refuses a stale write. */
 export interface UiRuleEditInput {
   body?: string;
   enabled?: boolean;
+  importance?: 'critical' | 'normal' | 'low';
+  pinned?: boolean;
   baseVersion?: number;
 }
 
@@ -324,6 +457,55 @@ export interface UiArchive {
   evidence: string;
   version: number;
   withdrawnAt: string | null;
+  state: 'active' | 'archived';
+  archivedAt: string | null;
+  bodyBytes: number;
+}
+
+export interface UiArchiveCapacity {
+  projectId: string;
+  activeBytes: number;
+  limitBytes: number;
+  activeCount: number;
+  archivedCount: number;
+  exceeded: boolean;
+}
+
+export interface UiArchiveSearchHit {
+  entryId: string;
+  projectId: string;
+  title: string;
+  state: 'active' | 'archived';
+  version: number;
+  verification: 'verified' | 'open' | 'refuted';
+  excerpt: string;
+  excerptBytes: number;
+  excerptTruncated: boolean;
+  bodyBytes: number;
+  score: number;
+}
+
+export interface UiArchiveSearch {
+  query: string;
+  total: number;
+  results: UiArchiveSearchHit[];
+  totalBytes: number;
+  truncated: boolean;
+  excerptLimitBytes: number;
+  totalLimitBytes: number;
+  callsLimit: number;
+}
+
+/** One stored version of an archive; the body is complete, not an excerpt. */
+export interface UiArchiveHistory {
+  revisionId: string;
+  entryId: string;
+  projectId: string;
+  version: number;
+  title: string;
+  body: string;
+  state: 'active' | 'archived';
+  recordedAt: string;
 }
 
 /** One scope of this local Server's sync relationship with the remote sync Server. */
@@ -439,7 +621,7 @@ export interface SkillBacktestResult {
 export type UiSaveResult = { kind: 'formal' | 'runtime' | 'archive'; entryId: string }
   | { kind: 'review'; reason: string } | { kind: 'duplicate' };
 
-export type RpcEndpoint = 'status' | 'memories' | 'memory' | 'create' | 'organizeMemory' | 'skillBacktest' | 'skillConversations' | 'skillReview' | 'edit' | 'withdraw' | 'explore' | 'graph' | 'graph' | 'config' | 'injection' | 'rules' | 'createRule' | 'editRule' | 'saveArchive' | 'archives' | 'sync' | 'syncRefresh' | 'registerTask'
+export type RpcEndpoint = 'status' | 'memories' | 'memory' | 'create' | 'organizeMemory' | 'skillBacktest' | 'skillConversations' | 'skillReview' | 'edit' | 'withdraw' | 'explore' | 'graph' | 'graph' | 'config' | 'injection' | 'rules' | 'ruleUsage' | 'ruleArchive' | 'createRule' | 'editRule' | 'saveArchive' | 'archives' | 'archiveCapacities' | 'archiveSearch' | 'archiveHistory' | 'setArchiveState' | 'sync' | 'syncRefresh' | 'registerTask'
   | 'settings' | 'saveInterface' | 'saveConnection' | 'saveInjection' | 'saveAutoStart' | 'testConnection' | 'testWake';
 
 export interface MemoriesRequest {
@@ -454,6 +636,10 @@ export interface MemoriesRequest {
   entity?: string;
   /** Scan order; a cursor only applies to the order it was issued for. */
   sort?: ListSort;
+  /** Management-page project filter; the conversation's project is not affected. */
+  projectId?: string;
+  /** Keep general memory in a project view; false with no projectId means general only. */
+  includeGlobal?: boolean;
 }
 export interface MemoryRequest {
   memoryId: string;

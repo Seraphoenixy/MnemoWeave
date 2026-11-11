@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { ARCHIVE_BODY_MAX_BYTES } from './capacity.ts';
 
 /** A scope is either the cross-project `global` scope or one project's scope. */
 export const SyncScope = z.string().trim().regex(/^(?:global|project:[A-Za-z0-9._-]{1,200})$/, 'Scope must be global or project:<id>');
@@ -14,21 +15,28 @@ export const SyncOperation = z.enum(['create', 'update', 'delete']);
  */
 export const SyncContent = z.object({
   format: z.enum(['plain', 'enc-v1']),
-  data: z.string().min(1).max(20000),
+  data: z.string().min(1).max(ARCHIVE_BODY_MAX_BYTES),
   contentHash: z.string().regex(/^[a-f0-9]{64}$/),
-  byteLength: z.number().int().positive().max(20000),
+  byteLength: z.number().int().positive().max(ARCHIVE_BODY_MAX_BYTES),
 }).strict().refine(
-  (value) => value.format !== 'plain' || value.byteLength <= 8000,
-  'Plain body must be at most 8000 UTF-8 bytes',
+  (value) => value.format !== 'plain' || value.byteLength <= ARCHIVE_BODY_MAX_BYTES,
+  `Plain body must be at most ${ARCHIVE_BODY_MAX_BYTES} UTF-8 bytes`,
 );
 
-export const SyncRuntimePayload = z.object({ enabled: z.boolean() }).strict();
+export const SyncRuntimePayload = z.object({
+  enabled: z.boolean(),
+  /** Old payloads carry neither field; both default to the pre-v16 classification. */
+  importance: z.enum(['critical', 'normal', 'low']).optional(),
+  pinned: z.boolean().optional(),
+}).strict();
 export const SyncArchivePayload = z.object({
   title: z.string().trim().min(1).max(200),
   source: z.enum(['session', 'tool', 'user']),
   verification: z.enum(['verified', 'open', 'refuted']),
   evidence: z.string().max(2000),
   tags: z.array(z.string().trim().min(1).max(100)).max(20),
+  state: z.enum(['active', 'archived']).optional(),
+  archivedAt: z.iso.datetime().nullable().optional(),
 }).strict();
 export const SyncRevisionRef = z.object({
   entryId: z.uuid(),

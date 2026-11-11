@@ -1,6 +1,6 @@
 # MnemoWeave
 
-MnemoWeave 为 DSH、ChatGPT 桌面和 ZCode 提供本机记忆服务。Mnemon 保存和检索正式正文，MnemoWeave 管理候选、发布、版本和同步。启用远端同步后，共享变更由远端确认，宿主继续在本机注入和召回。
+MnemoWeave 为 DSH、ChatGPT 桌面和 ZCode 提供本机记忆服务。Mnemon 保存和检索正式记忆正文，MnemoWeave 管理候选、发布、版本和同步。启用远端同步后，共享变更由远端确认，宿主继续在本机注入和召回。正式记忆共享和写入任务 Agent 的目标契约见 [架构](docs/architecture.md)，实现进度见 [当前状态](docs/status.md)。
 
 ## 开发与验证
 
@@ -38,7 +38,7 @@ $env:MNEMOWEAVE_OPERATOR_TOKEN = [Convert]::ToHexString([Security.Cryptography.R
 node dist/apps/server/src/main.js
 ```
 
-默认地址为 `http://127.0.0.1:4317`。将服务令牌配置给宿主，operator 令牌仅供管理端。stdio MCP 入口为 `dist/apps/server/src/mcp-main.js`。治理库当前 schema v14，迁移和恢复见 [实现文档](docs/implementation.md)。
+默认地址为 `http://127.0.0.1:4317`。将服务令牌配置给宿主，operator 令牌仅供管理端。stdio MCP 入口为 `dist/apps/server/src/mcp-main.js`。治理库当前 schema v21，迁移和恢复见 [实现文档](docs/implementation.md)。
 
 ## 发布与安装
 

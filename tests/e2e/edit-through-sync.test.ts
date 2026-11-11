@@ -38,8 +38,7 @@ test('a user edit is confirmed remotely, applied locally and published once', as
   const seedRepo = new SqliteCandidates(resolve(join(dir, 'state', 'governance.db')));
   const seedProvider = new MnemonCliProvider({ binary: mnemonBinary(), dataDir: resolve(join(dir, 'provider')), store: 'edit_sync' });
   const request = RememberInput.parse({
-    idempotencyKey: `seed-${randomUUID()}`, content: '初始正文：发布路径写入。', knowledgeType: 'Practice', tags: [],
-    scope: 'project', projectId: 'alpha',
+    idempotencyKey: `seed-${randomUUID()}`, content: '初始正文：发布路径写入。', knowledgeType: 'Practice', tags: [], projectId: 'alpha',
     provenance: {
       source: 'local-user', sourceReference: 'e2e:seed', evidence: ['seed'], verificationStatus: 'verified',
       confidence: 1, applicability: 'alpha', limitations: '无（验收固定值）', lastVerified: '2026-11-10T07:00:00.000Z',

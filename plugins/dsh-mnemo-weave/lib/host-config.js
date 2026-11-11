@@ -44,9 +44,7 @@ export function settingsPath(env = process.env) {
 /** Preferences this page owns. Anything unknown is dropped rather than carried along. */
 export const DEFAULT_PREFERENCES = {
   defaultTab: 'overview',
-  defaultScope: 'all',
   pageSize: DEFAULT_PAGE_SIZE,
-  projectId: null,
   injectTimeoutMs: DEFAULT_INJECT_TIMEOUT_MS,
   autoStart: true,
   // A connection the user saved from the settings page. Stored here rather than kept in the page
@@ -74,18 +72,15 @@ export function validatePreferences(patch) {
         next.defaultTab = value;
         break;
       case 'defaultScope':
-        // `all`, `global`, or `project:<id>`: the same shape the list filter uses.
-        if (typeof value !== 'string' || value === '') throw new Error('defaultScope must be a non-empty string');
-        if (value !== 'all' && value !== 'global' && !value.startsWith('project:')) throw new Error('defaultScope must be all, global or project:<id>');
-        next.defaultScope = value;
+        // Retired: the memory list has no scope filter. A stored value is dropped instead of
+        // rejected, so an existing preference file still loads.
         break;
       case 'pageSize':
         if (typeof value !== 'number' || !Number.isInteger(value) || value < 5 || value > 200) throw new Error('pageSize must be an integer between 5 and 200');
         next.pageSize = value;
         break;
       case 'projectId':
-        if (value !== null && (typeof value !== 'string' || value.trim() === '' || value.length > 200)) throw new Error('projectId must be null or a non-empty string of at most 200 characters');
-        next.projectId = value === null ? null : value.trim();
+        // Retired with the injection project; see `defaultScope` above.
         break;
       case 'injectTimeoutMs':
         // The injection budget is part of the turn's 2-second deadline, so it cannot exceed it.
@@ -198,7 +193,6 @@ export function resolveHostConfig(entryConfig, env = process.env, preferences = 
     autoStart: preferences.autoStart,
     preferences: {
       defaultTab: preferences.defaultTab,
-      defaultScope: preferences.defaultScope,
       pageSize: preferences.pageSize,
       path: preferences.path,
     },

@@ -61,6 +61,7 @@ export const CSS = `
 .mwui-content{white-space:pre-wrap;word-break:break-word;background:var(--mwui-surface);border:1px solid var(--mwui-border);
   border-radius:10px;padding:12px;font-size:12.5px;line-height:1.65}
 .mwui-sublist{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px}
+.mwui-history{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px}
 .mwui-subrow{display:flex;gap:8px;align-items:baseline;font-size:11.5px;color:var(--mwui-muted);border-bottom:1px dashed var(--mwui-border);padding:4px 0}
 .mwui-subrow .mwui-subrow-main{color:inherit;font-weight:600}
 .mwui-subrow .mwui-subrow-tail{margin-left:auto}
@@ -188,6 +189,8 @@ export const CSS = `
 .mwui-memory-title{margin:0;font-size:15px;font-weight:650;letter-spacing:.2px}
 .mwui-memory-description{margin:0;color:var(--mwui-muted);font-size:12px;max-width:720px}
 .mwui-memory-actions{margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.mwui-filter{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--mwui-muted)}
+.mwui-filter .mwui-select{max-width:200px}
 .mwui-memory-meta{color:var(--mwui-muted);font-size:11.5px}
 .mwui-memory-tabs{display:flex;gap:22px;min-width:0;overflow-x:auto;scrollbar-width:none}
 .mwui-memory-tabs::-webkit-scrollbar{display:none}

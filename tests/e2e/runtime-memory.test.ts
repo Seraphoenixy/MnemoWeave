@@ -23,14 +23,14 @@ test('Real Mnemon + Server + ZCode hook process + MCP proxy deliver resident and
   let client: Client | undefined;
   try {
     assert.equal((await post('/v1/runtime/projects', { projectId: 'registered-runtime-project' }, operator)).status, 200);
-    const submission = await post('/v1/remember', { idempotencyKey: 'runtime-resident-001', content: 'Runtime acceptance: always use the isolated acceptance store.', knowledgeType: 'Constraint', scope: 'project', projectId: 'registered-runtime-project', provenance: { source: 'e2e', sourceReference: 'isolated runtime scenario', evidence: ['fixture only'], verificationStatus: 'unverified', confidence: 0.5, applicability: 'runtime acceptance only', limitations: 'test data', lastVerified: null } });
+    const submission = await post('/v1/remember', { idempotencyKey: 'runtime-resident-001', content: 'Runtime acceptance: always use the isolated acceptance store.', knowledgeType: 'Constraint', projectId: 'registered-runtime-project', provenance: { source: 'e2e', sourceReference: 'isolated runtime scenario', evidence: ['fixture only'], verificationStatus: 'unverified', confidence: 0.5, applicability: 'runtime acceptance only', limitations: 'test data', lastVerified: null } });
     assert.equal(submission.status, 202);
     const candidate = await submission.json() as CandidateRecord;
     const readCandidate = async () => await (await fetch(`${server.url}/v1/candidates/${candidate.id}`, { headers })).json() as CandidateRecord;
     await until(readCandidate, item => item.status === 'needs_review');
     assert.equal((await post('/v1/review', { candidateId: candidate.id, decision: 'approve', reason: 'isolated test operator' }, operator)).status, 200);
     const published = await until(readCandidate, item => item.status === 'persisted');
-    assert.equal((await post('/v1/runtime/pins', { memoryId: published.publication!.memoryId, scope: 'project', projectId: 'registered-runtime-project', tier: 'critical' }, operator)).status, 200);
+    assert.equal((await post('/v1/runtime/pins', { memoryId: published.publication!.memoryId, projectId: 'registered-runtime-project', tier: 'critical' }, operator)).status, 200);
     const hook = async (event: string, prompt?: string, adapter = 'zcode') => new Promise<string>((done, fail) => {
       const child = execFile(process.execPath, [`packages/adapters/${adapter}/src/hook-main.ts`], { cwd: resolve('.'), windowsHide: true, timeout: 6000, env: { ...process.env, MNEMOWEAVE_SERVER: server.url, MNEMOWEAVE_TOKEN: headers.authorization.slice(7), MNEMOWEAVE_HOST_ID: TEST_HOST, MNEMOWEAVE_PROJECT_ID: 'registered-runtime-project', MNEMOWEAVE_CHATGPT_MODE: 'local-only' } }, (error, stdout, stderr) => error ? fail(error) : !stdout && event === 'SessionStart' ? fail(new Error(stderr || 'No SessionStart context')) : done(stdout));
       child.stdin!.end(JSON.stringify({ session_id: adapter === 'chatgpt' ? 'chatgpt-hook-session' : 'real-hook-session', hook_event_name: event, ...(prompt ? { prompt } : {}) }));

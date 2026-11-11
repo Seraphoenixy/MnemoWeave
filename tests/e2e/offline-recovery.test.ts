@@ -55,8 +55,7 @@ async function seedPublishedMemory(root: string): Promise<string> {
   const repo = new SqliteCandidates(resolve(join(state, 'governance.db')));
   const provider = new MnemonCliProvider({ binary: mnemonBinary(), dataDir: providerDir, store: 'offline' });
   const request = RememberInput.parse({
-    idempotencyKey: `seed-${randomUUID()}`, content: '断网前的初始正文。', knowledgeType: 'Practice', tags: [],
-    scope: 'project', projectId: 'alpha',
+    idempotencyKey: `seed-${randomUUID()}`, content: '断网前的初始正文。', knowledgeType: 'Practice', tags: [], projectId: 'alpha',
     provenance: {
       source: 'local-user', sourceReference: 'e2e:offline', evidence: ['seed'], verificationStatus: 'verified',
       confidence: 1, applicability: 'alpha', limitations: '无（验收固定值）', lastVerified: '2026-11-10T12:00:00.000Z',

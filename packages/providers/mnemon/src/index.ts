@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { isAbsolute } from 'node:path';
 import { z } from 'zod';
 import { MnemoWeaveError } from '../../../core/contracts/src/index.ts';
-import type { Health, RecallRequest, RecallResult } from '../../../core/contracts/src/index.ts';
+import type { Health, ProviderEmbeddingStatusRecord, RecallRequest, RecallResult } from '../../../core/contracts/src/index.ts';
 import type { MemoryProvider } from '../../../core/application/src/index.ts';
 
 export type Runner = (args: string[]) => Promise<string>;
@@ -26,6 +26,20 @@ const NativeRemember = z.discriminatedUnion('action', [
   z.object({ id: z.string().min(1), action: z.literal('skipped'), replaced_id: z.string().min(1) }),
 ]);
 const Status = z.object({ total_insights: z.number().int().nonnegative() });
+/**
+ * `embed --status` is the official coverage report. It answers whether the embedding service is
+ * reachable (`ollama_available`), whether the configured model is usable (`embedding_available`)
+ * and how many insights already carry a vector — the three facts a recall diagnosis needs.
+ */
+const NativeEmbeddingStatus = z.object({
+  coverage: z.string(),
+  embedded: z.number().int().nonnegative(),
+  embedding_available: z.boolean(),
+  model: z.string().min(1),
+  ollama_available: z.boolean(),
+  protocol: z.string().min(1),
+  total_insights: z.number().int().nonnegative(),
+});
 const NativeMemory = z.object({ id: z.string().min(1), content: z.string() });
 /** `--basic` recall rows carry the source, which is how a lost sync write is found again. */
 const NativeSourcedMemory = z.object({ id: z.string().min(1), content: z.string(), source: z.string().optional() });
@@ -123,6 +137,34 @@ export class MnemonCliProvider implements MemoryProvider {
       this.healthCache = { at: Date.now(), value };
       return value;
     });
+  }
+  /**
+   * Official embedding coverage. `embed --status` answers even when the embedding service is
+   * down, so an unreachable service is reported rather than turned into a probe failure.
+   */
+  async embeddingStatus(): Promise<ProviderEmbeddingStatusRecord> {
+    const report = decode(NativeEmbeddingStatus, await this.checkedRead(['embed', '--status']));
+    return {
+      serviceAvailable: report.ollama_available,
+      modelAvailable: report.embedding_available,
+      protocol: report.protocol,
+      model: report.model,
+      embedded: report.embedded,
+      total: report.total_insights,
+    };
+  }
+  /**
+   * Backfill vectors with the official command. The CLI reports a missing embedding service on
+   * stderr with a usage block, so the caller treats a thrown error as the failure signal and
+   * re-reads `embed --status` for the authoritative outcome.
+   */
+  async embedAll(): Promise<{ error: string | null }> {
+    try {
+      await this.checked(['embed', '--all']);
+      return { error: null };
+    } catch (error) {
+      return { error: error instanceof MnemoWeaveError ? error.code : 'PROVIDER_UNAVAILABLE' };
+    }
   }
   recall(request: RecallRequest): Promise<RecallResult> {
     return this.serial(async () => {

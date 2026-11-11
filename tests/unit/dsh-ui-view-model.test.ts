@@ -30,6 +30,7 @@ const detail = (overrides: Partial<UiMemoryDetail> = {}): UiMemoryDetail => ({
   isCurrent: true,
   providerMemoryId: 'provider-1',
   applicability: 'release',
+  projectId: null,
   state: 'active',
   content: 'x',
   publishedAt: '2026-11-09T02:00:00.000Z',
@@ -111,11 +112,12 @@ test('the list summary counts what the Server returned', () => {
 
 test('detail metadata names the viewed revision, not the live one', () => {
   const meta = detailMeta(detail(), 'en');
-  assert.deepEqual(meta.map(item => item.key), ['state', 'revision', 'currentness', 'applicability', 'published']);
+  assert.deepEqual(meta.map(item => item.key), ['state', 'revision', 'currentness', 'owner', 'applicability', 'published']);
   assert.deepEqual(meta.slice(0, 3).map(item => item.value), ['Active', '#2', 'Current revision']);
-  assert.equal(meta[4]?.value, formatDateTime('2026-11-09T02:00:00.000Z'));
-  // A memory has no project dimension left, so the metadata must not name one.
-  assert.ok(!meta.some(item => item.key === 'scope' || item.key === 'project'));
+  assert.equal(meta[5]?.value, formatDateTime('2026-11-09T02:00:00.000Z'));
+  // A general memory still shows its owner as "General", never an empty value.
+  assert.equal(meta[3]?.value, 'General');
+  assert.equal(detailMeta(detail({ projectId: 'alpha' }), 'en')[3]?.value, 'alpha');
 
   assert.equal(detailMeta(detail({ state: 'superseded' }), 'zh')[0]?.value, '已被取代');
   assert.equal(detailMeta(detail({ revisions: [] }), 'en')[1]?.value, '—');

@@ -30,6 +30,7 @@ async function seed(
   const publish = async (content: string, projectId: string | null, index: number): Promise<void> => {
     const request = RememberInput.parse({
       idempotencyKey: `browse-${projectId ?? 'global'}-${index}`, content, knowledgeType: 'Practice', tags: [],
+      ...(projectId === null ? {} : { projectId }),
             provenance: {
         source: 'local-user', sourceReference: `browse:${index}`, evidence: ['browse'], verificationStatus: 'verified',
         confidence: 1, applicability: projectId ?? 'global', limitations: '无（验收固定值）', lastVerified: '2026-11-10T00:00:00.000Z',
@@ -91,15 +92,28 @@ test('paging covers every row exactly once, even when candidates share a timesta
   } finally { await app.close(); }
 });
 
-test('the list returns every memory regardless of the project it was recorded in', async () => {
+test('general and project memory share one library that the page can narrow by project', async () => {
   const root = resolve('work', 'browse-scope', randomUUID());
   const { app } = await seed(root, { global: 3, alpha: 2, beta: 1 });
   try {
-    // Memories are no longer project-scoped: the list is one set with no scope filter to reach it.
+    // One library: the default list is every memory, each carrying its owner.
     const all = await app.client!.memories({ limit: 200 });
     assert.equal(all.items.length, 6);
-    assert.equal((all as { projects?: unknown }).projects, undefined, 'no project index: a memory carries no project');
-    assert.ok(all.items.every(item => !('scope' in item) && !('projectId' in item)));
+    assert.equal(all.items.filter(item => item.projectId === null).length, 3);
+    assert.equal(all.items.filter(item => item.projectId === 'alpha').length, 2);
+    assert.deepEqual(
+      (all.projects ?? []).map(entry => [entry.projectId, entry.count]).sort(),
+      [[null, 3], ['alpha', 2], ['beta', 1]],
+    );
+    // The management page's project narrows the view; general memory is included by default.
+    const alpha = await app.client!.memories({ limit: 200, projectId: 'alpha' });
+    assert.equal(alpha.items.length, 5);
+    assert.ok(alpha.items.every(item => item.projectId === null || item.projectId === 'alpha'));
+    const alphaOnly = await app.client!.memories({ limit: 200, projectId: 'alpha', includeGlobal: false });
+    assert.equal(alphaOnly.items.length, 2);
+    assert.ok(alphaOnly.items.every(item => item.projectId === 'alpha'));
+    // A project-filtered page still indexes the projects, so the selector never loses options.
+    assert.equal((alphaOnly.projects ?? []).length, 3);
   } finally { await app.close(); }
 });
 

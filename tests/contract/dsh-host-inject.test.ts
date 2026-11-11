@@ -22,8 +22,18 @@ test('an omitted rule budget is named and empty views render nothing', () => {
   assert.equal(render({ rules: [{ body: '   ' }], workingContext: [{ text: '' }], memories: [] }), '');
 });
 
-test('memory rows keep their scope and excerpt marker', () => {
+test('a partial rule omission is named without dropping the injected rules', () => {
+  const text = render({
+    rules: [{ body: '第一条准则。' }],
+    rulesBudget: { exceeded: true, omittedCount: 2 },
+    memories: [{ content: 'memory' }],
+  });
+  assert.match(text, /第一条准则。/);
+  assert.match(text, /Runtime rules omitted: 2 complete lower-priority entries did not fit\./);
+});
+
+test('memory rows keep their excerpt marker', () => {
   const text = render({ memories: [{ content: 'global one' }, { content: 'excerpt one', excerpt: true }] });
-  assert.match(text, /- \(global\) global one/);
-  assert.match(text, /- \(project\) excerpt one \[excerpt\]/);
+  assert.match(text, /- global one/);
+  assert.match(text, /- excerpt one \[excerpt\]/);
 });

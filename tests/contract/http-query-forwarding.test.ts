@@ -40,12 +40,12 @@ test('the list route forwards every query parameter it documents', async () => {
   });
   try {
     const response = await fetch(
-      `${base}/v1/memories?limit=7&scope=project&projectId=alpha&category=decision&knowledgeType=Practice&entity=MnemoWeave&sort=importance&cursor=abc&query=${encodeURIComponent('关键词')}`,
+      `${base}/v1/memories?limit=7&category=decision&knowledgeType=Practice&entity=MnemoWeave&sort=importance&cursor=abc&query=${encodeURIComponent('关键词')}`,
       { headers: auth },
     );
     assert.equal(response.status, 200);
     assert.deepEqual(seen[0], {
-      limit: 7, scope: 'project', projectId: 'alpha',
+      limit: 7,
       category: 'decision', knowledgeType: 'Practice', entity: 'MnemoWeave',
       sort: 'importance', cursor: 'abc', query: '关键词',
     }, 'no documented parameter is parsed and then dropped');
@@ -59,19 +59,19 @@ test('the list route leaves absent parameters absent instead of inventing defaul
   });
   try {
     assert.equal((await fetch(`${base}/v1/memories`, { headers: auth })).status, 200);
-    // scope has a documented default; everything else stays absent rather than being invented.
-    assert.deepEqual(seen[0], { limit: 50, scope: 'all' }, 'only documented defaults are supplied');
+    // Only the page size has a documented default; everything else stays absent.
+    assert.deepEqual(seen[0], { limit: 50 }, 'only documented defaults are supplied');
   } finally { await close(); }
 });
 
-test('the graph route forwards its scope, project and cap', async () => {
+test('the graph route forwards its cap', async () => {
   const seen: Array<Record<string, unknown>> = [];
   const { base, close } = await harness({
     graph: async (_hostId, query) => { seen.push(query as unknown as Record<string, unknown>); return { nodes: [], edges: [], truncated: false } as never; },
   });
   try {
-    assert.equal((await fetch(`${base}/v1/memories/graph?scope=project&projectId=alpha&limit=42`, { headers: auth })).status, 200);
-    assert.deepEqual(seen[0], { scope: 'project', projectId: 'alpha', limit: 42 });
+    assert.equal((await fetch(`${base}/v1/memories/graph?limit=42`, { headers: auth })).status, 200);
+    assert.deepEqual(seen[0], { limit: 42 });
   } finally { await close(); }
 });
 
@@ -91,10 +91,10 @@ test('the explore route forwards the query, the cap and the score floor', async 
   } finally { await close(); }
 });
 
-test('a parameter the route does not document is refused rather than ignored', async () => {
+test('an invalid value of a documented parameter is refused rather than ignored', async () => {
   const { base, close } = await harness({ memories: async () => ({ items: [] }) as never });
   try {
-    for (const query of ['category=nonsense', 'knowledgeType=Nope', 'sort=sideways', 'scope=project', 'limit=0']) {
+    for (const query of ['category=nonsense', 'knowledgeType=Nope', 'sort=sideways', 'limit=0']) {
       const response = await fetch(`${base}/v1/memories?${query}`, { headers: auth });
       assert.equal(response.status, 400, `${query} must be refused`);
     }

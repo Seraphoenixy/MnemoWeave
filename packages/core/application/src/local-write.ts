@@ -105,7 +105,11 @@ export function ruleDraft(row: LocalRuleRow): SyncEntryDraftValue {
       contentHash: sha256(row.body),
       byteLength: Buffer.byteLength(row.body, 'utf8'),
     },
-    payload: { enabled: row.enabled },
+    payload: {
+      enabled: row.enabled,
+      ...(row.importance !== undefined && row.importance !== 'normal' ? { importance: row.importance } : {}),
+      ...(row.pinned === true ? { pinned: true } : {}),
+    },
     withdrawnAt: row.withdrawnAt,
   };
 }
@@ -121,7 +125,14 @@ export function archiveDraft(row: LocalArchiveRow): SyncEntryDraftValue {
       contentHash: sha256(row.body),
       byteLength: Buffer.byteLength(row.body, 'utf8'),
     },
-    payload: { title: row.title, source: row.source as 'session' | 'tool' | 'user', verification: row.verification, evidence: row.evidence, tags: [] },
+    payload: {
+      title: row.title,
+      source: row.source as 'session' | 'tool' | 'user',
+      verification: row.verification,
+      evidence: row.evidence,
+      tags: [],
+      ...(row.state === 'archived' ? { state: 'archived' as const, archivedAt: row.archivedAt ?? null } : {}),
+    },
     withdrawnAt: row.withdrawnAt,
   };
 }

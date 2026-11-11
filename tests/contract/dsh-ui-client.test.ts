@@ -430,9 +430,8 @@ test('classification on an edit is validated before the Server call', async () =
 /**
  * The graph request is validated in the Host before any call.
  *
- * Its bounds mirror the Server's, and a scope of `project` without a project is refused rather
- * than silently treating it as `all` — which would show every project's memories under a project
- * heading.
+ * Its bounds mirror the Server's. A memory graph is one global set now, so the only request
+ * field left is the node cap.
  */
 test('the graph request is validated before it reaches the Server', async () => {
   const calls: SourceCalls = {};
@@ -442,25 +441,22 @@ test('the graph request is validated before it reaches the Server', async () => 
   assert.equal(defaults.ok, true);
   assert.deepEqual(calls.graph, {}, 'no bounds means the Server defaults apply');
 
-  const scoped = await handler('graph', { scope: 'project', projectId: '  alpha  ', limit: 50 });
-  assert.equal(scoped.ok, true);
-  assert.deepEqual(calls.graph, { scope: 'project', projectId: 'alpha', limit: 50 }, 'the project is trimmed');
+  const bounded = await handler('graph', { limit: 50 });
+  assert.equal(bounded.ok, true);
+  assert.deepEqual(calls.graph, { limit: 50 });
 
   for (const payload of [
-    { scope: 'everything' },
-    { scope: 'project' },
-    { scope: 'project', projectId: '   ' },
-    { projectId: 42 },
     { limit: 0 },
     { limit: 501 },
     { limit: 1.5 },
+    { limit: 'many' },
   ]) {
     const result = await handler('graph', payload);
     assert.equal(result.ok, false, `expected rejection for ${JSON.stringify(payload)}`);
     if (result.ok) continue;
     assert.equal(result.error.code, 'INVALID_INPUT');
   }
-  assert.deepEqual(calls.graph, { scope: 'project', projectId: 'alpha', limit: 50 }, 'a rejected request never reaches the Server');
+  assert.deepEqual(calls.graph, { limit: 50 }, 'a rejected request never reaches the Server');
 });
 
 /**
@@ -475,13 +471,13 @@ test('every list filter the Host validates is forwarded to the source', async ()
   const handler = createRpcHandler(stubSource(calls));
 
   const result = await handler('memories', {
-    limit: 20, scope: 'project', projectId: 'alpha',
+    limit: 20,
     category: 'decision', knowledgeType: 'Practice', entity: 'MnemoWeave', sort: 'importance',
     query: '关键词', cursor: 'abc',
   });
   assert.equal(result.ok, true);
   assert.deepEqual(calls.memories, {
-    limit: 20, scope: 'project', projectId: 'alpha',
+    limit: 20,
     category: 'decision', knowledgeType: 'Practice', entity: 'MnemoWeave', sort: 'importance',
     query: '关键词', cursor: 'abc',
   }, 'no validated field is dropped on the way to the source');

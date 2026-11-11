@@ -16,7 +16,7 @@ const edge = (id: string, source: string, target: string, kind: 'Supersedes' | '
 });
 
 const node = (memoryId: string, importance?: number, category?: string) => ({
-  memoryId, scope: 'global' as const, state: 'active' as const, publishedAt: '2026-11-10T00:00:00.000Z',
+  memoryId, projectId: null, state: 'active' as const, publishedAt: '2026-11-10T00:00:00.000Z',
   ...(importance === undefined ? {} : { importance }),
   ...(category === undefined ? {} : { category }),
 });
@@ -98,8 +98,8 @@ test('a retired node is marked apart from the memories still served', () => {
   // history rather than as a current memory.
   const input = {
     nodes: [
-      { memoryId: 'a', scope: 'global' as const, state: 'active' as const, publishedAt: '2026-11-10T00:00:00.000Z' },
-      { memoryId: 'b', scope: 'global' as const, state: 'superseded' as const, publishedAt: '2026-11-09T00:00:00.000Z' },
+      { memoryId: 'a', projectId: null, state: 'active' as const, publishedAt: '2026-11-10T00:00:00.000Z' },
+      { memoryId: 'b', projectId: null, state: 'superseded' as const, publishedAt: '2026-11-09T00:00:00.000Z' },
     ],
     edges: [edge('e1', 'a', 'b', 'Supersedes')],
     truncated: false,

@@ -1,26 +1,138 @@
 import { PinInput, RuntimeContextInput } from './runtime.ts';
 import { SyncRefreshOutput, SyncStatusOutput } from './sync.ts';
 import { z } from 'zod';
+import {
+  ARCHIVE_ACTIVE_CAPACITY_BYTES, ARCHIVE_BODY_MAX_BYTES, ARCHIVE_SEARCH_EXCERPT_BYTES,
+  ARCHIVE_SEARCH_LIMIT_DEFAULT, ARCHIVE_SEARCH_LIMIT_MAX, ARCHIVE_SEARCH_TOTAL_BYTES, ARCHIVE_SEARCH_MAX_CALLS,
+  RECALL_LIMIT_DEFAULT, RECALL_LIMIT_MAX, RULE_CAPACITY_BYTES, RULE_CAPACITY_MAX_BYTES,
+  RULE_ITEM_MAX_BYTES, RULE_MAINTENANCE_TARGET_RATIO,
+} from './capacity.ts';
 
+export * from './capacity.ts';
 export * from './sync.ts';
 
 export const RecallInput = z.object({
   query: z.string().trim().min(1).max(2000),
-  limit: z.number().int().min(1).max(100).default(10),
+  limit: z.number().int().min(1).max(RECALL_LIMIT_MAX).default(RECALL_LIMIT_DEFAULT),
+  /**
+   * Project the caller is working in. Recall then returns general memory plus this project's
+   * memory. Absent means general only. The Server checks the value against the grant, so a
+   * model-supplied id cannot widen what this Host may read.
+   */
+  projectId: z.string().trim().min(1).max(200).optional(),
 }).strict();
-export const Memory = z.object({ id: z.string().min(1), content: z.string(), score: z.number().finite().optional(), superseded: z.boolean().optional() });
+export const Memory = z.object({ id: z.string().min(1), content: z.string(), score: z.number().finite().optional(), superseded: z.boolean().optional(), projectId: z.string().min(1).nullable().optional() });
 export const RecallOutput = z.object({ memories: z.array(Memory), complete: z.boolean().optional() });
 export const ProviderHealth = z.object({ ready: z.literal(true), version: z.literal('0.2.13'), capabilities: z.array(z.enum(['health', 'recall', 'remember'])) });
+/** What the Provider can report about its embedding backend, before any interpretation. */
+export const ProviderEmbeddingStatus = z.object({
+  serviceAvailable: z.boolean(),
+  modelAvailable: z.boolean(),
+  protocol: z.string().min(1),
+  model: z.string().min(1),
+  embedded: z.number().int().nonnegative(),
+  total: z.number().int().nonnegative(),
+}).strict();
+export type ProviderEmbeddingStatusRecord = z.infer<typeof ProviderEmbeddingStatus>;
+/** One durable maintenance job; the Provider work itself runs in the Server process. */
+export const DiagnosticJob = z.object({
+  id: z.uuid(),
+  kind: z.string().min(1),
+  state: z.enum(['running', 'succeeded', 'failed', 'interrupted']),
+  startedAt: z.iso.datetime(),
+  finishedAt: z.iso.datetime().nullable(),
+  detail: z.record(z.string(), z.unknown()).optional(),
+}).strict();
+export type DiagnosticJobRecord = z.infer<typeof DiagnosticJob>;
+/**
+ * Recall diagnosis for the status page. `unknown` means the interface could not answer: it is a
+ * statement about coverage, not an assertion that recall is broken.
+ */
+export const EmbeddingDiagnostics = z.object({
+  provider: z.literal('mnemon'),
+  model: z.string().min(1),
+  protocol: z.string().min(1),
+  serviceAvailable: z.boolean(),
+  modelAvailable: z.boolean(),
+  embedded: z.number().int().nonnegative(),
+  total: z.number().int().nonnegative(),
+  coverage: z.number().min(0).max(1),
+  recallMode: z.enum(['semantic', 'keyword', 'unknown']),
+  degraded: z.boolean(),
+  lastError: z.string().nullable(),
+  checkedAt: z.iso.datetime(),
+  /** Latest vector backfill job, when one has ever run. */
+  backfill: DiagnosticJob.nullable().optional(),
+}).strict();
+export type EmbeddingDiagnosticsRecord = z.infer<typeof EmbeddingDiagnostics>;
+/** Idle review: deterministic signal selection over completed turns; no model in this step. */
+export const IdleReviewScanInput = z.object({
+  sessionId: z.string().min(1).max(256),
+  projectId: z.string().trim().min(1).max(200).optional(),
+  /** Highest completed turn the Host vouches for; later turns are not read. */
+  completedThroughTurn: z.number().int().nonnegative(),
+  maxSignals: z.number().int().min(1).max(50).default(20),
+}).strict();
+export const IdleReviewSignal = z.object({
+  id: z.uuid(), sessionId: z.string().min(1), turnId: z.number().int().nonnegative(),
+  eventId: z.string().min(1), text: z.string().min(1), projectId: z.string().min(1).nullable(),
+  reason: z.enum(['correction', 'standing-instruction', 'durable-fact']), createdAt: z.iso.datetime(),
+}).strict();
+export type IdleReviewSignalRecord = z.infer<typeof IdleReviewSignal>;
+export const IdleReviewScanOutput = z.object({
+  signals: z.array(IdleReviewSignal),
+  lastTurn: z.number().int().nonnegative(),
+  skipped: z.object({
+    tooShort: z.number().int().nonnegative(), question: z.number().int().nonnegative(),
+    noTurn: z.number().int().nonnegative(), outOfWindow: z.number().int().nonnegative(),
+    duplicate: z.number().int().nonnegative(),
+  }).strict(),
+}).strict();
+export type IdleReviewScanRecord = z.infer<typeof IdleReviewScanOutput>;
+export const IdleReviewSignalsOutput = z.object({ items: z.array(IdleReviewSignal) }).strict();
+/** One item result reported by the task Agent; the Server stores it, the writes already happened. */
+export const IdleReviewRunItem = z.object({
+  index: z.number().int().min(0).max(63),
+  action: z.enum(['create', 'edit', 'archive', 'unarchive', 'withdraw', 'skip']),
+  state: z.enum(['applied', 'failed', 'skipped']),
+  targetId: z.string().min(1).optional(),
+  detail: z.record(z.string(), z.unknown()).optional(),
+}).strict();
+export type IdleReviewRunItemRecord = z.infer<typeof IdleReviewRunItem>;
+export const IdleReviewRun = z.object({
+  id: z.uuid(), sessionId: z.string().min(1),
+  state: z.enum(['running', 'succeeded', 'failed', 'cancelled', 'interrupted']),
+  attempt: z.number().int().positive(),
+  startedAt: z.iso.datetime(), finishedAt: z.iso.datetime().nullable(), error: z.string().nullable(),
+  items: z.array(IdleReviewRunItem),
+}).strict();
+export type IdleReviewRunRecord = z.infer<typeof IdleReviewRun>;
+export const IdleReviewRunStartInput = z.object({ sessionId: z.string().min(1).max(256), maxSignals: z.number().int().min(1).max(50).default(10) }).strict();
+export const IdleReviewRunStartOutput = z.object({ run: IdleReviewRun, signals: z.array(IdleReviewSignal) }).strict();
+export const IdleReviewRunsOutput = z.object({ items: z.array(IdleReviewRun) }).strict();
+export const IdleReviewPendingOutput = z.object({
+  sessions: z.array(z.object({ sessionId: z.string().min(1), count: z.number().int().positive() }).strict()),
+}).strict();
+export type IdleReviewPendingRecord = z.infer<typeof IdleReviewPendingOutput>;
+export const IdleReviewRunFinishInput = z.object({
+  state: z.enum(['succeeded', 'failed', 'cancelled']),
+  error: z.string().trim().min(1).max(500).optional(),
+}).strict();
 export type RecallRequest = z.infer<typeof RecallInput>;
 export type RecallResult = z.infer<typeof RecallOutput>;
 export type Health = z.infer<typeof ProviderHealth>;
 export type ErrorCode = 'INVALID_INPUT' | 'UNAUTHORIZED' | 'PROVIDER_UNAVAILABLE' | 'PROVIDER_PROTOCOL' | 'PROVIDER_INTEGRITY' | 'PROVIDER_TIMEOUT' | 'UNSUPPORTED_VERSION' | 'REVIEW_REQUIRED' | 'NOT_FOUND' | 'IDEMPOTENCY_CONFLICT' | 'INVALID_STATE' | 'VIEW_BUDGET_EXCEEDED' | 'QUOTA_EXCEEDED' | 'INTERNAL'
-  | 'VERSION_CONFLICT' | 'CHANGE_ID_REUSED' | 'CHANGE_ID_EXPIRED' | 'SNAPSHOT_REQUIRED' | 'DEVICE_REVOKED' | 'SCOPE_FORBIDDEN' | 'SYNC_UNAVAILABLE' | 'SYNC_QUEUED' | 'SYNC_OUTCOME_UNKNOWN' | 'RULE_BUDGET_EXCEEDED' | 'NEEDS_REVIEW';
+  | 'VERSION_CONFLICT' | 'CHANGE_ID_REUSED' | 'CHANGE_ID_EXPIRED' | 'SNAPSHOT_REQUIRED' | 'DEVICE_REVOKED' | 'SCOPE_FORBIDDEN' | 'SYNC_UNAVAILABLE' | 'SYNC_QUEUED' | 'SYNC_OUTCOME_UNKNOWN' | 'RULE_BUDGET_EXCEEDED' | 'NEEDS_REVIEW'
+  | 'RULE_ITEM_TOO_LARGE' | 'RULE_CAPACITY_EXCEEDED' | 'RULE_ARCHIVE_UNAVAILABLE'
+  | 'ARCHIVE_BODY_TOO_LARGE' | 'ARCHIVE_CAPACITY_EXCEEDED' | 'ARCHIVE_NOT_ACTIVE' | 'ARCHIVE_SEARCH_BUDGET_EXCEEDED';
 
 const CONFLICT_CODES: readonly ErrorCode[] = [
   'REVIEW_REQUIRED', 'IDEMPOTENCY_CONFLICT', 'INVALID_STATE', 'VIEW_BUDGET_EXCEEDED', 'QUOTA_EXCEEDED',
   'VERSION_CONFLICT', 'CHANGE_ID_REUSED', 'CHANGE_ID_EXPIRED', 'SNAPSHOT_REQUIRED',
   'SYNC_QUEUED', 'SYNC_OUTCOME_UNKNOWN', 'RULE_BUDGET_EXCEEDED', 'NEEDS_REVIEW',
+  'RULE_ITEM_TOO_LARGE', 'RULE_CAPACITY_EXCEEDED', 'RULE_ARCHIVE_UNAVAILABLE',
+  'ARCHIVE_BODY_TOO_LARGE', 'ARCHIVE_CAPACITY_EXCEEDED', 'ARCHIVE_NOT_ACTIVE',
+  'ARCHIVE_SEARCH_BUDGET_EXCEEDED',
 ];
 
 /** HTTP status for an error code; every HTTP surface uses this one mapping. */
@@ -64,6 +176,12 @@ export const RememberInput = z.object({
   category: z.enum(['preference', 'decision', 'fact', 'insight', 'context', 'general']).optional(),
   importance: z.number().int().min(1).max(5).optional(),
   entities: z.array(z.string().trim().min(1).max(200)).max(50).optional(),
+  /**
+   * Owning project for a formal memory. Omitted or null means general knowledge that every
+   * project may recall. Attribution is data, not authorization: the Server still checks that the
+   * writing Host has the project in its grant.
+   */
+  projectId: z.string().trim().min(1).max(200).nullable().optional(),
   change: ChangeIntent.optional(),
   provenance: Provenance,
 }).strict();
@@ -129,6 +247,8 @@ export type ConflictRecord=z.infer<typeof ConflictDescriptor>;
 export const MemoryDescriptor = z.object({
   id: z.uuid(), currentRevisionId: z.uuid(), state: z.enum(['active', 'superseded', 'unverified']),
   applicability: z.string(), revisions: z.array(RevisionDescriptor),
+  /** Owning project; null means general knowledge reachable from every project. */
+  projectId: z.string().min(1).nullable().optional(),
   relations: z.array(LogicalRelation).default([]),
   conflicts:z.array(ConflictDescriptor).default([]),
 });
@@ -147,6 +267,8 @@ export const MemoryListItem = z.object({
   importance: z.number().int().min(1).max(5).optional(),
   tags: z.array(z.string()).optional(),
   entities: z.array(z.string()).optional(),
+  /** Owning project; null means general knowledge. */
+  projectId: z.string().min(1).nullable().optional(),
 }).strict();
 export const MemoryListQuery = z.object({
   query: z.string().trim().max(500).optional(),
@@ -162,6 +284,13 @@ export const MemoryListQuery = z.object({
   entity: z.string().trim().min(1).max(200).optional(),
   /** Scan order. Changing it invalidates any cursor issued for a different one. */
   sort: z.enum(['newest', 'oldest', 'importance']).optional(),
+  /**
+   * Project the browser is looking at. This is the page's project, not the session's: it only
+   * narrows what this request returns and never changes recall for a conversation.
+   */
+  projectId: z.string().trim().min(1).max(200).optional(),
+  /** Keep general memories in a project-scoped page; default true. */
+  includeGlobal: z.boolean().optional(),
   /**
    * Opaque position in the stable scan order. It records how far the scan reached rather than
    * how many rows matched, so candidates skipped for not matching the query do not stall paging.
@@ -184,11 +313,14 @@ export const ExploreInput = z.object({
    * ranked list into an answer.
    */
   minScore: z.coerce.number().min(0).max(1).default(0),
+  /** Project the caller is working in; general hits are always included. */
+  projectId: z.string().trim().min(1).max(200).optional(),
 }).strict();
 export const ExploreHit = z.object({
   memoryId: z.uuid(), revisionId: z.uuid(), providerMemoryId: z.string().min(1),
   state: z.enum(['active', 'superseded', 'unverified']),
   content: z.string(), score: z.number(), publishedAt: z.iso.datetime(),
+  projectId: z.string().min(1).nullable().optional(),
   /** Classification of the current revision, when it was recorded. */
   category: z.string().optional(), knowledgeType: z.string().optional(), tags: z.array(z.string()).optional(),
 }).strict();
@@ -220,6 +352,9 @@ export type ExploreOutputRecord = z.infer<typeof ExploreOutput>;
 export const MemoryGraphQuery = z.object({
   /** Cap on nodes; edges are then limited to those whose endpoints are both present. */
   limit: z.coerce.number().int().min(1).max(500).default(200),
+  /** Project the graph is drawn for; general nodes are included by default. */
+  projectId: z.string().trim().min(1).max(200).optional(),
+  includeGlobal: z.boolean().optional(),
 }).strict();
 export const MemoryGraphNode = z.object({
   memoryId: z.uuid(),
@@ -232,6 +367,7 @@ export const MemoryGraphNode = z.object({
   category: z.string().optional(),
   knowledgeType: z.string().optional(),
   importance: z.number().int().min(1).max(5).optional(),
+  projectId: z.string().min(1).nullable().optional(),
 }).strict();
 export const MemoryGraphEdge = z.object({
   relationId: z.string().min(1),
@@ -251,6 +387,10 @@ export const MemoryGraph = z.object({
 }).strict();
 export type MemoryGraphRecord = z.infer<typeof MemoryGraph>;
 
+/** Project ids known to this Server: registered for runtime scope, or owning a memory. */
+export const ProjectsOutput = z.object({ projects: z.array(z.string().min(1)) }).strict();
+export type ProjectsRecord = z.infer<typeof ProjectsOutput>;
+
 export const MemoryList = z.object({  items: z.array(MemoryListItem),
   /** Present when more candidates remain; absent once the scan is exhausted. */
   nextCursor: z.string().optional(),
@@ -262,36 +402,74 @@ export const MemoryList = z.object({  items: z.array(MemoryListItem),
   knowledgeTypes: z.array(z.object({ value: z.string(), count: z.number().int().nonnegative() }).strict()).optional(),
   /** Entities named by the current revisions in the browsable set, in their recorded spelling. */
   entities: z.array(z.object({ value: z.string(), count: z.number().int().nonnegative() }).strict()).optional(),
+  /** Owning projects present in the browsable set; null is general knowledge. */
+  projects: z.array(z.object({ projectId: z.string().min(1).nullable(), count: z.number().int().nonnegative() }).strict()).optional(),
 }).strict();
 export type MemoryListItemRecord = z.infer<typeof MemoryListItem>;
 export type MemoryListRecord = z.infer<typeof MemoryList>;
 
 // ── Runtime rules and project archives (operator write surface) ──
+export const RuleImportance = z.enum(['critical', 'normal', 'low']);
+const ruleBody = z.string().trim().min(1);
 export const RuleCreate = z.object({
-  body: z.string().trim().min(1).max(4000),
+  body: ruleBody,
   enabled: z.boolean().default(true),
+  importance: RuleImportance.default('normal'),
+  pinned: z.boolean().default(false),
 }).strict();
 export const RuleEdit = z.object({
-  body: z.string().trim().min(1).max(4000).optional(),
+  body: ruleBody.optional(),
   enabled: z.boolean().optional(),
+  importance: RuleImportance.optional(),
+  pinned: z.boolean().optional(),
   /**
    * The version the editor was opened at. When supplied, a stale value is refused instead of
    * overwriting a change this caller never read.
    */
   baseVersion: z.number().int().nonnegative().optional(),
-}).strict().refine(value => value.body !== undefined || value.enabled !== undefined, 'Rule edit requires body or enabled');
+}).strict().refine(value => value.body !== undefined || value.enabled !== undefined || value.importance !== undefined || value.pinned !== undefined, 'Rule edit requires a body, state, importance or pinned change');
 export const RuleRecord = z.object({
   entryId: z.uuid(),
   body: z.string().min(1),
   enabled: z.boolean(),
   version: z.number().int().positive(),
   withdrawnAt: z.iso.datetime().nullable(),
+  importance: RuleImportance,
+  pinned: z.boolean(),
+  bodyBytes: z.number().int().positive(),
 }).strict();
-export const RuleList = z.object({ items: z.array(RuleRecord) }).strict();
+/**
+ * The active rule set is one byte-accounted collection. `usedBytes` includes the separator
+ * between entries; `targetBytes` is the maintenance goal, not the hard limit.
+ */
+export const RuleUsage = z.object({
+  limitBytes: z.number().int().positive(),
+  itemMaxBytes: z.number().int().positive(),
+  targetBytes: z.number().int().nonnegative(),
+  usedBytes: z.number().int().nonnegative(),
+  entryCount: z.number().int().nonnegative(),
+  exceeded: z.boolean(),
+  overByBytes: z.number().int().nonnegative(),
+}).strict();
+export const RuleList = z.object({ items: z.array(RuleRecord), usage: RuleUsage }).strict();
+/** Exact rule text that left the active set during maintenance, with its source version. */
+export const RuleArchiveRecord = z.object({
+  archiveId: z.uuid(),
+  ruleId: z.uuid(),
+  ruleVersion: z.number().int().positive(),
+  body: z.string().min(1),
+  importance: RuleImportance,
+  pinned: z.boolean(),
+  archivedAt: z.iso.datetime(),
+  reason: z.enum(['capacity', 'manual']),
+}).strict();
+export const RuleArchiveList = z.object({ items: z.array(RuleArchiveRecord) }).strict();
+export const ArchiveState = z.enum(['active', 'archived']);
+const archiveBody = z.string().trim().min(1);
 export const ArchiveCreate = z.object({
   projectId: z.string().trim().min(1).max(200),
   title: z.string().trim().min(1).max(200),
-  body: z.string().trim().min(1).max(8000),
+  body: archiveBody,
   source: z.enum(['session', 'tool', 'user']),
   verification: z.enum(['verified', 'open', 'refuted']),
   evidence: z.string().trim().min(1).max(2000),
@@ -304,15 +482,64 @@ export const ArchiveRecord = z.object({
   entryId: z.uuid(), projectId: z.string().min(1), title: z.string().min(1), body: z.string().min(1),
   source: z.enum(['session', 'tool', 'user']), verification: z.enum(['verified', 'open', 'refuted']),
   evidence: z.string().min(1), version: z.number().int().positive(), withdrawnAt: z.iso.datetime().nullable(),
+  state: ArchiveState, archivedAt: z.iso.datetime().nullable(), bodyBytes: z.number().int().positive(),
 }).strict();
 export type RuleCreateInput = z.infer<typeof RuleCreate>;
 export type RuleEditInput = z.infer<typeof RuleEdit>;
 export type RuleRecordValue = z.infer<typeof RuleRecord>;
 export type RuleListRecord = z.infer<typeof RuleList>;
-export const ArchiveList = z.object({ items: z.array(ArchiveRecord) }).strict();
+export type RuleUsageRecord = z.infer<typeof RuleUsage>;
+export type RuleArchiveRecordValue = z.infer<typeof RuleArchiveRecord>;
+export const ArchiveCapacity = z.object({
+  projectId: z.string().min(1),
+  activeBytes: z.number().int().nonnegative(),
+  limitBytes: z.number().int().positive(),
+  activeCount: z.number().int().nonnegative(),
+  archivedCount: z.number().int().nonnegative(),
+  exceeded: z.boolean(),
+}).strict();
+export const ArchiveList = z.object({ items: z.array(ArchiveRecord), capacities: z.array(ArchiveCapacity), nextCursor: z.string().optional() }).strict();
+export type ArchiveUsageRecord = z.infer<typeof ArchiveCapacity>;
+export const ArchiveSearchInput = z.object({
+  projectId: z.string().trim().min(1).max(200),
+  query: z.string().trim().min(1).max(500),
+  limit: z.number().int().min(1).max(ARCHIVE_SEARCH_LIMIT_MAX).default(ARCHIVE_SEARCH_LIMIT_DEFAULT),
+  includeArchived: z.boolean().default(false),
+}).strict();
+export const ArchiveSearchHit = z.object({
+  entryId: z.uuid(), projectId: z.string().min(1), title: z.string().min(1),
+  state: ArchiveState, version: z.number().int().positive(),
+  verification: z.enum(['verified', 'open', 'refuted']),
+  excerpt: z.string(), excerptBytes: z.number().int().nonnegative(),
+  excerptTruncated: z.boolean(), bodyBytes: z.number().int().nonnegative(), score: z.number().int().nonnegative(),
+}).strict();
+export const ArchiveSearchOutput = z.object({
+  query: z.string(), total: z.number().int().nonnegative(), results: z.array(ArchiveSearchHit),
+  totalBytes: z.number().int().nonnegative(), truncated: z.boolean(),
+  excerptLimitBytes: z.literal(ARCHIVE_SEARCH_EXCERPT_BYTES),
+  totalLimitBytes: z.literal(ARCHIVE_SEARCH_TOTAL_BYTES),
+  callsLimit: z.literal(ARCHIVE_SEARCH_MAX_CALLS),
+}).strict();
+/** Moves one archive between active and archived; the version must match what the caller read. */
+export const ArchiveStateInput = z.object({
+  state: ArchiveState,
+  baseVersion: z.number().int().positive(),
+}).strict();
+export const ArchiveHistoryRecord = z.object({
+  revisionId: z.uuid(), entryId: z.uuid(), projectId: z.string().min(1), version: z.number().int().positive(),
+  title: z.string().min(1), body: z.string().min(1),
+  source: z.enum(['session', 'tool', 'user']), verification: z.enum(['verified', 'open', 'refuted']),
+  evidence: z.string().min(1), state: ArchiveState, archivedAt: z.iso.datetime().nullable(),
+  recordedAt: z.iso.datetime(),
+}).strict();
+export const ArchiveHistory = z.object({ entryId: z.uuid(), items: z.array(ArchiveHistoryRecord) }).strict();
 export type ArchiveCreateInput = z.infer<typeof ArchiveCreate>;
 export type ArchiveRecordValue = z.infer<typeof ArchiveRecord>;
 export type ArchiveListRecord = z.infer<typeof ArchiveList>;
+export type ArchiveSearchInputRecord = z.infer<typeof ArchiveSearchInput>;
+export type ArchiveSearchOutputRecord = z.infer<typeof ArchiveSearchOutput>;
+export type ArchiveStateInputRecord = z.infer<typeof ArchiveStateInput>;
+export type ArchiveHistoryRecordValue = z.infer<typeof ArchiveHistoryRecord>;
 export type MemoryEditRecord = z.infer<typeof MemoryEditOutput>;
 /**
  * Direct user creation: publishes a formal memory without a review round.
@@ -330,6 +557,8 @@ export const MemoryCreateInput = z.object({
   importance: z.number().int().min(1).max(5).optional(),
   tags: z.array(z.string().trim().min(1).max(100)).max(20).optional(),
   entities: z.array(z.string().trim().min(1).max(200)).max(50).optional(),
+  /** Owning project; omitted or null writes general knowledge. */
+  projectId: z.string().trim().min(1).max(200).nullable().optional(),
   reason: z.string().trim().min(1).max(4000).optional(),
 }).strict();
 export const MemoryCreateOutput = z.object({
@@ -354,6 +583,12 @@ export const MemoryEditInput = z.object({
   importance: z.number().int().min(1).max(5).optional(),
   /** An empty array clears the tags; omitting the field keeps them. */
   tags: z.array(z.string().trim().min(1).max(100)).max(20).optional(),
+  /**
+   * Move the memory to a project, or to general knowledge with null. Omitted keeps the current
+   * owner. Changing owner changes the sync scope, which the Server handles as a two-step
+   * withdrawal and republication; a partial result is reported rather than hidden.
+   */
+  projectId: z.string().trim().min(1).max(200).nullable().optional(),
 }).strict();
 export const MemoryEditOutput = z.object({
   memoryId: z.uuid(), revisionId: z.uuid(), providerMemoryId: z.string().min(1),
@@ -449,11 +684,15 @@ export const ViewMemory = z.object({
   memoryId: z.uuid(), revisionId: z.uuid(), providerMemoryId: z.string().min(1),
   tier: z.enum(['pinned-critical', 'pinned-normal', 'dynamic']),
   applicability: z.string(),
+  /** Owning project; null means general knowledge. */
+  projectId: z.string().min(1).nullable().optional(),
   content: z.string(), excerpt: z.boolean(), score: z.number().finite().optional(),
   sourceReference: z.string().min(1),
 }).strict();
 export const ViewRule = z.object({
   entryId: z.uuid(), version: z.number().int().positive(), body: z.string().min(1),
+  importance: RuleImportance.optional(), pinned: z.boolean().optional(),
+  bodyBytes: z.number().int().positive().optional(), createdAt: z.iso.datetime().optional(),
 }).strict();
 export const ViewRerank = z.object({
   status: z.enum(['not_requested', 'applied', 'unavailable', 'failed']),
@@ -472,7 +711,15 @@ export const View = z.object({
   runtime: z.object({ sessionId: z.string(), task: z.string().nullable(), capture: z.string(), revision: z.number() }).optional(),
   // Runtime rules are injected whole or not at all; never truncated to fit.
   rules: z.array(ViewRule).optional(),
-  rulesBudget: z.object({ limitTokens: z.number().int().positive(), usedTokens: z.number().int().nonnegative(), exceeded: z.boolean() }).strict().optional(),
+  rulesBudget: z.object({
+    limitTokens: z.number().int().positive(), usedTokens: z.number().int().nonnegative(),
+    exceeded: z.boolean(), omittedCount: z.number().int().nonnegative().optional(),
+    omittedEntryIds: z.array(z.uuid()).optional(),
+    bodyTokens: z.number().int().nonnegative().optional(),
+    metadataTokens: z.number().int().nonnegative().optional(),
+  }).strict().optional(),
+  /** Why the final projection stopped below the requested budget. */
+  budgetOmissions: z.array(z.object({ kind: z.enum(['rules', 'memories', 'context', 'envelope']), count: z.number().int().nonnegative(), reason: z.string().min(1) }).strict()).optional(),
   // Logical memory UUID when attributed; the Provider memory id when a mid-assembly state
   // change removed the logical mapping.
   excluded: z.array(z.object({ memoryId: z.string().min(1), reason: z.enum(['not_visible', 'superseded', 'budget', 'grant_scope', 'unregistered']) }).strict()),
@@ -484,6 +731,10 @@ export const InjectionReport = z.object({
   id: z.uuid(), hostId: z.string().min(1), sessionId: z.string().min(1),
   rulesInjected: z.number().int().nonnegative(),
   rulesOmitted: z.enum(['budget_exceeded']).nullable(),
+  /** Number of complete rules the rule budget could not hold; absent on old reports. */
+  rulesOmittedCount: z.number().int().nonnegative().optional(),
+  /** Why complete rules were omitted; surfaced in injection diagnostics. */
+  rulesOmissionReason: z.string().optional(),
   memoriesInjected: z.number().int().nonnegative(),
   usedTokens: z.number().int().nonnegative(),
   createdAt: z.iso.datetime(),
@@ -582,10 +833,10 @@ Object.assign(openapi.paths, {
     responses: { '202': { description: 'Write queued with original stable write key', content: jsonContent(Candidate) }, '401': { description: 'Operator credential required' }, '409': { description: 'Candidate is not failed' } },
   } },
   '/v1/remember': { post: {
-    description: 'Create a candidate only; no formal Mnemon write happens in this call. Approved candidates are written by the background worker, and candidates carrying a change intent enter the version publication flow after human confirmation.',
+    description: 'Create a candidate only; no formal Mnemon write happens in this call. The Worker checks it by rule and either rejects a proven duplicate or parks it for a person; direct user writes use the memory endpoints instead.',
     requestBody: { required: true, content: jsonContent(RememberInput) },
     responses: {
-      '202': { description: 'Candidate accepted for future review', content: jsonContent(Candidate) },
+      '202': { description: 'Candidate accepted for review', content: jsonContent(Candidate) },
       '400': { description: 'Invalid input' }, '401': { description: 'Unauthorized' },
       '409': { description: 'Idempotency key conflict or candidate persistence not configured' },
     },
@@ -651,6 +902,73 @@ Object.assign(openapi.paths, {
     requestBody: { required: true, content: jsonContent(ExploreInput) },
     responses: { '200': { description: 'Ranked hits and the count of unpublished Provider matches', content: jsonContent(ExploreOutput) }, '400': { description: 'Empty query or invalid limit' }, '401': { description: 'Missing host identity' }, '503': { description: 'Provider unavailable' } },
   } },
+  '/v1/diagnostics/embeddings': { get: {
+    description: 'Official embedding coverage: whether the embedding service is reachable, whether the configured model is usable, how many insights carry a vector, and the recall mode that follows. `unknown` means the Provider interface could not answer.',
+    parameters: [{ name: 'x-mnemoweave-host', in: 'header', required: true, schema: z.toJSONSchema(z.string().min(1)) }],
+    responses: { '200': { description: 'Embedding and recall diagnosis', content: jsonContent(EmbeddingDiagnostics) }, '401': { description: 'Missing host identity' } },
+  } },
+  '/v1/idle-review/pending': { get: {
+    description: 'Sessions of this Host that still have signals no settled run consumed, so a host can trigger review without guessing.',
+    parameters: [{ name: 'x-mnemoweave-host', in: 'header', required: true, schema: z.toJSONSchema(z.string().min(1)) }],
+    responses: { '200': { description: 'Pending sessions', content: jsonContent(IdleReviewPendingOutput) }, '401': { description: 'Missing host identity' } },
+  } },
+  '/v1/idle-review/runs': {
+    get: {
+      description: 'Idle-review runs for one Host session, newest first, with per-item results.',
+      parameters: [
+        { name: 'x-mnemoweave-host', in: 'header', required: true, schema: z.toJSONSchema(z.string().min(1)) },
+        { name: 'sessionId', in: 'query', required: true, schema: z.toJSONSchema(z.string().min(1).max(256)) },
+      ],
+      responses: { '200': { description: 'Runs', content: jsonContent(IdleReviewRunsOutput) }, '400': { description: 'Invalid input' }, '401': { description: 'Missing host identity' } },
+    },
+    post: {
+      description: 'Start one idle-review run for a session and return the pending signals. A session already running is refused; the Server does not call a model.',
+      parameters: [{ name: 'x-mnemoweave-host', in: 'header', required: true, schema: z.toJSONSchema(z.string().min(1)) }],
+      requestBody: { required: true, content: jsonContent(IdleReviewRunStartInput) },
+      responses: { '201': { description: 'Run and its signals', content: jsonContent(IdleReviewRunStartOutput) }, '400': { description: 'Invalid input' }, '401': { description: 'Missing host identity' }, '409': { description: 'A run is already running for this session' } },
+    },
+  },
+  '/v1/idle-review/runs/{runId}/items': { post: {
+    description: 'Append one item result to a running idle-review run. Writes already happened through the ordinary authorized endpoints; this records the outcome. A finished or cancelled run refuses late items.',
+    parameters: [
+      { name: 'x-mnemoweave-host', in: 'header', required: true, schema: z.toJSONSchema(z.string().min(1)) },
+      { name: 'runId', in: 'path', required: true, schema: z.toJSONSchema(z.uuid()) },
+    ],
+    requestBody: { required: true, content: jsonContent(IdleReviewRunItem) },
+    responses: { '200': { description: 'Updated run', content: jsonContent(IdleReviewRun) }, '400': { description: 'Invalid input' }, '404': { description: 'Run not found' }, '409': { description: 'Run is not running' } },
+  } },
+  '/v1/idle-review/runs/{runId}/finish': { post: {
+    description: 'Finish a running idle-review run as succeeded, failed or cancelled. A cancelled run cannot accept later items.',
+    parameters: [
+      { name: 'x-mnemoweave-host', in: 'header', required: true, schema: z.toJSONSchema(z.string().min(1)) },
+      { name: 'runId', in: 'path', required: true, schema: z.toJSONSchema(z.uuid()) },
+    ],
+    requestBody: { required: true, content: jsonContent(IdleReviewRunFinishInput) },
+    responses: { '200': { description: 'Finished run', content: jsonContent(IdleReviewRun) }, '400': { description: 'Invalid input' }, '404': { description: 'Run not found' }, '409': { description: 'Run is already settled' } },
+  } },
+  '/v1/idle-review/scan': { post: {
+    description: 'Deterministic idle-review signal selection over completed turns. No model is called; the result is the durable evidence an isolated task Agent reads later.',
+    parameters: [{ name: 'x-mnemoweave-host', in: 'header', required: true, schema: z.toJSONSchema(z.string().min(1)) }],
+    requestBody: { required: true, content: jsonContent(IdleReviewScanInput) },
+    responses: { '200': { description: 'Selected signals, skipped counts and the new watermark', content: jsonContent(IdleReviewScanOutput) }, '400': { description: 'Invalid input' }, '401': { description: 'Missing host identity' } },
+  } },
+  '/v1/idle-review/signals': { get: {
+    description: 'Signals already selected for one Host session, oldest turn first.',
+    parameters: [
+      { name: 'x-mnemoweave-host', in: 'header', required: true, schema: z.toJSONSchema(z.string().min(1)) },
+      { name: 'sessionId', in: 'query', required: true, schema: z.toJSONSchema(z.string().min(1).max(256)) },
+    ],
+    responses: { '200': { description: 'Stored signals', content: jsonContent(IdleReviewSignalsOutput) }, '400': { description: 'Invalid input' }, '401': { description: 'Missing host identity' } },
+  } },
+  '/v1/diagnostics/embeddings/backfill': { post: {
+    description: 'Backfill missing embedding vectors with the Provider command. One job per kind runs at a time; the job row survives restarts and a killed run is marked interrupted on the next start.',
+    parameters: [{ name: 'x-mnemoweave-host', in: 'header', required: true, schema: z.toJSONSchema(z.string().min(1)) }],
+    responses: { '202': { description: 'Backfill job started', content: jsonContent(DiagnosticJob) }, '401': { description: 'Missing host identity' }, '409': { description: 'A backfill is already running' } },
+  } },
+  '/v1/projects': { get: {
+    description: 'Project ids this Server knows: registered for runtime scope, or owning a formal memory. The management page uses it for its project selector; the conversation scope is not changed by this read.',
+    responses: { '200': { description: 'Known project ids', content: jsonContent(ProjectsOutput) }, '401': { description: 'Missing host identity' } },
+  } },
   '/v1/memories/{memoryId}/withdraw': { post: {
     description: 'Withdraw a published memory. Recall and injection stop serving it; its revisions remain readable. Appends the withdrawal as a new version so every machine stops recalling it.',
     parameters: [{ name: 'memoryId', in: 'path', required: true, schema: z.toJSONSchema(z.uuid()) }],
@@ -700,48 +1018,77 @@ Object.assign(openapi.paths, {
   } },
   '/v1/rules': {
     get: {
-      description: 'Rule list for the operator or a Host that names itself. Rules apply to every session; disabled rules are listed, withdrawn ones are not.',
+      description: 'Rule list for the operator or a Host that names itself, plus the byte usage of the one global active set. Rules apply to every session; disabled rules are listed, withdrawn ones are not.',
       parameters: [],
       security: [{ operator: [] }, { bearer: [] }],
-      responses: { '200': { description: 'Rules', content: jsonContent(RuleList) }, '401': { description: 'Operator credential or Host header required' } },
+      responses: { '200': { description: 'Rules and byte usage', content: jsonContent(RuleList) }, '401': { description: 'Operator credential or Host header required' } },
     },
     post: {
-      description: 'Rule creation by the operator or a Host that names itself. Rejects with RULE_BUDGET_EXCEEDED when the applicable rules no longer fit the rule budget; a truncated rule is never stored.',
+      description: 'Rule creation by the operator or a Host that names itself. A body over the per-item byte limit is refused; when the active set exceeds its byte capacity, pinned and higher-importance entries are retained and the rest are archived locally before the write commits.',
       security: [{ operator: [] }, { bearer: [] }],
       requestBody: { required: true, content: jsonContent(RuleCreate) },
-      responses: { '201': { description: 'Created rule', content: jsonContent(RuleRecord) }, '400': { description: 'Invalid input' }, '401': { description: 'Operator credential or Host header required' }, '409': { description: 'RULE_BUDGET_EXCEEDED' } },
+      responses: { '201': { description: 'Created rule', content: jsonContent(RuleRecord) }, '400': { description: 'Invalid input' }, '401': { description: 'Operator credential or Host header required' }, '409': { description: 'RULE_ITEM_TOO_LARGE, RULE_CAPACITY_EXCEEDED or RULE_ARCHIVE_UNAVAILABLE' } },
     },
   },
+  '/v1/rules/archive': { get: {
+    description: 'Exact rule text, source version and importance that capacity maintenance moved out of the active set.',
+    security: [{ operator: [] }, { bearer: [] }],
+    responses: { '200': { description: 'Archived rules', content: jsonContent(RuleArchiveList) }, '401': { description: 'Operator credential or Host header required' } },
+  } },
   '/v1/rules/{ruleId}': { patch: {
-    description: 'Rule edit by the operator or a Host that names itself; appends a version and re-checks the rule budget. A supplied baseVersion that no longer matches the current version is refused with VERSION_CONFLICT.',
+    description: 'Rule edit by the operator or a Host that names itself; appends a version and re-checks byte capacity. A supplied baseVersion that no longer matches the current version is refused with VERSION_CONFLICT.',
     parameters: [{ name: 'ruleId', in: 'path', required: true, schema: z.toJSONSchema(z.uuid()) }],
     security: [{ operator: [] }, { bearer: [] }],
     requestBody: { required: true, content: jsonContent(RuleEdit) },
-    responses: { '200': { description: 'Updated rule', content: jsonContent(RuleRecord) }, '400': { description: 'Invalid input' }, '401': { description: 'Operator credential or Host header required' }, '404': { description: 'Rule not found' }, '409': { description: 'RULE_BUDGET_EXCEEDED or VERSION_CONFLICT' } },
+    responses: { '200': { description: 'Updated rule', content: jsonContent(RuleRecord) }, '400': { description: 'Invalid input' }, '401': { description: 'Operator credential or Host header required' }, '404': { description: 'Rule not found' }, '409': { description: 'RULE_ITEM_TOO_LARGE, RULE_CAPACITY_EXCEEDED, RULE_ARCHIVE_UNAVAILABLE or VERSION_CONFLICT' } },
   } },
   '/v1/archives/{entryId}': {
     patch: {
-      description: 'Edit an archive using the version read by the editor.',
+      description: 'Edit an active archive using the version read by the editor; byte capacity is checked before the new version is stored.',
       parameters: [{ in: 'path', name: 'entryId', required: true, schema: { type: 'string', format: 'uuid' } }],
       requestBody: { required: true, content: jsonContent(ArchiveEdit) },
-      responses: { '200': { description: 'Updated archive', content: jsonContent(ArchiveRecord) }, '409': { description: 'Archive version conflict' } },
+      responses: { '200': { description: 'Updated archive', content: jsonContent(ArchiveRecord) }, '400': { description: 'Invalid input' }, '409': { description: 'Archive version conflict, ARCHIVE_BODY_TOO_LARGE or ARCHIVE_CAPACITY_EXCEEDED' } },
     },
   },
+  '/v1/archives/{entryId}/state': { post: {
+    description: 'Move one archive between active and archived without losing its text, version or history. Restoring checks active byte capacity first.',
+    parameters: [{ in: 'path', name: 'entryId', required: true, schema: { type: 'string', format: 'uuid' } }],
+    requestBody: { required: true, content: jsonContent(ArchiveStateInput) },
+    responses: { '200': { description: 'Updated archive', content: jsonContent(ArchiveRecord) }, '400': { description: 'Invalid input' }, '404': { description: 'Archive not found' }, '409': { description: 'Archive version conflict, ARCHIVE_NOT_ACTIVE or ARCHIVE_CAPACITY_EXCEEDED' } },
+  } },
+  '/v1/archives/{entryId}/history': { get: {
+    description: 'Every recorded version of one archive, including the active/archived transition.',
+    parameters: [{ in: 'path', name: 'entryId', required: true, schema: { type: 'string', format: 'uuid' } }],
+    responses: { '200': { description: 'Archive history', content: jsonContent(ArchiveHistory) }, '404': { description: 'Archive not found' } },
+  } },
+  '/v1/archives/search': { get: {
+    description: 'On-demand archive search for a Host: bounded result count, per-result excerpt and total returned bytes. Archived entries are skipped unless requested.',
+    parameters: [
+      { name: 'projectId', in: 'query', required: true, schema: z.toJSONSchema(z.string().min(1).max(200)) },
+      { name: 'query', in: 'query', required: true, schema: z.toJSONSchema(z.string().min(1).max(500)) },
+      { name: 'limit', in: 'query', required: false, schema: { type: 'integer', minimum: 1, maximum: ARCHIVE_SEARCH_LIMIT_MAX } },
+      { name: 'includeArchived', in: 'query', required: false, schema: { type: 'boolean' } },
+    ],
+    security: [{ operator: [] }, { bearer: [] }],
+    responses: { '200': { description: 'Search hits with excerpts', content: jsonContent(ArchiveSearchOutput) }, '400': { description: 'Invalid input' }, '401': { description: 'Operator credential or Host header required' }, '409': { description: 'ARCHIVE_SEARCH_BUDGET_EXCEEDED when the per-turn call limit is reached' } },
+  } },
   '/v1/archives': {
     get: {
-      description: 'Project archive read for the operator or a Host that names itself. Without projectId every project is returned; withdrawn entries appear only when asked.',
+      description: 'Management list for the operator or a Host that names itself. Returns full bodies for pagination and editing; model-facing code uses the bounded search endpoint instead. Without projectId every project is returned; withdrawn entries appear only when asked.',
       parameters: [
         { name: 'projectId', in: 'query', required: false, schema: z.toJSONSchema(z.string().min(1).max(200)) },
         { name: 'includeWithdrawn', in: 'query', required: false, schema: z.toJSONSchema(z.boolean()) },
+        { name: 'limit', in: 'query', required: false, schema: { type: 'integer', minimum: 1, maximum: 200 } },
+        { name: 'cursor', in: 'query', required: false, schema: { type: 'string' } },
       ],
       security: [{ operator: [] }, { bearer: [] }],
-      responses: { '200': { description: 'Archives', content: jsonContent(ArchiveList) }, '400': { description: 'Invalid input' }, '401': { description: 'Operator credential or Host header required' } },
+      responses: { '200': { description: 'Archives and per-project capacity', content: jsonContent(ArchiveList) }, '400': { description: 'Invalid input' }, '401': { description: 'Operator credential or Host header required' } },
     },
     post: {
-      description: 'Create a project archive from a named Host or with the operator credential.',
-      security: [{ operator: [] }],
+      description: 'Create a project archive from a named Host or with the operator credential. The 2 MiB body limit and the project active capacity are checked before writing.',
+      security: [{ operator: [] }, { bearer: [] }],
       requestBody: { required: true, content: jsonContent(ArchiveCreate) },
-      responses: { '201': { description: 'Created archive', content: jsonContent(ArchiveRecord) }, '400': { description: 'Invalid input' }, '401': { description: 'Operator credential or Host header required' } },
+      responses: { '201': { description: 'Created archive', content: jsonContent(ArchiveRecord) }, '400': { description: 'Invalid input' }, '401': { description: 'Operator credential or Host header required' }, '409': { description: 'ARCHIVE_BODY_TOO_LARGE or ARCHIVE_CAPACITY_EXCEEDED' } },
     },
   },
   '/v1/runtime/projects': { post: { description: 'Operator-only explicit project registration; IDs are never inferred from paths.', requestBody: { required: true, content: jsonContent(z.object({ projectId: z.string().min(1).max(200) }).strict()) }, responses: { '200': { description: 'Registered' }, '401': { description: 'Operator required' } } } },

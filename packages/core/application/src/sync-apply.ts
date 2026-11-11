@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { MnemoWeaveError } from '../../contracts/src/index.ts';
 import type { SyncContentValue, SyncEntryValue } from '../../contracts/src/index.ts';
 import type { ApplyOutcome, SyncInboxRecord } from './sync.ts';
+import type { RuleArchiveRow, RuleLimits } from './rules.ts';
 
 /**
  * Turning a received change into a local state.
@@ -18,6 +19,10 @@ export interface LocalRuleRow {
   enabled: boolean;
   version: number;
   withdrawnAt: string | null;
+  /** Absent on pre-v16 rows; normalized to `normal`/false. */
+  importance?: 'critical' | 'normal' | 'low' | undefined;
+  pinned?: boolean | undefined;
+  createdAt?: string | undefined;
 }
 
 export interface LocalArchiveRow {
@@ -30,6 +35,10 @@ export interface LocalArchiveRow {
   evidence: string;
   version: number;
   withdrawnAt: string | null;
+  /** Absent on pre-v16 rows; normalized to active. */
+  state?: 'active' | 'archived' | undefined;
+  archivedAt?: string | null | undefined;
+  updatedAt?: string | undefined;
 }
 
 export type FormalMapState = 'applied' | 'pending' | 'unknown' | 'needs_review';
@@ -48,8 +57,7 @@ export interface MemoryApplyStore {
   withdrawRule(entryId: string, at: string): void;
   upsertArchive(row: LocalArchiveRow, at: string): void;
   withdrawArchive(entryId: string, at: string): void;
-  upsertFormalMap(row: FormalMapRow, at: string): void;
-  /** Provider id recorded for a specific revision, if this machine applied it. */
+  upsertFormalMap(row: FormalMapRow, at: string): void;  /** Provider id recorded for a specific revision, if this machine applied it. */
   formalProviderId(entryId: string, version: number): string | null;
   /**
    * Provider id this machine already holds for the same body, whatever version it was filed
@@ -63,6 +71,10 @@ export interface MemoryApplyStore {
   publishSynced?(input: SyncedPublish): void;
   /** Hide a synced formal memory whose remote entry was withdrawn. */
   retireSynced?(memoryId: string, at: string): void;
+  /** Apply a synced archive, archiving least-recently-used entries when the project is full. */
+  applyArchiveWithCapacity?(row: LocalArchiveRow, at: string, limitBytes: number): LocalArchiveRow[];
+  /** Apply a synced rule, archiving lower-priority entries when the active set is full. */
+  applyRuleWithCapacity?(row: LocalRuleRow, at: string, limits: RuleLimits): RuleArchiveRow[];
 }
 
 export interface SyncedPublish {
@@ -109,6 +121,9 @@ export interface ApplyPorts {
   store: MemoryApplyStore;
   provider: FormalProviderPort;
   now?: () => string;
+  /** Capacity is part of the local apply boundary, including retries and sync merges. */
+  ruleLimits?: RuleLimits;
+  archiveCapacityBytes?: number;
 }
 
 function projectIdOf(entry: SyncEntryValue): string | null {
@@ -116,20 +131,23 @@ function projectIdOf(entry: SyncEntryValue): string | null {
 }
 
 function ruleRow(entry: SyncEntryValue, body: string): LocalRuleRow {
-  const payload = entry.payload as { enabled?: boolean };
+  const payload = entry.payload as { enabled?: boolean; importance?: 'critical' | 'normal' | 'low'; pinned?: boolean };
   return {
     entryId: entry.entryId,
     body,
     enabled: payload.enabled !== false,
     version: entry.version,
     withdrawnAt: entry.withdrawnAt,
+    importance: payload.importance ?? 'normal',
+    pinned: payload.pinned === true,
   };
 }
 
 function archiveRow(entry: SyncEntryValue, body: string): LocalArchiveRow {
-  const payload = entry.payload as { title: string; source: string; verification: 'verified' | 'open' | 'refuted'; evidence: string };
+  const payload = entry.payload as { title: string; source: string; verification: 'verified' | 'open' | 'refuted'; evidence: string; state?: 'active' | 'archived'; archivedAt?: string | null };
   const projectId = projectIdOf(entry);
   if (projectId === null) throw new MnemoWeaveError('INVALID_INPUT');
+  const state = payload.state === 'archived' ? 'archived' : 'active';
   return {
     entryId: entry.entryId,
     projectId,
@@ -140,6 +158,8 @@ function archiveRow(entry: SyncEntryValue, body: string): LocalArchiveRow {
     evidence: payload.evidence,
     version: entry.version,
     withdrawnAt: entry.withdrawnAt,
+    state,
+    archivedAt: state === 'archived' ? payload.archivedAt ?? null : null,
   };
 }
 
@@ -159,14 +179,18 @@ export async function applyInboxEntry(record: SyncInboxRecord, ports: ApplyPorts
 
   if (entry.kind === 'runtime') {
     if (record.operation === 'delete' || entry.withdrawnAt !== null) ports.store.withdrawRule(entry.entryId, at);
-    else ports.store.upsertRule(ruleRow(entry, body), at);
+    else if (ports.store.applyRuleWithCapacity !== undefined && ports.ruleLimits !== undefined) {
+      ports.store.applyRuleWithCapacity(ruleRow(entry, body), at, ports.ruleLimits);
+    } else ports.store.upsertRule(ruleRow(entry, body), at);
     ports.store.setEntryVersion(entry.entryId, entry.version, at);
     return { status: 'applied' };
   }
 
   if (entry.kind === 'archive') {
     if (record.operation === 'delete' || entry.withdrawnAt !== null) ports.store.withdrawArchive(entry.entryId, at);
-    else ports.store.upsertArchive(archiveRow(entry, body), at);
+    else if (ports.store.applyArchiveWithCapacity !== undefined && ports.archiveCapacityBytes !== undefined) {
+      ports.store.applyArchiveWithCapacity(archiveRow(entry, body), at, ports.archiveCapacityBytes);
+    } else ports.store.upsertArchive(archiveRow(entry, body), at);
     ports.store.setEntryVersion(entry.entryId, entry.version, at);
     return { status: 'applied' };
   }

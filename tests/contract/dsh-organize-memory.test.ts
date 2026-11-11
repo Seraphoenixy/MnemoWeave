@@ -4,25 +4,28 @@ import { createTaskRunner } from '../../plugins/dsh-mnemo-weave/src/ui/task-runn
 import { organizeMemory } from '../../plugins/dsh-mnemo-weave/src/ui/organize-memory.ts';
 import type { MemorySource } from '../../plugins/dsh-mnemo-weave/src/ui/memory-source.ts';
 
-test('a user task only publishes a new record in the selected scope', async () => {
+test('a user task only publishes a new record with a supported kind', async () => {
   const writes: unknown[] = [];
   const source = {
-    explore: async () => ({ hits: [{ scope: 'project', projectId: 'private', content: 'Unrelated private memory' }] }),
-    rules: async () => [{ scope: 'global', body: 'Existing rule' }],
-    archives: async () => [],
+    explore: async () => ({ hits: [{ content: 'An existing memory' }] }),
+    rules: async () => [{ body: 'Existing rule' }],
+    archives: async () => [{ projectId: 'private', body: 'Other project archive' }],
     create: async (input: unknown) => { writes.push(input); return { memoryId: 'formal' }; },
     createRule: async (input: unknown) => { writes.push(input); return { entryId: 'rule' }; },
     saveArchive: async (input: unknown) => { writes.push(input); return { entryId: 'archive' }; },
   } as unknown as MemorySource;
-  const input = { content: 'A new fact', knowledgeType: 'Practice', scope: 'global' } as const;
+  const input = { content: 'A new fact', knowledgeType: 'Practice', projectId: 'alpha' } as const;
   assert.deepEqual(await organizeMemory(source, async prompt => {
-    assert.doesNotMatch(prompt, /Unrelated private memory/);
+    // Archives are still project-scoped: another project's reference material is not offered.
+    assert.doesNotMatch(prompt, /Other project archive/);
+    assert.match(prompt, /Existing rule/);
     return { action: 'create', kind: 'runtime', body: 'A new rule' };
   }, input), { kind: 'runtime', entryId: 'rule' });
-  assert.deepEqual(writes, [{ scope: 'global', body: 'A new rule' }]);
+  assert.deepEqual(writes, [{ body: 'A new rule' }]);
   assert.deepEqual(await organizeMemory(source, async () => ({ action: 'create', kind: 'formal', body: 'Existing rule' }), input), { kind: 'duplicate' });
   assert.deepEqual(await organizeMemory(source, async () => ({ action: 'review', reason: 'Contradictory' }), input), { kind: 'review', reason: 'Contradictory' });
-  await assert.rejects(organizeMemory(source, async () => ({ action: 'create', kind: 'archive', body: 'X', title: 'X' }), input));
+  // An archive needs a project, so the task cannot create one without one.
+  await assert.rejects(organizeMemory(source, async () => ({ action: 'create', kind: 'archive', body: 'X', title: 'X' }), { content: 'No project', knowledgeType: 'Practice' }));
   assert.equal(writes.length, 1);
 });
 

@@ -41,11 +41,11 @@ test('resolution order is stored preference, then profile, then environment, the
   assert.equal(fromProfile.sources.serverUrl, 'profile');
   assert.equal(fromProfile.sources.projectId, 'profile');
 
-  // The stored preference wins over both for the injection project only.
-  writePreferences({ projectId: 'pref-proj' }, env);
-  const fromPreference = resolveHostConfig({ projectId: 'profile-proj' }, env);
-  assert.equal(fromPreference.projectId, 'pref-proj');
-  assert.equal(fromPreference.sources.projectId, 'preference');
+  // The stored preference wins over both for the Host identity.
+  writePreferences({ hostId: 'pref-host' }, env);
+  const fromPreference = resolveHostConfig({ hostId: 'profile-host' }, env);
+  assert.equal(fromPreference.hostId, 'pref-host');
+  assert.equal(fromPreference.sources.hostId, 'preference');
 
   // Nothing configured falls back to the defaults.
   const bare = resolveHostConfig({}, { MNEMOWEAVE_DSH_SETTINGS: resolve('work', 'host-config', 'absent-' + randomUUID() + '.json') } as NodeJS.ProcessEnv);
@@ -87,7 +87,9 @@ test('preferences reject bad values and unknown keys instead of clamping silentl
   assert.throws(() => validatePreferences({ defaultTab: 'nope' }), /defaultTab/);
   // Sync is a settings section now; an old preference follows it instead of failing every read.
   assert.deepEqual(validatePreferences({ defaultTab: 'sync' }), { defaultTab: 'settings' });
-  assert.throws(() => validatePreferences({ defaultScope: 'everything' }), /defaultScope/);
+  // Scope is retired with the global memory model: a stored value is dropped, not rejected.
+  assert.deepEqual(validatePreferences({ defaultScope: 'everything' }), {});
+  assert.deepEqual(validatePreferences({ projectId: 'old-project' }), {});
   // The injection budget is part of the turn deadline, so the upper bound is enforced.
   assert.throws(() => validatePreferences({ injectTimeoutMs: 5_000 }), /injectTimeoutMs/);
   assert.throws(() => validatePreferences({ injectTimeoutMs: 10 }), /injectTimeoutMs/);
@@ -236,18 +238,19 @@ test('the page and the injection hook read the same saved values', () => {
   const pageView = service.settings();
   // The hook resolves independently, from the same file.
   const hookView = resolveHostConfig({ token: TOKEN }, env, readPreferences(env));
-  assert.equal(pageView.injection.projectId, hookView.projectId);
+  // The project dimension is retired from injection settings, so both halves resolve it as absent.
+  assert.equal(pageView.injection.projectId ?? null, hookView.projectId ?? null);
   assert.equal(pageView.injection.injectTimeoutMs, hookView.injectTimeoutMs);
   assert.equal(hookView.injectTimeoutMs, 900);
 });
 
 test('preferences survive a restart through the stored file', () => {
   const env = tempEnv('persist');
-  writePreferences({ defaultTab: 'memories', defaultScope: 'project:alpha', pageSize: 40 }, env);
+  writePreferences({ defaultTab: 'memories', pageSize: 40, hostId: 'pref-host' }, env);
   // A fresh read stands in for a DSH restart.
   const reloaded = readPreferences(env);
   assert.equal(reloaded.defaultTab, 'memories');
-  assert.equal(reloaded.defaultScope, 'project:alpha');
+  assert.equal(reloaded.hostId, 'pref-host');
   assert.equal(reloaded.pageSize, 40);
   // The file holds only preferences; no credential is written.
   const raw = readFileSync(reloaded.path, 'utf8');

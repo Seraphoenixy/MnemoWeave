@@ -43,6 +43,57 @@ test('project archives keep verification state and can be read with withdrawn ro
   }
 });
 
+test('archive state changes are readable and history keeps every version body', async () => {
+  const repo = await open();
+  try {
+    repo.memory.upsertArchive({ entryId: 'a1', projectId: 'alpha', title: '原标题', body: '原始正文', source: 'user', verification: 'open', evidence: '证据', version: 1, withdrawnAt: null }, NOW);
+    assert.equal(repo.memory.archiveHistory('a1').at(0)?.state, 'active');
+    repo.memory.upsertArchive({ entryId: 'a1', projectId: 'alpha', title: '原标题', body: '原始正文', source: 'user', verification: 'open', evidence: '证据', version: 2, withdrawnAt: null, state: 'archived', archivedAt: NOW }, NOW);
+    assert.equal(repo.memory.archive('a1')?.state, 'archived');
+    const history = repo.memory.archiveHistory('a1');
+    assert.deepEqual(history.map(row => row.version), [2, 1]);
+    assert.equal(history[0]?.state, 'archived');
+    assert.equal(history[1]?.body, '原始正文');
+    assert.equal(history[1]?.state, 'active');
+    assert.equal(repo.memory.archiveUsage('alpha').activeBytes, 0);
+    assert.equal(repo.memory.archiveUsage('alpha').archivedCount, 1);
+  } finally {
+    repo.close();
+  }
+});
+
+test('sync archive capacity archives the oldest active entries but keeps their text', async () => {
+  const repo = await open();
+  try {
+    const base = { projectId: 'alpha', title: 't', body: 'x'.repeat(60), source: 'user' as const, verification: 'open' as const, evidence: 'e', version: 1, withdrawnAt: null };
+    repo.memory.upsertArchive({ ...base, entryId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' }, NOW);
+    repo.memory.upsertArchive({ ...base, entryId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' }, '2026-11-10T10:00:01.000Z');
+    repo.memory.applyArchiveWithCapacity({ ...base, entryId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', body: 'y'.repeat(60) }, '2026-11-10T10:00:02.000Z', 150);
+    const rows = repo.memory.archivesFor('alpha', true);
+    assert.equal(rows.filter(row => row.state === 'archived').length, 1);
+    assert.equal(rows.find(row => row.entryId === 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa')?.body, 'x'.repeat(60));
+    assert.equal(repo.memory.archiveHistory('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa').at(0)?.state, 'archived');
+  } finally {
+    repo.close();
+  }
+});
+
+test('sync rule capacity archives lower-priority text and excludes it from the active list', async () => {
+  const repo = await open();
+  try {
+    repo.memory.upsertRule({ entryId: 'critical', body: 'c'.repeat(8000), enabled: true, version: 1, withdrawnAt: null, importance: 'critical' }, NOW);
+    repo.memory.upsertRule({ entryId: 'normal', body: 'n'.repeat(8000), enabled: true, version: 1, withdrawnAt: null, importance: 'normal' }, NOW);
+    const archived = repo.memory.applyRuleWithCapacity({ entryId: 'pending', body: 'pending', enabled: true, version: 1, withdrawnAt: null }, NOW, { capacityBytes: 14336, itemMaxBytes: 8192 });
+    assert.deepEqual(archived.map(row => row.ruleId), ['normal']);
+    assert.deepEqual(repo.memory.allRules().map(row => row.entryId).sort(), ['critical', 'pending']);
+    assert.equal(repo.memory.rule('normal'), null);
+    assert.equal(repo.memory.ruleArchive()[0]?.body, 'n'.repeat(8000));
+    assert.equal(repo.memory.ruleArchive()[0]?.reason, 'capacity');
+  } finally {
+    repo.close();
+  }
+});
+
 test('the formal map records one provider id per revision', async () => {  const repo = await open();
   try {
     assert.equal(repo.memory.formalProviderId('f1', 1), null);

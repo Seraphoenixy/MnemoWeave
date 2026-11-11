@@ -109,7 +109,11 @@ export function injectionChip(injection: UiInjection | null, language: Language)
   return {
     key: 'injection',
     label,
-    value: injection.rulesOmitted === null ? summary : `${summary} · ${translate(language, 'injection.omitted')}`,
+    value: injection.rulesOmitted === null
+      ? summary
+      : `${summary} · ${injection.rulesOmittedCount === undefined
+        ? translate(language, 'injection.omitted')
+        : translate(language, 'injection.omittedCount', { count: injection.rulesOmittedCount })}`,
     tone: injection.rulesOmitted === null ? 'ok' : 'warn',
   };
 }
@@ -139,6 +143,7 @@ export function detailMeta(detail: UiMemoryDetail, language: Language): Array<{ 
         ? translate(language, 'detail.viewingCurrent')
         : translate(language, 'detail.viewingHistory', { number: current === undefined ? '—' : `#${current.number}` }),
     },
+    { key: 'owner', label: translate(language, 'detail.project'), value: detail.projectId ?? translate(language, 'memory.general') },
     { key: 'applicability', label: translate(language, 'detail.applicability'), value: detail.applicability },
     { key: 'published', label: translate(language, 'detail.published'), value: formatDateTime(detail.publishedAt) },
   ];

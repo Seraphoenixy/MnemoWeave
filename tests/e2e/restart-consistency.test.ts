@@ -54,7 +54,7 @@ async function seed(root: string): Promise<string> {
   const repo = new SqliteCandidates(resolve(join(root, 'state', 'governance.db')));
   const provider = new MnemonCliProvider({ binary: mnemonBinary(), dataDir: resolve(join(root, 'provider')), store: 'restart' });
   const request = RememberInput.parse({
-    idempotencyKey: `restart-${randomUUID()}`, content: '重启前的初始正文。', knowledgeType: 'Practice', tags: [], scope: 'global',
+    idempotencyKey: `restart-${randomUUID()}`, content: '重启前的初始正文。', knowledgeType: 'Practice', tags: [],
     provenance: {
       source: 'local-user', sourceReference: 'restart:fixture', evidence: ['restart'], verificationStatus: 'verified',
       confidence: 1, applicability: 'global', limitations: '无（验收固定值）', lastVerified: '2026-11-10T00:00:00.000Z',

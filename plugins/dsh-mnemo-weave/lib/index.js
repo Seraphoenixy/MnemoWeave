@@ -21,16 +21,20 @@ export const inject = ['tools'];
 export function render(view) {
   const blocks = [];
   const rules = (view?.rules ?? []).map(rule => String(rule?.body ?? '').trim()).filter(body => body !== '');
-  if (rules.length > 0) blocks.push(`Runtime rules (confirmed by the user, follow them):\n${rules.map(rule => `- ${rule}`).join('\n')}`);
-  else if (view?.rulesBudget?.exceeded === true) blocks.push('Runtime rules were omitted: the budget was exceeded.');
+  if (rules.length > 0) {
+    blocks.push(`Runtime rules (confirmed by the user, follow them):\n${rules.map(rule => `- ${rule}`).join('\n')}`);
+    if (view?.rulesBudget?.exceeded === true) {
+      const count = view.rulesBudget.omittedCount;
+      blocks.push(`Runtime rules omitted: ${typeof count === 'number' ? `${count} complete lower-priority entries did not fit` : 'the budget was exceeded'}.`);
+    }
+  } else if (view?.rulesBudget?.exceeded === true) blocks.push('Runtime rules were omitted: the budget was exceeded.');
   const working = (view?.workingContext ?? []).map(entry => String(entry?.text ?? '')).filter(text => text.trim() !== '');
   if (working.length > 0) blocks.push(`Working context (unverified session material):\n${working.join('\n')}`);
   const memories = (view?.memories ?? []).filter(memory => String(memory?.content ?? '').trim() !== '');
   if (memories.length > 0) {
     blocks.push(`Formal memories:\n${memories.map((memory) => {
-      const scope = memory?.scope === 'global' ? 'global' : 'project';
       const excerpt = memory?.excerpt === true ? ' [excerpt]' : '';
-      return `- (${scope}) ${memory.content}${excerpt}`;
+      return `- ${memory.content}${excerpt}`;
     }).join('\n')}`);
   }
   return blocks.join('\n\n');
@@ -39,6 +43,19 @@ export function render(view) {
 /** Resolved once per turn, so a settings change is picked up without restarting DSH. */
 function currentConfig(config) {
   return resolveHostConfig(config, process.env, readPreferences(process.env));
+}
+
+/** Model evidence is smaller than the Provider Recall surface: 1 KiB body, 8 KiB total. */
+const MODEL_BODY_BYTES = 1024;
+const MODEL_TOTAL_BYTES = 8 * 1024;
+function clipUtf8(text, maxBytes) {
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text;
+  let out = '';
+  for (const char of text) {
+    if (Buffer.byteLength(out + char, 'utf8') > maxBytes) break;
+    out += char;
+  }
+  return out;
 }
 
 async function fetchInjection(sessionId, config) {
@@ -124,18 +141,32 @@ export function createTools(config) {
         additionalProperties: false,
         properties: {
           query: { type: 'string', description: 'What to search for, in natural language.' },
-          limit: { type: 'integer', minimum: 1, maximum: 100, description: 'How many memories to return (default 10).' },
+          limit: { type: 'integer', minimum: 1, maximum: 5, description: 'How many memories to return (default 5).' },
         },
         required: ['query'],
       },
       output: TOOL_OUTPUT,
-      execute: (args, execution) => callServer(
-        config,
-        'POST',
-        '/v1/recall',
-        { query: args.query, ...(args.limit === undefined ? {} : { limit: args.limit }) },
-        execution?.signal,
-      ),
+      execute: async (args, execution) => {
+        const result = await callServer(
+          config,
+          'POST',
+          '/v1/recall',
+          { query: args.query, ...(args.limit === undefined ? {} : { limit: Math.min(args.limit, 5) }) },
+          execution?.signal,
+        );
+        const memories = Array.isArray(result?.memories) ? result.memories : [];
+        let total = 0;
+        let truncated = false;
+        const bounded = [];
+        for (const memory of memories) {
+          const content = clipUtf8(String(memory?.content ?? ''), MODEL_BODY_BYTES);
+          const bytes = Buffer.byteLength(content, 'utf8');
+          if (total + bytes > MODEL_TOTAL_BYTES) { truncated = true; break; }
+          total += bytes;
+          bounded.push({ ...memory, content, ...(bytes < Buffer.byteLength(String(memory?.content ?? ''), 'utf8') ? { excerpt: true } : {}) });
+        }
+        return { ...result, memories: bounded, ...(truncated ? { truncated: true } : {}) };
+      },
     },
     {
       name: 'mnemoweave_read_memory',
@@ -160,24 +191,10 @@ export function createTools(config) {
     },
     {
       name: 'mnemoweave_runtime_memory',
-      description: 'Read the runtime rules (运行时记忆) that this Server injects into every turn, with their scope, version and enabled state. Read-only: rules are added and edited on the memory page, and the model cannot publish or change them.',
-      parameters: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          scope: { type: 'string', enum: ['all', 'global', 'project'], description: 'Which rules to read; default all.' },
-          projectId: { type: 'string', description: 'The project whose rules to read when scope is project.' },
-        },
-      },
+      description: 'Read the runtime rules (运行时记忆) that this Server injects into every turn, with their version and enabled state. Rules apply to every session and are read-only here: they are added and edited on the memory page, and the model cannot publish or change them.',
+      parameters: { type: 'object', additionalProperties: false, properties: {} },
       output: TOOL_OUTPUT,
-      execute: (args, execution) => {
-        const scope = args.scope ?? 'all';
-        if (scope === 'project' && (typeof args.projectId !== 'string' || args.projectId.trim() === '')) {
-          throw new Error('projectId is required when scope is project');
-        }
-        const query = new URLSearchParams({ scope, ...(args.projectId === undefined ? {} : { projectId: args.projectId }) });
-        return callServer(config, 'GET', `/v1/rules?${query.toString()}`, undefined, execution?.signal);
-      },
+      execute: (_args, execution) => callServer(config, 'GET', '/v1/rules', undefined, execution?.signal),
     },
     {
       name: 'mnemoweave_project_archives',
@@ -196,24 +213,34 @@ export function createTools(config) {
       execute: async (args, execution) => {
         const projectId = (args.projectId ?? currentConfig(config).projectId)?.trim();
         if (!projectId || projectId.length > 200) throw new Error('A projectId is required');
-        const query = args.query?.trim().toLowerCase();
+        const query = args.query?.trim();
         if (Boolean(query) === Boolean(args.entryId)) throw new Error('Supply a query or an archive entryId');
         const params = new URLSearchParams({ projectId });
-        const { items } = await callServer(config, 'GET', `/v1/archives?${params}`, undefined, execution?.signal);
         if (args.entryId) {
-          const archive = items.find(item => item.entryId === args.entryId);
+          // Reading one archive is an explicit management read: history returns every stored
+          // version, newest first, and the first item is the current body.
+          const { items } = await callServer(config, 'GET', `/v1/archives/${encodeURIComponent(args.entryId)}/history`, undefined, execution?.signal);
+          const archive = items[0];
           if (!archive) throw new Error('Archive not found in this project');
+          if (archive.projectId !== projectId) throw new Error('Archive not found in this project');
           return archive;
         }
-        return { items: items
-          .filter(item => [item.title, item.body].some(text => text.toLowerCase().includes(query)))
-          .slice(0, 10)
-          .map(({ entryId, title, verification, version }) => ({ entryId, title, verification, version })) };
+        params.set('query', query);
+        params.set('limit', '10');
+        const result = await callServer(config, 'GET', `/v1/archives/search?${params}`, undefined, execution?.signal);
+        return {
+          query: result.query,
+          total: result.total,
+          truncated: result.truncated,
+          items: result.results.map(({ entryId, title, verification, version, state, excerpt, excerptTruncated }) => ({
+            entryId, title, verification, version, state, excerpt, excerptTruncated,
+          })),
+        };
       },
     },
     {
       name: 'mnemoweave_remember',
-      description: 'Submit one immutable candidate for review. It does not write formal memory: a person accepts or rejects it. Use it only for a durable fact the user supplied or confirmed; never publish model speculation, transcripts or temporary progress.',
+      description: 'Submit one immutable candidate for review. It does not write formal memory: the Worker checks it by rule, and a request it cannot settle waits for a person. Use it only for a durable fact the user supplied or confirmed; never publish model speculation, transcripts or temporary progress.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -224,17 +251,11 @@ export function createTools(config) {
           importance: { type: 'integer', minimum: 1, maximum: 5 },
           tags: { type: 'array', items: { type: 'string' }, description: 'At most 20 tags.' },
           entities: { type: 'array', items: { type: 'string' }, description: 'At most 50 entity names.' },
-          scope: { type: 'string', enum: ['global', 'project'], description: 'Defaults to global; project requires projectId.' },
-          projectId: { type: 'string', description: 'The project the candidate belongs to when scope is project.' },
         },
         required: ['content', 'knowledgeType'],
       },
       output: TOOL_OUTPUT,
       execute: (args, execution) => {
-        const scope = args.scope ?? 'global';
-        if (scope === 'project' && (typeof args.projectId !== 'string' || args.projectId.trim() === '')) {
-          throw new Error('projectId is required when scope is project');
-        }
         const body = {
           idempotencyKey: randomUUID().replaceAll('-', ''),
           content: args.content,
@@ -243,15 +264,13 @@ export function createTools(config) {
           ...(args.category === undefined ? {} : { category: args.category }),
           ...(args.importance === undefined ? {} : { importance: args.importance }),
           ...(args.entities === undefined ? {} : { entities: args.entities }),
-          scope,
-          ...(scope === 'project' ? { projectId: args.projectId } : {}),
           provenance: {
             source: 'agent',
             sourceReference: `dsh-mnemo-weave:${String(execution?.agent?.id ?? 'unknown')}`,
             evidence: ['Submitted as a candidate by the model through the MnemoWeave DSH tool.'],
             verificationStatus: 'unverified',
             confidence: 0.5,
-            applicability: scope === 'global' ? 'global' : `project:${args.projectId}`,
+            applicability: 'global',
             limitations: 'Model output; a person must review before it is published.',
             lastVerified: null,
           },
@@ -263,8 +282,46 @@ export function createTools(config) {
 }
 
 /** Registers the tools and one prompt section per turn; failures never block the turn. */
+/** The durable log, not the wall clock, identifies the turn a prompt assembly belongs to. */
+function openTurn(agent) {
+  let open;
+  try {
+    for (const event of agent?.session?.snapshotEvents?.() ?? []) {
+      const turn = typeof event?.data?.turn === 'number' ? event.data.turn : undefined;
+      if (event?.type === 'turn/start' && turn !== undefined) open = turn;
+      else if (event?.type === 'turn/end' && event?.data?.turn === open) open = undefined;
+    }
+  } catch {
+    return undefined;
+  }
+  return open;
+}
+
+/** One View per accepted turn: later model steps in the same turn reuse it unchanged. */
+function createTurnView(agent, sessionId, config) {
+  let cached;
+  const load = async () => {
+    const turn = openTurn(agent);
+    // Hosts that expose no durable turn cannot prove two assemblies belong together, so they
+    // keep the older per-assembly fetch rather than silently reusing a View across turns.
+    if (turn === undefined) return fetchInjection(sessionId, config);
+    if (cached?.turn === turn) {
+      if (cached.pending !== undefined) return cached.pending;
+      return cached.text;
+    }
+    const pending = fetchInjection(sessionId, config);
+    const entry = { turn, pending };
+    cached = entry;
+    const text = await pending;
+    if (cached === entry) cached = { turn, text };
+    return text;
+  };
+  return { load, clear: () => { cached = undefined; } };
+}
+
 export function apply(ctx, config = {}) {
   const releases = [];
+  const agentDisposers = new Set();
   for (const tool of createTools(config)) {
     const release = ctx.tools?.register?.(tool);
     if (typeof release === 'function') releases.push(release);
@@ -274,14 +331,14 @@ export function apply(ctx, config = {}) {
     if (!agentCtx?.on) return;
     const sessionId = String(agent.id ?? 'unknown');
     if (sessionId.startsWith('mnemoweave-task-')) return;
+    const loadView = createTurnView(agent, sessionId, config);
     const offs = [];
     offs.push(agentCtx.on('system-prompt/assemble', async (assembly, _context, next) => {
       const assembled = await next();
       try {
-        // Every assembly fetches the View again, so a runtime rule added or edited in the page
-        // reaches the model on the next turn. A failed fetch leaves the turn untouched and the
-        // next turn retries; no failure is remembered.
-        const text = await fetchInjection(sessionId, config);
+        // A rule edited during a turn reaches the model on the next turn; the accepted turn
+        // keeps one View so every model step sees the same sources and authority.
+        const text = await loadView.load();
         if (!text) return assembled;
         return { ...assembled, sections: [...(assembled.sections ?? []), { name: 'mnemo-weave:view', text }] };
       } catch {
@@ -289,12 +346,28 @@ export function apply(ctx, config = {}) {
       }
     }));
     offs.push(agentCtx.on('agent/turn-stopping', () => {
-      for (const off of offs.splice(0)) { try { off?.(); } catch { /* already disposed */ } }
+      loadView.clear();
+      // The turn is complete (its end event follows). Selection is deterministic and cheap, so
+      // the Server records the durable signals an idle-review task reads later; nothing is
+      // written to memory here and a failure leaves the turn unaffected.
+      const turn = openTurn(agent);
+      if (turn !== undefined) {
+        void callServer(config, 'POST', '/v1/idle-review/scan', {
+          sessionId, completedThroughTurn: turn, maxSignals: 10,
+        }).catch(() => undefined);
+      }
     }));
+    agentDisposers.add(() => {
+      for (const off of offs.splice(0)) { try { off?.(); } catch { /* already disposed */ } }
+    });
   });
   return () => {
     for (const release of releases.splice(0)) {
       try { release(); } catch { /* already released */ }
     }
+    for (const dispose of agentDisposers) {
+      try { dispose(); } catch { /* already disposed */ }
+    }
+    agentDisposers.clear();
   };
 }

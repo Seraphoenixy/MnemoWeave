@@ -4,11 +4,11 @@ import { z } from 'zod';
 import { mkdirSync, statfsSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { MnemonCliProvider } from '../../../packages/providers/mnemon/src/index.ts';
-import { MemoryApplication, SyncCoordinator, applyInboxEntry, archiveDraft, assertEntryVersion, planArchive, planEditChange, planRuleCreate, planRuleEdit, ruleDraft, ruleScope, submitLocalChange, toArchiveRecord, toRuleRecord } from '../../../packages/core/application/src/index.ts';
+import { MemoryApplication, SyncCoordinator, applyInboxEntry, archiveDraft, assertEntryVersion, planArchive, planArchiveEdit, planArchiveState, planEditChange, planRuleCreate, planRuleEdit, ruleDraft, ruleScope, selectIdleReviewSignals, submitLocalChange, toArchiveRecord, toRuleRecord } from '../../../packages/core/application/src/index.ts';
 import type { FormalProviderPort, LocalWriteState } from '../../../packages/core/application/src/index.ts';
 import { ViewAssembler } from '../../../packages/core/application/src/view.ts';
-import { MnemoWeaveError, ArchiveCreate, HostEvent, MemoryCreateInput, MemoryEditInput, MemoryList, MemoryWithdrawInput, RememberInput, RuleList, SyncRefreshOutput, SyncStatusOutput, ViewRequest } from '../../../packages/core/contracts/src/index.ts';
-import type { ReadGrantRecord, SyncEntryDraftValue } from '../../../packages/core/contracts/src/index.ts';
+import { MnemoWeaveError, ArchiveCreate, ArchiveEdit, ArchiveSearchInput, ArchiveStateInput, HostEvent, IdleReviewRunFinishInput, IdleReviewRunItem, IdleReviewRunStartInput, IdleReviewRunStartOutput, IdleReviewScanInput, IdleReviewScanOutput, MemoryCreateInput, MemoryEditInput, MemoryList, MemoryWithdrawInput, RememberInput, RuleArchiveList, RuleCreate, RuleEdit, RuleList, SyncRefreshOutput, SyncStatusOutput, ViewRequest, ARCHIVE_ACTIVE_CAPACITY_BYTES, RULE_CAPACITY_BYTES, RULE_CAPACITY_MAX_BYTES, RULE_ITEM_MAX_BYTES } from '../../../packages/core/contracts/src/index.ts';
+import type { DiagnosticJobRecord, ReadGrantRecord, SyncEntryDraftValue } from '../../../packages/core/contracts/src/index.ts';
 import { SqliteCandidates } from '../../../packages/infrastructure/governance/src/index.ts';
 import type { PublishedFormal } from '../../../packages/infrastructure/governance/src/index.ts';
 import { SyncClient } from '../../../packages/infrastructure/sync-client/src/index.ts';
@@ -23,6 +23,11 @@ const Config = z.object({
   MNEMOWEAVE_PORT: z.coerce.number().int().min(0).max(65535).default(4317),
   MNEMOWEAVE_STATE_DIR: z.string().refine(isAbsolute, 'State directory must be absolute').optional(),
   MNEMOWEAVE_WORKER: z.enum(['on', 'off']).default('on'),
+  /** One byte-accounted runtime rule collection; metadata added by injection is counted by View. */
+  MNEMOWEAVE_RULE_CAPACITY_BYTES: z.coerce.number().int().min(1).max(RULE_CAPACITY_MAX_BYTES).default(RULE_CAPACITY_BYTES),
+  MNEMOWEAVE_RULE_ITEM_MAX_BYTES: z.coerce.number().int().min(1).max(RULE_CAPACITY_MAX_BYTES).default(RULE_ITEM_MAX_BYTES),
+  /** Active project archives per project scope; archived entries do not consume it. */
+  MNEMOWEAVE_ARCHIVE_ACTIVE_CAPACITY_BYTES: z.coerce.number().int().min(1).default(ARCHIVE_ACTIVE_CAPACITY_BYTES),
 
   // STORAGE-02: no fixed quota is preconfigured; this floor only stops the worker before disk exhaustion.
   MNEMOWEAVE_MIN_FREE_BYTES: z.coerce.number().int().nonnegative().optional(),
@@ -72,6 +77,29 @@ export function drawableEdges(
       reason: edge.reason,
       effectiveAt: edge.effectiveAt,
     }));
+}
+
+/**
+ * A byte-bounded UTF-8 prefix. Search evidence is measured in bytes, so a cut must not
+ * split a multi-byte character or it would change the text that reaches the model.
+ */
+function utf8Prefix(text: string, maxBytes: number): { text: string; bytes: number } {
+  const bytes = Buffer.byteLength(text, 'utf8');
+  if (bytes <= maxBytes) return { text, bytes };
+  const buffer = Buffer.from(text, 'utf8');
+  let end = maxBytes;
+  while (end > 0 && (buffer[end]! & 0xc0) === 0x80) end -= 1;
+  const prefix = buffer.subarray(0, end).toString('utf8');
+  return { text: prefix, bytes: Buffer.byteLength(prefix, 'utf8') };
+}
+
+/** A deterministic ranking signal: exact title hits first, then verification, then recency. */
+function scoreArchive(row: { title: string; body: string; verification: string; updatedAt?: string | undefined }, query: string): number {
+  const lowered = query.toLowerCase();
+  let score = Number(row.title.toLowerCase().includes(lowered)) * 12;
+  score += Number(row.body.toLowerCase().includes(lowered)) * 4;
+  score += row.verification === 'verified' ? 3 : row.verification === 'open' ? 1 : 0;
+  return score;
 }
 
 /**
@@ -184,6 +212,11 @@ function clientGrant(hostId: string): ReadGrantRecord {
 
 export function configure(env: NodeJS.ProcessEnv = process.env) {
   const config = Config.parse(env);
+  const ruleLimits = {
+    capacityBytes: config.MNEMOWEAVE_RULE_CAPACITY_BYTES,
+    itemMaxBytes: Math.min(config.MNEMOWEAVE_RULE_ITEM_MAX_BYTES, config.MNEMOWEAVE_RULE_CAPACITY_BYTES),
+  };
+  const archiveLimitBytes = config.MNEMOWEAVE_ARCHIVE_ACTIVE_CAPACITY_BYTES;
   if (config.MNEMOWEAVE_QUOTA_SOFT_BYTES >= config.MNEMOWEAVE_QUOTA_HARD_BYTES) throw new Error('Quota soft limit must be below the hard limit');
   const provider = new MnemonCliProvider({ binary: config.MNEMON_BINARY, dataDir: config.MNEMON_DATA_DIR, store: config.MNEMON_STORE });
   const candidates = config.MNEMOWEAVE_STATE_DIR
@@ -243,7 +276,12 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
       // VIEW-01/02: assembly re-checks publication state and budget; grants are implicit now.
       // Rules carry no scope: every enabled rule applies to every session.
       const ruleSource = () => candidates.memory.rulesFor()
-        .map(row => ({ entryId: row.entryId, version: row.version, body: row.body }));
+        .map(row => ({
+          entryId: row.entryId, version: row.version, body: row.body,
+          importance: row.importance ?? 'normal', pinned: row.pinned === true,
+          bodyBytes: Buffer.byteLength(row.body, 'utf8'),
+          ...(row.createdAt === undefined ? {} : { createdAt: row.createdAt }),
+        }));
       const assembler = new ViewAssembler(app, { rules: ruleSource });
       const memoryRuntime = new MemoryRuntime(candidates.runtime, assembler);
       /**
@@ -297,6 +335,27 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
           if (editLocks.get(memoryId) === settled) editLocks.delete(memoryId);
         }
       };
+      /**
+       * Rule capacity is a property of the whole collection, so planning two writes against the
+       * same snapshot and saving both would exceed the limit. This lock covers plan, remote
+       * confirmation and the local save; distinct archives keep their own locks.
+       */
+      let ruleWrite = Promise.resolve();
+      const withRuleLock = async <T>(operation: () => Promise<T>): Promise<T> => {
+        const run = ruleWrite.then(operation, operation);
+        ruleWrite = run.then(() => undefined, () => undefined);
+        return run;
+      };
+      /**
+       * Archive capacity belongs to a project scope. Serializing archive writes (including state
+       * changes) keeps a plan from being based on usage another write already consumed.
+       */
+      let archiveWrite = Promise.resolve();
+      const withArchiveLock = async <T>(operation: () => Promise<T>): Promise<T> => {
+        const run = archiveWrite.then(operation, operation);
+        archiveWrite = run.then(() => undefined, () => undefined);
+        return run;
+      };
       const writeArchive = async (row: ReturnType<typeof planArchive>, baseVersion: number) => {
         if (!coordinator || !formalProvider) {
           candidates.memory.upsertArchive(row, new Date().toISOString());
@@ -308,19 +367,52 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
         const result = await submitLocal(scope, confirmed === 0 ? 'create' : 'update', archiveDraft(row), confirmed, () => undefined);
         if (result === 'queued') throw new MnemoWeaveError('SYNC_QUEUED');
         if (result === 'unknown') throw new MnemoWeaveError('SYNC_OUTCOME_UNKNOWN');
-        await coordinator.applyScope(scope, record => applyInboxEntry(record, { store: candidates.memory, provider: formalProvider! }));
+        await coordinator.applyScope(scope, record => applyInboxEntry(record, { store: candidates.memory, provider: formalProvider!, archiveCapacityBytes: archiveLimitBytes }));
         const current = candidates.memory.archive(row.entryId);
         if (!current || current.version <= confirmed) throw new MnemoWeaveError('SYNC_OUTCOME_UNKNOWN');
         return toArchiveRecord(current);
       };
+      /** Search call budget resets when a new View is assembled, so it is a per-turn budget. */
+      const archiveSearchCalls = new Map<string, number>();
+      /** One durable vector backfill at a time; the row is the state, not an in-memory flag. */
+      const BACKFILL_KIND = 'embedding-backfill';
+      const readEmbedding = async () => { try { return await provider.embeddingStatus(); } catch { return undefined; } };
+      const startBackfill = (): DiagnosticJobRecord => {
+        const job = candidates.memory.beginDiagnosticJob(BACKFILL_KIND);
+        void (async () => {
+          try {
+            const before = await readEmbedding();
+            const result = await provider.embedAll();
+            // `embed --all` output is not a stable contract; the coverage report is. The job is
+            // succeeded only when the command reported no error, and the after-count shows what
+            // actually changed.
+            const after = await readEmbedding();
+            candidates.memory.finishDiagnosticJob(job.id, result.error === null ? 'succeeded' : 'failed', {
+              ...(before === undefined ? {} : { embeddedBefore: before.embedded }),
+              ...(after === undefined ? {} : { embeddedAfter: after.embedded, total: after.total }),
+              ...(result.error === null ? {} : { error: result.error }),
+            });
+          } catch (error) {
+            candidates.memory.finishDiagnosticJob(job.id, 'failed', { error: error instanceof MnemoWeaveError ? error.code : 'INTERNAL' });
+          }
+        })();
+        return job;
+      };
       client = {
         view: async (hostId, input) => {
+          archiveSearchCalls.delete(hostId);
           const request = ViewRequest.parse(input);
           const view = await memoryRuntime.view(clientGrant(hostId), request);
           candidates.memory.recordInjection({
             id: randomUUID(), hostId, sessionId: request.sessionId ?? 'unspecified',
             rulesInjected: view.rules?.length ?? 0,
             rulesOmitted: view.rulesBudget?.exceeded ? 'budget_exceeded' : null,
+            ...(view.rulesBudget?.exceeded
+              ? {
+                rulesOmittedCount: view.rulesBudget.omittedCount,
+                rulesOmissionReason: view.budgetOmissions?.find(item => item.kind === 'rules')?.reason ?? 'rule budget could not hold complete rules',
+              }
+              : {}),
             memoriesInjected: view.memories.length,
             usedTokens: view.budget.usedTokens,
             createdAt: new Date().toISOString(),
@@ -334,6 +426,7 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
         },
         pin: input => { candidates.catalog.get(input.memoryId); candidates.runtime.pin(input); },
         register: projectId => candidates.runtime.register(projectId),
+        projects: async () => ({ projects: [...new Set([...candidates.runtime.list(), ...candidates.catalog.projects()])].sort() }),
         closeSession: (hostId, sessionId) => candidates.runtime.closeSession(hostId, sessionId),
         events: (hostId, input) => {
           const result = candidates.events.record(hostId, input);
@@ -349,13 +442,14 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
          * page whose candidates are all skipped does not stall — the next page continues from
          * where the scan stopped rather than from how many items were returned.
          */
-        memories: async ({ query, limit, category, knowledgeType, entity, sort, cursor }) => {
+        memories: async ({ query, limit, category, knowledgeType, entity, sort, cursor, projectId, includeGlobal }) => {
           const terms = query ? query.toLowerCase().split(/\s+/).filter(Boolean) : [];
           // The scan order is chosen first; the cursor then records a position in that order.
           const order: ListSort = sort ?? 'newest';
           const scoped: {
             memoryId: string; providerId: string; publishedAt: string;
             importance: number | null;
+            projectId: string | null;
             current: { knowledgeType?: string; category?: string; importance?: number; tags?: string[]; entities?: string[] };
           }[] = [];
           for (const providerId of candidates.catalog.visibleProviderIds()) {
@@ -368,6 +462,7 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
                 memoryId, providerId,
                 publishedAt: current.publishedAt,
                 importance: current.importance ?? null,
+                projectId: descriptor.projectId ?? null,
                 current: {
                   ...(current.knowledgeType === undefined ? {} : { knowledgeType: current.knowledgeType }),
                   ...(current.category === undefined ? {} : { category: current.category }),
@@ -388,6 +483,7 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
           const entityNames = new Map<string, string>();
           const entityCounts = new Map<string, number>();
           for (const entry of scoped) {
+            projects.set(entry.projectId ?? '', (projects.get(entry.projectId ?? '') ?? 0) + 1);
             if (entry.current.category !== undefined) categories.set(entry.current.category, (categories.get(entry.current.category) ?? 0) + 1);
             if (entry.current.knowledgeType !== undefined) knowledgeTypes.set(entry.current.knowledgeType, (knowledgeTypes.get(entry.current.knowledgeType) ?? 0) + 1);
             for (const value of entry.current.entities ?? []) {
@@ -401,7 +497,10 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
           // category filter.
           const wantedEntity = entity?.toLowerCase();
           const browsable = scoped.filter(entry =>
-            (category === undefined || entry.current.category === category)
+            (projectId === undefined
+              ? includeGlobal !== false || entry.projectId === null
+              : entry.projectId === projectId || (includeGlobal !== false && entry.projectId === null))
+            && (category === undefined || entry.current.category === category)
             && (knowledgeType === undefined || entry.current.knowledgeType === knowledgeType)
             && (wantedEntity === undefined || (entry.current.entities ?? []).some(value => value.toLowerCase() === wantedEntity)));
           browsable.sort((left, right) => compareEntries(left, right, order));
@@ -453,6 +552,7 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
               items.push({
                 memoryId: entry.memoryId, revisionId: current.id, providerMemoryId: entry.providerId,
                 applicability: descriptor.applicability, publishedAt: current.publishedAt, content,
+                projectId: descriptor.projectId ?? null,
                 entryVersion: candidates.memory.entryVersion(entry.memoryId),
                 // Carried from the candidate so the card can label the memory without a second read.
                 ...entry.current,
@@ -476,6 +576,7 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
             categories: [...categories].map(([value, count]) => ({ value, count })).sort((left, right) => left.value.localeCompare(right.value)),
             entities: [...entityNames].map(([key, value]) => ({ value, count: entityCounts.get(key) ?? 0 })).sort((left, right) => left.value.localeCompare(right.value)),
             knowledgeTypes: [...knowledgeTypes].map(([value, count]) => ({ value, count })).sort((left, right) => left.value.localeCompare(right.value)),
+            projects: [...projects].map(([value, count]) => ({ projectId: value === '' ? null : value, count })).sort((left, right) => (left.projectId ?? '').localeCompare(right.projectId ?? '')),
           });
         },
         /**
@@ -486,8 +587,8 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
          * never name a memory the caller could not open, and Provider hits with no catalog entry
          * are counted rather than silently dropped.
          */
-        explore: async (hostId: string, input: { query: string; limit: number; minScore?: number }) => {
-          const recalled = await app.recallDetailed({ query: input.query, limit: input.limit }, clientGrant(hostId));
+        explore: async (hostId: string, input: { query: string; limit: number; minScore?: number; projectId?: string }) => {
+          const recalled = await app.recallDetailed({ query: input.query, limit: input.limit, ...(input.projectId === undefined ? {} : { projectId: input.projectId }) }, clientGrant(hostId));
           const threshold = input.minScore ?? 0;
           const hits: Array<Record<string, unknown>> = [];
           for (const memory of recalled.memories) {
@@ -505,6 +606,7 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
                 content: memory.content,
                 score: memory.score ?? 0,
                 publishedAt: current.publishedAt,
+                projectId: descriptor.projectId ?? null,
                 ...(current.category === undefined ? {} : { category: current.category }),
                 ...(current.knowledgeType === undefined ? {} : { knowledgeType: current.knowledgeType }),
                 ...(current.tags === undefined ? {} : { tags: current.tags }),
@@ -538,24 +640,30 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
          * both endpoints are present, so nothing in the answer is undrawable. Bodies are left out
          * on purpose — reading them would cost one Provider process per node.
          */
-        graph: async (hostId: string, { limit }: { limit: number }) => {
+        graph: async (hostId: string, { limit, projectId, includeGlobal }: { limit: number; projectId?: string; includeGlobal?: boolean }) => {
           void hostId;
+          // The graph is drawn for one project: general memories plus that project's, never a
+          // neighbour's. An edge is kept only when both endpoints are in that same view.
+          const inScope = (owner: string | null): boolean => projectId === undefined || owner === projectId || (includeGlobal !== false && owner === null);
           const nodes: Array<{
             memoryId: string; publishedAt: string;
             state: 'active' | 'superseded' | 'unverified';
             category?: string; knowledgeType?: string; importance?: number;
+            projectId: string | null;
           }> = [];
           const describeNode = (memoryId: string): (typeof nodes)[number] | null => {
             const descriptor = candidates.catalog.get(memoryId);
             // A withdrawn memory is not somewhere to navigate to; a superseded one has to stay,
             // because a supersede edge points at it.
             if (descriptor.state === 'superseded' && descriptor.revisions.length === 0) return null;
+            if (!inScope(descriptor.projectId ?? null)) return null;
             const current = descriptor.revisions.find(revision => revision.id === descriptor.currentRevisionId);
             if (!current) return null;
             return {
               memoryId,
               state: descriptor.state === 'active' ? 'active' : descriptor.state === 'unverified' ? 'unverified' : 'superseded',
               publishedAt: current.publishedAt,
+              projectId: descriptor.projectId ?? null,
               ...(current.category === undefined ? {} : { category: current.category }),
               ...(current.knowledgeType === undefined ? {} : { knowledgeType: current.knowledgeType }),
               ...(current.importance === undefined ? {} : { importance: current.importance }),
@@ -623,7 +731,13 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
           const now = new Date().toISOString();
           const reason = parsed.reason ?? 'user edit from DSH memory page';
           const hash = createHash('sha256').update(parsed.content).digest('hex');
-          const scope = 'global';
+          // A memory keeps the owner it was published under. Moving it changes the sync scope of
+          // the same logical id, which the version ledger cannot express yet (the old scope's
+          // entry must be withdrawn while the new scope starts at version 1). Refusing is honest;
+          // silently writing it under one scope while the other still lists it would diverge.
+          const owner = descriptor.projectId ?? null;
+          if (parsed.projectId !== undefined && parsed.projectId !== owner) throw new MnemoWeaveError('NEEDS_REVIEW');
+          const scope = owner === null ? 'global' : `project:${owner}`;
           let providerId: string;
           let entryVersion: number;
           let publishedRevisionId: string | null = null;
@@ -635,7 +749,7 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
             const result = await submitLocal(plan.scope, plan.operation, plan.entry, plan.baseVersion, () => undefined, changeId);
             if (result === 'queued') throw new MnemoWeaveError('SYNC_QUEUED');
             if (result === 'unknown') throw new MnemoWeaveError('SYNC_OUTCOME_UNKNOWN');
-            await coordinator.applyScope(scope, row => applyInboxEntry(row, { store: candidates.memory, provider: formalProvider! }));
+            await coordinator.applyScope(scope, row => applyInboxEntry(row, { store: candidates.memory, provider: formalProvider!, ruleLimits, archiveCapacityBytes: archiveLimitBytes }));
             // The apply step processes rows in order and stops at a gap or at a row awaiting
             // review, so "the current version" may still belong to an earlier revision; using it
             // would hand back a stale Revision and file the operator decision against it. The
@@ -696,6 +810,10 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
          */
         createMemory: async (input) => {
           const parsed = MemoryCreateInput.parse(input);
+          // Attribution is a write into that project's scope. An unregistered id is a typo or a
+          // guess, so it is refused before anything reaches the Provider.
+          const projectId = parsed.projectId ?? null;
+          if (projectId !== null && !candidates.runtime.registered(projectId)) throw new MnemoWeaveError('INVALID_INPUT');
           // Creation is published by the background worker. Failing now is honest; waiting for a
           // publisher that is not running would leave the caller staring at a spinner and then
           // learn nothing happened.
@@ -716,10 +834,11 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
             ...(parsed.category === undefined ? {} : { category: parsed.category }),
             ...(parsed.importance === undefined ? {} : { importance: parsed.importance }),
             ...(parsed.entities === undefined ? {} : { entities: parsed.entities }),
+            ...(projectId === null ? {} : { projectId }),
             provenance: {
               source: 'local-user', sourceReference: `dsh-create:${randomUUID()}`,
               evidence: [reason], verificationStatus: 'verified', confidence: 1,
-              applicability: 'global', limitations: '无（用户直接新增）', lastVerified: now,
+              applicability: projectId === null ? 'global' : `project:${projectId}`, limitations: '无（用户直接新增）', lastVerified: now,
             },
           });
           const candidate = candidates.submit(request);
@@ -761,7 +880,7 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
           assertEntryVersion(currentVersion, parsed.entryVersion);
           const now = new Date().toISOString();
           if (coordinator && formalProvider) {
-            const scope = 'global';
+            const scope = descriptor.projectId ? `project:${descriptor.projectId}` : 'global';
             // The change envelope still carries a body: the contract requires one, and other
             // machines need the local read-back check to match. The withdrawal itself is
             // expressed by `withdrawnAt`, not by dropping the content.
@@ -798,36 +917,141 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
           return { memoryId, revisionId: withdrawn.revisionId, entryVersion: nextVersion, withdrawnAt: now };
         }),
         lastInjection: async (hostId, sessionId) => candidates.memory.lastInjection(hostId, sessionId),
-        rules: async () => RuleList.parse({ items: candidates.memory.everyRule().map(toRuleRecord) }),
-        createRule: async (input) => {
-          const row = planRuleCreate(input, candidates.memory.allRules());
-          await submitLocal(ruleScope(), 'create', ruleDraft(row), 0, () => candidates.memory.upsertRule(row, new Date().toISOString()));
-          return toRuleRecord(row);
+        embeddingDiagnostics: async hostId => {
+          const report = await app.embeddingDiagnostics(clientGrant(hostId));
+          const backfill = candidates.memory.diagnosticJob(BACKFILL_KIND);
+          return { ...report, ...(backfill === undefined ? {} : { backfill }) };
         },
-        editRule: async (ruleId, input) => {
+        embeddingBackfill: async hostId => { void hostId; return startBackfill(); },
+        idleReviewScan: async (hostId, input) => {
+          const request = IdleReviewScanInput.parse(input);
+          const state = candidates.events.idleReview(hostId, request.sessionId);
+          const selection = selectIdleReviewSignals(candidates.events.list(hostId, request.sessionId), {
+            afterTurn: state.lastTurn, completedThroughTurn: request.completedThroughTurn,
+            maxSignals: request.maxSignals, knownTexts: new Set(state.signals.map(signal => signal.text)),
+            now: new Date().toISOString(), id: randomUUID,
+          });
+          candidates.events.recordIdleReview(hostId, request.sessionId, selection.lastTurn, selection.signals);
+          return IdleReviewScanOutput.parse(selection);
+        },
+        idleReviewSignals: async (hostId, sessionId) => ({ items: candidates.events.idleReview(hostId, sessionId).signals }),
+        idleReviewRunStart: async (hostId, input) => {
+          const request = IdleReviewRunStartInput.parse(input);
+          const started = candidates.events.beginIdleRunWithSignals(hostId, request.sessionId, request.maxSignals);
+          return IdleReviewRunStartOutput.parse(started);
+        },
+        idleReviewPending: async hostId => ({ sessions: candidates.events.pendingIdleSessions(hostId) }),
+        idleReviewRuns: async (hostId, sessionId) => ({ items: candidates.events.idleRuns(hostId, sessionId) }),
+        idleReviewRunItem: async (hostId, runId, input) => candidates.events.recordIdleRunItem(hostId, runId, IdleReviewRunItem.parse(input)),
+        idleReviewRunFinish: async (hostId, runId, input) => {
+          const request = IdleReviewRunFinishInput.parse(input);
+          return candidates.events.finishIdleRun(hostId, runId, request.state, request.error);
+        },
+        rules: async () => RuleList.parse({
+          items: candidates.memory.everyRule().map(toRuleRecord),
+          usage: candidates.memory.ruleUsage(ruleLimits),
+        }),
+        ruleArchive: async () => RuleArchiveList.parse({ items: candidates.memory.ruleArchive() }),
+        createRule: async (input) => withRuleLock(async () => {
+          const plan = planRuleCreate(input, candidates.memory.allRules(), ruleLimits);
+          const now = new Date().toISOString();
+          await submitLocal(ruleScope(), 'create', ruleDraft(plan.row), 0, () => candidates.memory.saveRulePlan(plan, now));
+          return toRuleRecord(plan.row);
+        }),
+        editRule: async (ruleId, input) => withRuleLock(async () => {
           const current = candidates.memory.rule(ruleId);
           if (!current) throw new MnemoWeaveError('NOT_FOUND');
           // The editor carries the version it was opened at. Without this check two hosts would
           // both succeed and the later write would silently replace a rule the first one never
           // saw — the same class of overwrite the memory edit path refuses.
           if (input.baseVersion !== undefined && input.baseVersion !== current.version) throw new MnemoWeaveError('VERSION_CONFLICT');
-          const row = planRuleEdit(current, input, candidates.memory.allRules());
+          const plan = planRuleEdit(current, input, candidates.memory.allRules(), ruleLimits);
           const baseVersion = candidates.memory.entryVersion(ruleId);
-          await submitLocal(ruleScope(), baseVersion === 0 ? 'create' : 'update', ruleDraft(row), baseVersion, () => candidates.memory.upsertRule(row, new Date().toISOString()));
-          return toRuleRecord(row);
-        },
-        archives: async ({ projectId, includeWithdrawn }) => ({
-          items: (projectId === undefined
-            ? candidates.memory.allArchives(includeWithdrawn ?? false)
-            : candidates.memory.archivesFor(projectId, includeWithdrawn ?? false)).map(toArchiveRecord),
+          const now = new Date().toISOString();
+          await submitLocal(ruleScope(), baseVersion === 0 ? 'create' : 'update', ruleDraft(plan.row), baseVersion, () => candidates.memory.saveRulePlan(plan, now));
+          return toRuleRecord(plan.row);
         }),
-        editArchive: async (entryId, { baseVersion, ...input }) => withEditLock(entryId, async () => {
+        archives: async ({ projectId, includeWithdrawn, limit, cursor }) => {
+          const rows = projectId === undefined
+            ? candidates.memory.allArchives(includeWithdrawn ?? false)
+            : candidates.memory.archivesFor(projectId, includeWithdrawn ?? false);
+          if (cursor !== undefined && !/^\d+$/.test(cursor)) throw new MnemoWeaveError('INVALID_INPUT');
+          const start = cursor === undefined ? 0 : Number.parseInt(cursor, 10);
+          if (!Number.isSafeInteger(start) || start < 0) throw new MnemoWeaveError('INVALID_INPUT');
+          const pageSize = Math.min(Math.max(limit ?? 100, 1), 200);
+          const page = rows.slice(start, start + pageSize);
+          const projects = [...new Set((projectId === undefined ? rows.map(row => row.projectId) : [projectId]))];
+          return {
+            items: page.map(toArchiveRecord),
+            capacities: projects.map(id => candidates.memory.archiveUsage(id, archiveLimitBytes)),
+            ...(start + pageSize < rows.length ? { nextCursor: String(start + pageSize) } : {}),
+          };
+        },
+        searchArchives: async (hostId, input) => {
+          const request = ArchiveSearchInput.parse(input);
+          const calls = (archiveSearchCalls.get(hostId) ?? 0) + 1;
+          if (calls > 4) throw new MnemoWeaveError('ARCHIVE_SEARCH_BUDGET_EXCEEDED');
+          archiveSearchCalls.set(hostId, calls);
+          const rows = candidates.memory.searchArchives(request.projectId, request.query, request.includeArchived);
+          const results = [];
+          let totalBytes = 0;
+          const total = rows.length;
+          for (const row of rows) {
+            if (results.length >= request.limit) continue;
+            const bodyBytes = Buffer.byteLength(row.body, 'utf8');
+            const excerpt = utf8Prefix(row.body, 512);
+            if (totalBytes + excerpt.bytes > 4096) {
+              if (results.length === 0) {
+                results.push({
+                  entryId: row.entryId, projectId: row.projectId, title: row.title, state: row.state ?? 'active',
+                  version: row.version, verification: row.verification, excerpt: excerpt.text,
+                  excerptBytes: excerpt.bytes, excerptTruncated: excerpt.bytes < bodyBytes, bodyBytes, score: scoreArchive(row, request.query),
+                });
+              }
+              break;
+            }
+            totalBytes += excerpt.bytes;
+            results.push({
+              entryId: row.entryId, projectId: row.projectId, title: row.title, state: row.state ?? 'active',
+              version: row.version, verification: row.verification, excerpt: excerpt.text,
+              excerptBytes: excerpt.bytes, excerptTruncated: excerpt.bytes < bodyBytes, bodyBytes, score: scoreArchive(row, request.query),
+            });
+          }
+          return {
+            query: request.query, total, results, totalBytes, truncated: results.length >= request.limit && total > results.length,
+            excerptLimitBytes: 512 as const, totalLimitBytes: 4096 as const, callsLimit: 4 as const,
+          };
+        },
+        archiveHistory: async (entryId) => {
+          if (!candidates.memory.archive(entryId)) throw new MnemoWeaveError('NOT_FOUND');
+          return {
+            entryId,
+            items: candidates.memory.archiveHistory(entryId).map(row => ({
+              revisionId: row.revision_id, entryId: row.entry_id, projectId: row.project_id, version: row.version, title: row.title,
+              body: row.body, source: row.source as 'session' | 'tool' | 'user',
+              verification: row.verification as 'verified' | 'open' | 'refuted', evidence: row.evidence,
+              state: row.state as 'active' | 'archived', archivedAt: row.archived_at, recordedAt: row.recorded_at,
+            })),
+          };
+        },
+        editArchive: async (entryId, { baseVersion, ...input }) => withArchiveLock(async () => {
           const current = candidates.memory.archive(entryId);
           if (!current || current.withdrawnAt !== null) throw new MnemoWeaveError('NOT_FOUND');
           if (current.version !== baseVersion) throw new MnemoWeaveError('VERSION_CONFLICT');
-          return writeArchive({ ...current, ...input, version: current.version + 1 }, baseVersion);
+          return writeArchive(planArchiveEdit(current, input, candidates.memory.allArchives(true), undefined, archiveLimitBytes), baseVersion);
         }),
-        createArchive: async (input) => writeArchive(planArchive(ArchiveCreate.parse(input)), 0),
+        editArchiveState: async (entryId, input) => withArchiveLock(async () => {
+          const request = ArchiveStateInput.parse(input);
+          const current = candidates.memory.archive(entryId);
+          if (!current || current.withdrawnAt !== null) throw new MnemoWeaveError('NOT_FOUND');
+          if (current.version !== request.baseVersion) throw new MnemoWeaveError('VERSION_CONFLICT');
+          const row = planArchiveState(current, request.state, candidates.memory.allArchives(true), undefined, archiveLimitBytes);
+          return writeArchive(row, current.version);
+        }),
+        createArchive: async (input) => {
+          const parsed = ArchiveCreate.parse(input);
+          return withArchiveLock(async () => writeArchive(planArchive(parsed, candidates.memory.allArchives(true), undefined, archiveLimitBytes), 0));
+        },
       };
       if (config.MNEMOWEAVE_SYNC_URL && config.MNEMOWEAVE_SYNC_DEVICE_ID && config.MNEMOWEAVE_SYNC_TOKEN) {
         const syncClient = new SyncClient({ baseUrl: config.MNEMOWEAVE_SYNC_URL, deviceId: config.MNEMOWEAVE_SYNC_DEVICE_ID, token: config.MNEMOWEAVE_SYNC_TOKEN, timeoutMs: config.MNEMOWEAVE_SYNC_TIMEOUT_MS });
@@ -848,7 +1072,7 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
           remote: syncClient,
           coordinator,
           ledger: candidates.ledger,
-          apply: row => applyInboxEntry(row, { store: candidates.memory, provider: formal }),
+          apply: row => applyInboxEntry(row, { store: candidates.memory, provider: formal, ruleLimits, archiveCapacityBytes: archiveLimitBytes }),
           intervalMs: config.MNEMOWEAVE_SYNC_INTERVAL_MS,
         });
         sync = service;
@@ -900,7 +1124,7 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
               // an unconfirmed change as settled, so a later edit used a base the remote never issued.
               if (result.state === 'confirmed' && result.accepted !== null) {
                 candidates!.memory.setEntryVersion(pending.memoryId, result.accepted.version, new Date().toISOString());
-                await coordinator!.applyScope(pending.scope, row => applyInboxEntry(row, { store: candidates!.memory, provider: formalProvider! }));
+                await coordinator!.applyScope(pending.scope, row => applyInboxEntry(row, { store: candidates!.memory, provider: formalProvider!, ruleLimits, archiveCapacityBytes: archiveLimitBytes }));
                 candidates!.settleShare(pending.memoryId, 'confirmed', null, new Date().toISOString());
               } else {
                 candidates!.settleShare(pending.memoryId, 'failed', result.state === 'unknown' ? 'SYNC_OUTCOME_UNKNOWN' : 'SYNC_QUEUED', new Date().toISOString());

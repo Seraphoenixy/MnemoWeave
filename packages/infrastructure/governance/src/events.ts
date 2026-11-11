@@ -1,5 +1,6 @@
-import { HostEvent, MnemoWeaveError } from '../../../core/contracts/src/index.ts';
-import type { EventRecord, HostEventRecord, RetentionSweepReport } from '../../../core/contracts/src/index.ts';
+import { randomUUID } from 'node:crypto';
+import { HostEvent, IdleReviewRun, MnemoWeaveError } from '../../../core/contracts/src/index.ts';
+import type { EventRecord, HostEventRecord, IdleReviewRunItemRecord, IdleReviewRunRecord, IdleReviewSignalRecord, RetentionSweepReport } from '../../../core/contracts/src/index.ts';
 
 type Transaction = <T>(operation: () => T) => T;
 export type DatabaseSync = import('node:sqlite').DatabaseSync;
@@ -73,6 +74,106 @@ export class SessionEventStore {
   }
   list(hostId: string, sessionId: string): EventRecord[] {
     return this.db.prepare('SELECT * FROM session_events WHERE host_id=? AND session_id=? ORDER BY received_at, event_id').all(hostId, sessionId).map(row => this.toRecord(row));
+  }
+  /** Idle-review watermark and stored signals for one Host session. */
+  idleReview(hostId: string, sessionId: string): { lastTurn: number; signals: IdleReviewSignalRecord[] } {
+    const state = this.db.prepare('SELECT last_turn FROM idle_review_state WHERE host_id=? AND session_id=?').get(hostId, sessionId);
+    const signals = this.db.prepare(`SELECT id,session_id,turn_id,event_id,text,project_id,reason,created_at
+      FROM idle_review_signals WHERE host_id=? AND session_id=? ORDER BY turn_id, id`).all(hostId, sessionId).map(row => ({
+      id: String(row['id']), sessionId: String(row['session_id']), turnId: Number(row['turn_id']),
+      eventId: String(row['event_id']), text: String(row['text']),
+      projectId: row['project_id'] === null ? null : String(row['project_id']),
+      reason: String(row['reason']) as IdleReviewSignalRecord['reason'], createdAt: String(row['created_at']),
+    }));
+    return { lastTurn: state === undefined ? 0 : Number(state['last_turn']), signals };
+  }
+  /** Persist one pass: signals are idempotent by event, and the watermark only moves forward. */
+  recordIdleReview(hostId: string, sessionId: string, lastTurn: number, signals: readonly IdleReviewSignalRecord[]): void {
+    this.transaction(() => {
+      for (const signal of signals) {
+        this.db.prepare('INSERT OR IGNORE INTO idle_review_signals(host_id,session_id,id,turn_id,event_id,text,project_id,reason,created_at) VALUES(?,?,?,?,?,?,?,?,?)')
+          .run(hostId, sessionId, signal.id, signal.turnId, signal.eventId, signal.text, signal.projectId, signal.reason, signal.createdAt);
+      }
+      this.db.prepare(`INSERT INTO idle_review_state(host_id,session_id,last_turn,updated_at) VALUES(?,?,?,?)
+        ON CONFLICT(host_id,session_id) DO UPDATE SET last_turn=MAX(idle_review_state.last_turn, excluded.last_turn), updated_at=excluded.updated_at`)
+        .run(hostId, sessionId, lastTurn, new Date().toISOString());
+    });
+  }
+
+  private idleRunRow(hostId: string, runId: string): IdleReviewRunRecord {
+    const row = this.db.prepare('SELECT * FROM idle_review_runs WHERE host_id=? AND id=?').get(hostId, runId);
+    if (row === undefined) throw new MnemoWeaveError('NOT_FOUND');
+    return IdleReviewRun.parse({
+      id: row['id'], sessionId: row['session_id'], state: row['state'], attempt: row['attempt'],
+      startedAt: row['started_at'], finishedAt: row['finished_at'] ?? null,
+      error: row['error'] === '' ? null : row['error'], items: JSON.parse(String(row['items_json'] ?? '[]')),
+    });
+  }
+  /** Start a run and reserve the signals it will process, in one transaction. */
+  beginIdleRunWithSignals(hostId: string, sessionId: string, limit: number): { run: IdleReviewRunRecord; signals: IdleReviewSignalRecord[] } {
+    return this.transaction(() => {
+      if (this.db.prepare("SELECT id FROM idle_review_runs WHERE host_id=? AND session_id=? AND state='running'").get(hostId, sessionId)) throw new MnemoWeaveError('INVALID_STATE');
+      const attempt = Number((this.db.prepare('SELECT COALESCE(MAX(attempt),0) n FROM idle_review_runs WHERE host_id=? AND session_id=?').get(hostId, sessionId)!['n'])) + 1;
+      const id = randomUUID();
+      this.db.prepare('INSERT INTO idle_review_runs(id,host_id,session_id,state,attempt,started_at,finished_at,error,items_json) VALUES(?,?,?,?,?,?,?,?,?)')
+        .run(id, hostId, sessionId, 'running', attempt, new Date().toISOString(), null, '', '[]');
+      const rows = this.db.prepare(`SELECT id,session_id,turn_id,event_id,text,project_id,reason,created_at
+        FROM idle_review_signals WHERE host_id=? AND session_id=? AND run_id IS NULL ORDER BY turn_id, id LIMIT ?`).all(hostId, sessionId, limit);
+      const signals = rows.map(row => ({
+        id: String(row['id']), sessionId: String(row['session_id']), turnId: Number(row['turn_id']),
+        eventId: String(row['event_id']), text: String(row['text']),
+        projectId: row['project_id'] === null ? null : String(row['project_id']),
+        reason: String(row['reason']) as IdleReviewSignalRecord['reason'], createdAt: String(row['created_at']),
+      }));
+      for (const signal of signals) this.db.prepare('UPDATE idle_review_signals SET run_id=? WHERE host_id=? AND id=?').run(id, hostId, signal.id);
+      return { run: this.idleRunRow(hostId, id), signals };
+    });
+  }
+  /** Sessions with signals no settled run has consumed, so a host can trigger review. */
+  pendingIdleSessions(hostId: string): Array<{ sessionId: string; count: number }> {
+    return this.db.prepare(`SELECT session_id, COUNT(*) n FROM idle_review_signals
+      WHERE host_id=? AND run_id IS NULL GROUP BY session_id ORDER BY MAX(turn_id) DESC LIMIT 20`)
+      .all(hostId).map(row => ({ sessionId: String(row['session_id']), count: Number(row['n']) }));
+  }
+  /** A failed or cancelled run releases its reservation so the next attempt sees the signals. */
+  private releaseIdleRun(hostId: string, runId: string): void {
+    this.db.prepare('UPDATE idle_review_signals SET run_id=NULL WHERE host_id=? AND run_id=?').run(hostId, runId);
+  }
+  idleRuns(hostId: string, sessionId: string): IdleReviewRunRecord[] {
+    return this.db.prepare('SELECT id FROM idle_review_runs WHERE host_id=? AND session_id=? ORDER BY started_at DESC').all(hostId, sessionId)
+      .map(row => this.idleRunRow(hostId, String(row['id'])));
+  }
+  /** Start a run; a session already running is refused rather than queued. */
+  beginIdleRun(hostId: string, sessionId: string): IdleReviewRunRecord {
+    return this.transaction(() => {
+      if (this.db.prepare("SELECT id FROM idle_review_runs WHERE host_id=? AND session_id=? AND state='running'").get(hostId, sessionId)) throw new MnemoWeaveError('INVALID_STATE');
+      const attempt = Number((this.db.prepare('SELECT COALESCE(MAX(attempt),0) n FROM idle_review_runs WHERE host_id=? AND session_id=?').get(hostId, sessionId)!['n'])) + 1;
+      const id = randomUUID();
+      this.db.prepare('INSERT INTO idle_review_runs(id,host_id,session_id,state,attempt,started_at,finished_at,error,items_json) VALUES(?,?,?,?,?,?,?,?,?)')
+        .run(id, hostId, sessionId, 'running', attempt, new Date().toISOString(), null, '', '[]');
+      return this.idleRunRow(hostId, id);
+    });
+  }
+  /** Append one item result; a finished or cancelled run refuses late writes. */
+  recordIdleRunItem(hostId: string, runId: string, item: IdleReviewRunItemRecord): IdleReviewRunRecord {
+    return this.transaction(() => {
+      const run = this.idleRunRow(hostId, runId);
+      if (run.state !== 'running') throw new MnemoWeaveError('INVALID_STATE');
+      if (run.items.some(existing => existing.index === item.index)) throw new MnemoWeaveError('INVALID_INPUT');
+      const items = [...run.items, item];
+      this.db.prepare('UPDATE idle_review_runs SET items_json=? WHERE host_id=? AND id=?').run(JSON.stringify(items), hostId, runId);
+      return this.idleRunRow(hostId, runId);
+    });
+  }
+  finishIdleRun(hostId: string, runId: string, state: 'succeeded' | 'failed' | 'cancelled', error?: string): IdleReviewRunRecord {
+    return this.transaction(() => {
+      const run = this.idleRunRow(hostId, runId);
+      if (run.state !== 'running') throw new MnemoWeaveError('INVALID_STATE');
+      this.db.prepare('UPDATE idle_review_runs SET state=?, finished_at=?, error=? WHERE host_id=? AND id=?')
+        .run(state, new Date().toISOString(), error ?? '', hostId, runId);
+      if (state !== 'succeeded') this.releaseIdleRun(hostId, runId);
+      return this.idleRunRow(hostId, runId);
+    });
   }
   private toRecord(row: Record<string, unknown>): EventRecord {
     return {

@@ -38,6 +38,13 @@ test('Error codes map to the documented HTTP statuses', () => {
     SYNC_QUEUED: 409,
     SYNC_OUTCOME_UNKNOWN: 409,
     RULE_BUDGET_EXCEEDED: 409,
+    RULE_ITEM_TOO_LARGE: 409,
+    RULE_CAPACITY_EXCEEDED: 409,
+    RULE_ARCHIVE_UNAVAILABLE: 409,
+    ARCHIVE_BODY_TOO_LARGE: 409,
+    ARCHIVE_CAPACITY_EXCEEDED: 409,
+    ARCHIVE_NOT_ACTIVE: 409,
+    ARCHIVE_SEARCH_BUDGET_EXCEEDED: 409,
     NEEDS_REVIEW: 409,
     DEVICE_REVOKED: 401,
     SCOPE_FORBIDDEN: 403,
@@ -77,15 +84,29 @@ test('Every documented route is actually handled by the HTTP server', async () =
     syncStatus: async () => ({ enabled: true, scopes: [], updatedAt: new Date().toISOString() }),
     syncRefresh: async () => ({ scopes: [], pulled: 0, applied: 0, errors: [], skipped: false }),
     lastInjection: async () => ({ id: uuid, hostId: 'host-probe', sessionId: 'probe', rulesInjected: 0, rulesOmitted: null, memoriesInjected: 0, usedTokens: 96, createdAt: new Date().toISOString() }),
-    rules: async () => ({ items: [] }),
-    createRule: async () => ({ entryId: uuid, scope: 'global', projectId: null, body: 'probe rule', enabled: true, version: 1, withdrawnAt: null }),
-    editRule: async () => ({ entryId: uuid, scope: 'global', projectId: null, body: 'probe rule v2', enabled: false, version: 2, withdrawnAt: null }),
-    createArchive: async () => ({ entryId: uuid, projectId: 'probe', title: 'probe', body: 'probe body', source: 'session', verification: 'open', evidence: 'probe evidence', version: 1, withdrawnAt: null }),
+    rules: async () => ({ items: [], usage: { limitBytes: 14336, itemMaxBytes: 8192, targetBytes: 10035, usedBytes: 0, entryCount: 0, exceeded: false, overByBytes: 0 } }),
+    ruleArchive: async () => ({ items: [] }),
+    createRule: async () => ({ entryId: uuid, body: 'probe rule', enabled: true, version: 1, withdrawnAt: null, importance: 'normal', pinned: false, bodyBytes: 10 }),
+    editRule: async () => ({ entryId: uuid, body: 'probe rule v2', enabled: false, version: 2, withdrawnAt: null, importance: 'normal', pinned: false, bodyBytes: 13 }),
+    createArchive: async () => ({ entryId: uuid, projectId: 'probe', title: 'probe', body: 'probe body', source: 'session', verification: 'open', evidence: 'probe evidence', version: 1, withdrawnAt: null, state: 'active', archivedAt: null, bodyBytes: 10 }),
     editArchive: async (entryId, input) => {
       if (input.baseVersion !== 1) throw new MnemoWeaveError('VERSION_CONFLICT');
-      return { entryId, projectId: 'probe', title: input.title, body: input.body, source: 'user', verification: input.verification, evidence: input.evidence, version: 2, withdrawnAt: null };
+      return { entryId, projectId: 'probe', title: input.title, body: input.body, source: 'user', verification: input.verification, evidence: input.evidence, version: 2, withdrawnAt: null, state: 'active', archivedAt: null, bodyBytes: 12 };
     },
-    archives: async () => ({ items: [] }),
+    editArchiveState: async entryId => ({ entryId, projectId: 'probe', title: 'probe', body: 'probe body', source: 'user', verification: 'open', evidence: 'probe evidence', version: 2, withdrawnAt: null, state: 'archived', archivedAt: new Date().toISOString(), bodyBytes: 10 }),
+    archiveHistory: async entryId => ({ entryId, items: [] }),
+    searchArchives: async (_hostId, input) => ({ query: input.query, total: 0, results: [], totalBytes: 0, truncated: false, excerptLimitBytes: 512, totalLimitBytes: 4096, callsLimit: 4 }),
+    archives: async () => ({ items: [], capacities: [] }),
+    projects: async () => ({ projects: [] }),
+    embeddingDiagnostics: async () => ({ provider: 'mnemon', model: 'nomic-embed-text', protocol: 'ollama', serviceAvailable: false, modelAvailable: false, embedded: 0, total: 0, coverage: 0, recallMode: 'unknown', degraded: true, lastError: 'embedding service unreachable', checkedAt: new Date().toISOString() }),
+    embeddingBackfill: async () => ({ id: uuid, kind: 'embedding-backfill', state: 'running', startedAt: new Date().toISOString(), finishedAt: null }),
+    idleReviewScan: async () => ({ signals: [], lastTurn: 0, skipped: { tooShort: 0, question: 0, noTurn: 0, outOfWindow: 0, duplicate: 0 } }),
+    idleReviewSignals: async () => ({ items: [] }),
+    idleReviewRunStart: async () => ({ run: { id: uuid, sessionId: 's', state: 'running', attempt: 1, startedAt: new Date().toISOString(), finishedAt: null, error: null, items: [] }, signals: [] }),
+    idleReviewRuns: async () => ({ items: [] }),
+    idleReviewPending: async () => ({ sessions: [] }),
+    idleReviewRunItem: async () => ({ id: uuid, sessionId: 's', state: 'running', attempt: 1, startedAt: new Date().toISOString(), finishedAt: null, error: null, items: [] }),
+    idleReviewRunFinish: async () => ({ id: uuid, sessionId: 's', state: 'cancelled', attempt: 1, startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), error: null, items: [] }),
   };
   const server = createHttpServer(stub, token, operatorToken, client, () => ({ usedBytes: 0, state: 'ok' }));
   await new Promise<void>(done => server.listen(0, '127.0.0.1', done));
@@ -93,8 +114,8 @@ test('Every documented route is actually handled by the HTTP server', async () =
     const address = server.address();
     assert.ok(address && typeof address === 'object');
     const base = `http://127.0.0.1:${address.port}`;
-    const operatorPaths = new Set(['/v1/runtime/pins', '/v1/runtime/projects', '/v1/review', '/v1/retry', '/v1/conflicts/resolve', '/v1/versions/cancel', '/v1/reviews/due', '/v1/reviews/complete', '/v1/sync/status', '/v1/sync/refresh', '/v1/injections/latest', '/v1/rules', '/v1/rules/{ruleId}', '/v1/archives']);
-    const hostPaths = new Set(['/v1/inject', '/v1/view', '/v1/events', '/v1/session/close', '/v1/runtime/context']);
+    const operatorPaths = new Set(['/v1/runtime/pins', '/v1/runtime/projects', '/v1/review', '/v1/retry', '/v1/conflicts/resolve', '/v1/versions/cancel', '/v1/reviews/due', '/v1/reviews/complete', '/v1/sync/status', '/v1/sync/refresh', '/v1/injections/latest', '/v1/rules', '/v1/rules/archive', '/v1/rules/{ruleId}', '/v1/archives', '/v1/archives/{entryId}/state', '/v1/archives/{entryId}/history', '/v1/archives/search']);
+    const hostPaths = new Set(['/v1/inject', '/v1/view', '/v1/events', '/v1/session/close', '/v1/runtime/context', '/v1/projects', '/v1/diagnostics/embeddings', '/v1/diagnostics/embeddings/backfill', '/v1/idle-review/scan', '/v1/idle-review/signals', '/v1/idle-review/runs', '/v1/idle-review/pending', '/v1/idle-review/runs/{runId}/items', '/v1/idle-review/runs/{runId}/finish']);
     const bodies: Record<string, string> = {
       '/v1/runtime/context': JSON.stringify({ sessionId: 'probe' }),
       '/v1/runtime/pins': JSON.stringify({ memoryId: uuid, tier: 'critical', scope: 'global' }),
@@ -105,9 +126,10 @@ test('Every documented route is actually handled by the HTTP server', async () =
       '/v1/events': JSON.stringify({ protocolVersion: '1', adapterVersion: 'probe', eventId: 'probe-event-1', sessionId: 'probe', kind: 'session.started', occurredAt: new Date().toISOString(), receivedAt: new Date().toISOString(), sourceRef: 'probe', payload: {} }),
       '/v1/session/close': JSON.stringify({ sessionId: 'probe' }),
       '/v1/memories/{memoryId}': JSON.stringify({ content: 'edited content' }),
-      '/v1/rules': JSON.stringify({ scope: 'global', body: 'probe rule' }),
+      '/v1/rules': JSON.stringify({ body: 'probe rule' }),
       '/v1/rules/{ruleId}': JSON.stringify({ enabled: false }),
       '/v1/archives': JSON.stringify({ projectId: 'probe', title: 'probe', body: 'probe body', source: 'session', verification: 'open', evidence: 'probe evidence' }),
+      '/v1/archives/{entryId}/state': JSON.stringify({ state: 'archived', baseVersion: 1 }),
     };
     for (const route of httpRoutes) {
       const path = route.path.replace(/\{[a-zA-Z]+\}/g, () => uuid);
@@ -170,7 +192,7 @@ test('Every documented route is actually handled by the HTTP server', async () =
     const editedArchive = await editArchive(archiveEdit);
     assert.equal(editedArchive.status, 200);
     assert.equal((await editedArchive.json() as { version: number }).version, 2);
-    const allRules = await fetch(`${base}/v1/rules?scope=all`, { headers: { authorization: `Bearer ${operatorToken}` } });
+    const allRules = await fetch(`${base}/v1/rules`, { headers: { authorization: `Bearer ${operatorToken}` } });
     assert.equal(allRules.status, 200);
     const operatorArchives = await fetch(`${base}/v1/archives`, { headers: { authorization: `Bearer ${operatorToken}` } });
     assert.equal(operatorArchives.status, 200);

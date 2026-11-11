@@ -109,12 +109,15 @@ export class MemoryClient {
   listMemories(query: {
     query?: string; limit?: number; cursor?: string;
     category?: string; knowledgeType?: string; entity?: string; sort?: 'newest' | 'oldest' | 'importance';
+    /** Management-page project filter; the session's project is not affected. */
+    projectId?: string; includeGlobal?: boolean;
   } = {}): Promise<ClientResponse<{
     items: MemoryListItem[];
     nextCursor?: string;
     categories?: { value: string; count: number }[];
     knowledgeTypes?: { value: string; count: number }[];
     entities?: { value: string; count: number }[];
+    projects?: { projectId: string | null; count: number }[];
   }>> {
     const params = new URLSearchParams();
     if (query.query !== undefined) params.set('query', query.query);
@@ -124,6 +127,8 @@ export class MemoryClient {
     if (query.knowledgeType !== undefined) params.set('knowledgeType', query.knowledgeType);
     if (query.entity !== undefined) params.set('entity', query.entity);
     if (query.sort !== undefined) params.set('sort', query.sort);
+    if (query.projectId !== undefined) params.set('projectId', query.projectId);
+    if (query.includeGlobal !== undefined) params.set('includeGlobal', String(query.includeGlobal));
     const suffix = params.toString() === '' ? '' : `?${params.toString()}`;
     return this.call('GET', `/v1/memories${suffix}`);
   }
@@ -133,27 +138,79 @@ export class MemoryClient {
     return this.call('GET', `/v1/memories/${encodeURIComponent(memoryId)}${suffix}`);
   }
 
+  /** Project ids known to this Server: registered for runtime scope or owning a memory. */
+  projects(): Promise<ClientResponse<{ projects: string[] }>> {
+    return this.call('GET', '/v1/projects');
+  }
+
+  /** Official embedding coverage and the recall mode that follows from it. */
+  embeddingDiagnostics(): Promise<ClientResponse<{
+    provider: 'mnemon'; model: string; protocol: string;
+    serviceAvailable: boolean; modelAvailable: boolean;
+    embedded: number; total: number; coverage: number;
+    recallMode: 'semantic' | 'keyword' | 'unknown';
+    degraded: boolean; lastError: string | null; checkedAt: string;
+  }>> {
+    return this.call('GET', '/v1/diagnostics/embeddings');
+  }
+
+  /** Deterministic idle-review scan over completed turns; no model is involved. */
+  idleReviewScan(input: { sessionId: string; completedThroughTurn: number; projectId?: string; maxSignals?: number }): Promise<ClientResponse<{
+    signals: Array<{ id: string; sessionId: string; turnId: number; eventId: string; text: string; projectId: string | null; reason: 'correction' | 'standing-instruction' | 'durable-fact'; createdAt: string }>;
+    lastTurn: number;
+    skipped: { tooShort: number; question: number; noTurn: number; outOfWindow: number; duplicate: number };
+  }>> {
+    return this.call('POST', '/v1/idle-review/scan', input);
+  }
+
+  /** Signals already selected for this Host session. */
+  idleReviewSignals(sessionId: string): Promise<ClientResponse<{ items: Array<Record<string, unknown>> }>> {
+    return this.call('GET', `/v1/idle-review/signals?sessionId=${encodeURIComponent(sessionId)}`);
+  }
+
+  idleReviewRunStart(input: { sessionId: string; maxSignals?: number }): Promise<ClientResponse<{ run: Record<string, unknown>; signals: Array<Record<string, unknown>> }>> {
+    return this.call('POST', '/v1/idle-review/runs', input);
+  }
+  idleReviewRunItem(runId: string, item: Record<string, unknown>): Promise<ClientResponse<Record<string, unknown>>> {
+    return this.call('POST', `/v1/idle-review/runs/${encodeURIComponent(runId)}/items`, item);
+  }
+  idleReviewRunFinish(runId: string, state: 'succeeded' | 'failed' | 'cancelled', error?: string): Promise<ClientResponse<Record<string, unknown>>> {
+    return this.call('POST', `/v1/idle-review/runs/${encodeURIComponent(runId)}/finish`, { state, ...(error === undefined ? {} : { error }) });
+  }
+  idleReviewPending(): Promise<ClientResponse<{ sessions: Array<{ sessionId: string; count: number }> }>> {
+    return this.call('GET', '/v1/idle-review/pending');
+  }
+
+  embeddingBackfill(): Promise<ClientResponse<{
+    id: string; kind: string; state: 'running' | 'succeeded' | 'failed' | 'interrupted';
+    startedAt: string; finishedAt: string | null; detail?: Record<string, unknown>;
+  }>> {
+    return this.call('POST', '/v1/diagnostics/embeddings/backfill');
+  }
+
   /**
    * Provider-ranked semantic search, mapped by the Server to memories this machine knows.
    * Distinct from `listMemories`, which matches body text over a stable scan.
    */
-  explore(query: string, limit = 20, minScore = 0): Promise<ClientResponse<{
+  explore(query: string, limit = 20, minScore = 0, projectId?: string): Promise<ClientResponse<{
     query: string;
     hits: Array<Record<string, unknown>>;
     unregistered: number;
     truncated: boolean;
   }>> {
-    return this.call('POST', '/v1/memories/explore', { query, limit, minScore });
+    return this.call('POST', '/v1/memories/explore', { query, limit, minScore, ...(projectId === undefined ? {} : { projectId }) });
   }
 
   /** Relation graph over the visible catalog: structure only, no bodies. */
-  graph(query: { limit?: number } = {}): Promise<ClientResponse<{
+  graph(query: { limit?: number; projectId?: string; includeGlobal?: boolean } = {}): Promise<ClientResponse<{
     nodes: Array<Record<string, unknown>>;
     edges: Array<Record<string, unknown>>;
     truncated: boolean;
   }>> {
     const params = new URLSearchParams();
     if (query.limit !== undefined) params.set('limit', String(query.limit));
+    if (query.projectId !== undefined) params.set('projectId', query.projectId);
+    if (query.includeGlobal !== undefined) params.set('includeGlobal', String(query.includeGlobal));
     const suffix = params.toString() === '' ? '' : `?${params.toString()}`;
     return this.call('GET', `/v1/memories/graph${suffix}`);
   }
@@ -162,6 +219,8 @@ export class MemoryClient {
   createMemory(input: {
     content: string; knowledgeType: string;
     category?: string; importance?: number; tags?: string[]; entities?: string[];
+    /** Owner; omitted or null writes general knowledge. */
+    projectId?: string | null;
     reason?: string;
   }): Promise<ClientResponse<{ memoryId: string; revisionId: string; providerMemoryId: string; contentHash: string; entryVersion: number }>> {
     return this.call('POST', '/v1/memories', input);
@@ -177,6 +236,8 @@ export class MemoryClient {
   editMemory(memoryId: string, input: {
     content: string; reason?: string; entryVersion: number;
     category?: string; knowledgeType?: string; importance?: number; tags?: string[];
+    /** Only the current owner is accepted; a change of owner is refused by the Server. */
+    projectId?: string | null;
   }): Promise<ClientResponse<{ memoryId: string; revisionId: string; providerMemoryId: string; contentHash: string; entryVersion: number }>> {
     return this.call('PATCH', `/v1/memories/${encodeURIComponent(memoryId)}`, input);
   }
@@ -190,28 +251,51 @@ export class MemoryClient {
     return this.call('GET', '/health/ready');
   }
 
-  /** Every rule: rules apply to every session. */
-  rules(): Promise<ClientResponse<{ items: RuleListItem[] }>> {
+  /** Every rule: rules apply to every session. Usage is the byte accounting of the active set. */
+  rules(): Promise<ClientResponse<{ items: RuleListItem[]; usage: RuleUsage }>> {
     return this.call('GET', '/v1/rules');
   }
 
+  /** Rules moved out of the active set by capacity maintenance, with exact text and version. */
+  ruleArchive(): Promise<ClientResponse<{ items: RuleArchiveItem[] }>> {
+    return this.call('GET', '/v1/rules/archive');
+  }
+
   /** Publish a runtime rule. The Server treats user input as already confirmed. */
-  createRule(input: { body: string; enabled?: boolean }): Promise<ClientResponse<RuleListItem>> {
+  createRule(input: { body: string; enabled?: boolean; importance?: 'critical' | 'normal' | 'low'; pinned?: boolean }): Promise<ClientResponse<RuleListItem>> {
     return this.call('POST', '/v1/rules', input);
   }
 
   /** Edit a runtime rule; `baseVersion` is the version the caller read before editing. */
-  editRule(ruleId: string, input: { body?: string; enabled?: boolean; baseVersion?: number }): Promise<ClientResponse<RuleListItem>> {
+  editRule(ruleId: string, input: { body?: string; enabled?: boolean; importance?: 'critical' | 'normal' | 'low'; pinned?: boolean; baseVersion?: number }): Promise<ClientResponse<RuleListItem>> {
     return this.call('PATCH', `/v1/rules/${encodeURIComponent(ruleId)}`, input);
   }
 
   /** Project archives; without projectId the Server returns every project. */
-  archives(query: { projectId?: string; includeWithdrawn?: boolean } = {}): Promise<ClientResponse<{ items: ArchiveItem[] }>> {
+  archives(query: { projectId?: string; includeWithdrawn?: boolean; limit?: number; cursor?: string } = {}): Promise<ClientResponse<{ items: ArchiveItem[]; capacities: ArchiveCapacity[]; nextCursor?: string }>> {
     const params = new URLSearchParams();
     if (query.projectId !== undefined) params.set('projectId', query.projectId);
     if (query.includeWithdrawn !== undefined) params.set('includeWithdrawn', String(query.includeWithdrawn));
+    if (query.limit !== undefined) params.set('limit', String(query.limit));
+    if (query.cursor !== undefined) params.set('cursor', query.cursor);
     const suffix = params.toString() === '' ? '' : `?${params.toString()}`;
     return this.call('GET', `/v1/archives${suffix}`);
+  }
+
+  /** Bounded archive search: small result count, excerpt bytes and total bytes. */
+  searchArchives(query: { projectId: string; query: string; limit?: number; includeArchived?: boolean }): Promise<ClientResponse<ArchiveSearchResult>> {
+    const params = new URLSearchParams({ projectId: query.projectId, query: query.query });
+    if (query.limit !== undefined) params.set('limit', String(query.limit));
+    if (query.includeArchived !== undefined) params.set('includeArchived', String(query.includeArchived));
+    return this.call('GET', `/v1/archives/search?${params.toString()}`);
+  }
+
+  archiveHistory(entryId: string): Promise<ClientResponse<{ entryId: string; items: ArchiveHistoryItem[] }>> {
+    return this.call('GET', `/v1/archives/${encodeURIComponent(entryId)}/history`);
+  }
+
+  editArchiveState(entryId: string, input: { state: 'active' | 'archived'; baseVersion: number }): Promise<ClientResponse<ArchiveItem>> {
+    return this.call('POST', `/v1/archives/${encodeURIComponent(entryId)}/state`, input);
   }
 
   createArchive(input: Pick<ArchiveItem, 'projectId' | 'title' | 'body' | 'source' | 'verification' | 'evidence'>): Promise<ClientResponse<ArchiveItem>> {
@@ -235,12 +319,34 @@ export class MemoryClient {
 
 export interface RuleListItem {
   entryId: string;
-  scope: 'global' | 'project';
-  projectId: string | null;
   body: string;
   enabled: boolean;
   version: number;
   withdrawnAt: string | null;
+  importance: 'critical' | 'normal' | 'low';
+  pinned: boolean;
+  bodyBytes: number;
+}
+
+export interface RuleUsage {
+  limitBytes: number;
+  itemMaxBytes: number;
+  targetBytes: number;
+  usedBytes: number;
+  entryCount: number;
+  exceeded: boolean;
+  overByBytes: number;
+}
+
+export interface RuleArchiveItem {
+  archiveId: string;
+  ruleId: string;
+  ruleVersion: number;
+  body: string;
+  importance: 'critical' | 'normal' | 'low';
+  pinned: boolean;
+  archivedAt: string;
+  reason: 'capacity' | 'manual';
 }
 
 export interface ArchiveItem {
@@ -253,6 +359,57 @@ export interface ArchiveItem {
   evidence: string;
   version: number;
   withdrawnAt: string | null;
+  state: 'active' | 'archived';
+  archivedAt: string | null;
+  bodyBytes: number;
+}
+
+export interface ArchiveCapacity {
+  projectId: string;
+  activeBytes: number;
+  limitBytes: number;
+  activeCount: number;
+  archivedCount: number;
+  exceeded: boolean;
+}
+
+export interface ArchiveSearchHit {
+  entryId: string;
+  projectId: string;
+  title: string;
+  state: 'active' | 'archived';
+  version: number;
+  verification: 'verified' | 'open' | 'refuted';
+  excerpt: string;
+  excerptBytes: number;
+  excerptTruncated: boolean;
+  bodyBytes: number;
+  score: number;
+}
+
+export interface ArchiveSearchResult {
+  query: string;
+  total: number;
+  results: ArchiveSearchHit[];
+  totalBytes: number;
+  truncated: boolean;
+  excerptLimitBytes: number;
+  totalLimitBytes: number;
+  callsLimit: number;
+}
+
+export interface ArchiveHistoryItem {
+  revisionId: string;
+  entryId: string;
+  version: number;
+  title: string;
+  body: string;
+  source: 'session' | 'tool' | 'user';
+  verification: 'verified' | 'open' | 'refuted';
+  evidence: string;
+  state: 'active' | 'archived';
+  archivedAt: string | null;
+  recordedAt: string;
 }
 
 export interface SyncScopeState {

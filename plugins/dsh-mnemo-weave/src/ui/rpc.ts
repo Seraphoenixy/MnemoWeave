@@ -6,6 +6,19 @@ import { reviewSkill } from './skill-review.ts';
 import { backtestSkill } from './skill-backtest.ts';
 import { organizeMemory } from './organize-memory.ts';
 import type { createTaskRunner } from './task-runner.ts';
+import { runIdleReview } from './idle-review-task.ts';
+import { organizeMemories } from './organize-memory-task.ts';
+import { listSkills } from './skills.ts';
+import { adoptSkill, createSkill, readSkillText, readVersionText, restoreSkill, skillVersions } from './skills-write.ts';
+import { autoAdoptSkill, parseAdoptionReview, readSkillPreferences, saveSkillPreferences } from './skills-adopt.ts';
+import { listTrash, restoreTrash, trashSkill } from './skills-trash.ts';
+import { adoptStoredDraft, dismissSkillDraft, listSkillDrafts, saveSkillDraft } from './skill-drafts.ts';
+import type { UiSkillDraft } from '../shared/contract.ts';
+
+function workspaceOf(payload: unknown): string {
+  const input = isRecord(payload) ? payload : {};
+  return typeof input['workspace'] === 'string' && input['workspace'].trim() !== '' ? input['workspace'].trim() : process.cwd();
+}
 
 /** The slice of the Host settings service this handler needs. */
 export interface SettingsLike {
@@ -100,6 +113,12 @@ function memoriesRequest(payload: unknown): MemoriesRequest {
   if (sort !== undefined && (typeof sort !== 'string' || !(SORTS as readonly string[]).includes(sort))) {
     invalid(`sort must be one of: ${SORTS.join(', ')}`);
   }
+  const projectId = payload['projectId'];
+  if (projectId !== undefined && (typeof projectId !== 'string' || projectId.trim() === '' || projectId.trim().length > 200)) {
+    invalid('projectId must be a non-empty string of at most 200 characters');
+  }
+  const includeGlobal = payload['includeGlobal'];
+  if (includeGlobal !== undefined && typeof includeGlobal !== 'boolean') invalid('includeGlobal must be a boolean');
   return {
     ...(query === undefined ? {} : { query }),
     limit: limit ?? DEFAULT_LIMIT,
@@ -108,6 +127,8 @@ function memoriesRequest(payload: unknown): MemoriesRequest {
     ...(knowledgeType === undefined ? {} : { knowledgeType: knowledgeType as (typeof KNOWLEDGE_TYPES)[number] }),
     ...(entity === undefined ? {} : { entity: (entity as string).trim() }),
     ...(sort === undefined ? {} : { sort: sort as (typeof SORTS)[number] }),
+    ...(projectId === undefined ? {} : { projectId: (projectId as string).trim() }),
+    ...(includeGlobal === undefined ? {} : { includeGlobal: includeGlobal as boolean }),
   };
 }
 
@@ -131,20 +152,28 @@ function memoryRequest(payload: unknown): MemoryRequest {
  * reason is what the history shows later about why.
  */
 /** The graph is a whole-catalog read; only the node cap is an argument. */
-function graphRequest(payload: unknown): { limit?: number } {
+function graphRequest(payload: unknown): { projectId?: string; includeGlobal?: boolean; limit?: number } {
   if (payload === undefined) return {};
   if (!isRecord(payload)) invalid('graph payload must be an object');
   const limit = payload['limit'];
   if (limit !== undefined && (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1 || limit > 500)) {
     invalid('limit must be an integer between 1 and 500');
   }
+  const projectId = payload['projectId'];
+  if (projectId !== undefined && (typeof projectId !== 'string' || projectId.trim() === '' || projectId.trim().length > 200)) {
+    invalid('projectId must be a non-empty string of at most 200 characters');
+  }
+  const includeGlobal = payload['includeGlobal'];
+  if (includeGlobal !== undefined && typeof includeGlobal !== 'boolean') invalid('includeGlobal must be a boolean');
   return {
     ...(limit === undefined ? {} : { limit }),
+    ...(projectId === undefined ? {} : { projectId: (projectId as string).trim() }),
+    ...(includeGlobal === undefined ? {} : { includeGlobal: includeGlobal as boolean }),
   };
 }
 
 /** Explore is a read: a query is required, and the page size stays small by design. */
-function exploreRequest(payload: unknown): { query: string; limit: number; minScore: number } {
+function exploreRequest(payload: unknown): { query: string; limit: number; minScore: number; projectId?: string } {
   if (!isRecord(payload)) invalid('explore payload must be an object');
   const query = payload['query'];
   if (typeof query !== 'string' || query.trim() === '') invalid('query must be a non-empty string');
@@ -157,7 +186,14 @@ function exploreRequest(payload: unknown): { query: string; limit: number; minSc
   if (minScore !== undefined && (typeof minScore !== 'number' || !Number.isFinite(minScore) || minScore < 0 || minScore > 1)) {
     invalid('minScore must be a number between 0 and 1');
   }
-  return { query: query.trim(), limit: limit ?? 20, minScore: minScore ?? 0 };
+  const projectId = payload['projectId'];
+  if (projectId !== undefined && (typeof projectId !== 'string' || projectId.trim() === '' || projectId.trim().length > 200)) {
+    invalid('projectId must be a non-empty string of at most 200 characters');
+  }
+  return {
+    query: query.trim(), limit: limit ?? 20, minScore: minScore ?? 0,
+    ...(projectId === undefined ? {} : { projectId: (projectId as string).trim() }),
+  };
 }
 
 function withdrawRequest(payload: unknown): UiWithdrawInput {
@@ -389,11 +425,137 @@ export function createRpcHandler(source: MemorySource, settings?: SettingsLike, 
             ...(request.knowledgeType === undefined ? {} : { knowledgeType: request.knowledgeType }),
             ...(request.entity === undefined ? {} : { entity: request.entity }),
             ...(request.sort === undefined ? {} : { sort: request.sort }),
+            ...(request.projectId === undefined ? {} : { projectId: request.projectId }),
+            ...(request.includeGlobal === undefined ? {} : { includeGlobal: request.includeGlobal }),
           }));
         }
         case 'memory': {
           const request = memoryRequest(payload);
           return ok(await source.memory(request.memoryId, request.revisionId));
+        }
+        case 'skillsList': {
+          const input = isRecord(payload) ? payload : {};
+          const workspace = typeof input['workspace'] === 'string' && input['workspace'].trim() !== '' ? input['workspace'].trim() : process.cwd();
+          if (workspace.length > 4096) invalid('Invalid workspace');
+          return ok(await listSkills(workspace));
+        }
+        case 'skillAdoptDraft': {
+          const input = isRecord(payload) ? payload : {};
+          const id = typeof input['id'] === 'string' ? input['id'] : '';
+          const baselineHash = typeof input['baselineHash'] === 'string' ? input['baselineHash'] : '';
+          if (id === '' || !/^[a-f0-9]{64}$/.test(baselineHash)) invalid('Invalid draft adoption');
+          return ok(await adoptStoredDraft({ id, baselineHash }));
+        }
+        case 'skillDrafts': {
+          const input = isRecord(payload) ? payload : {};
+          return ok(await listSkillDrafts({
+            ...(typeof input['workspace'] === 'string' && input['workspace'] !== '' ? { workspace: input['workspace'] } : {}),
+            ...(typeof input['skillPath'] === 'string' && input['skillPath'] !== '' ? { skillPath: input['skillPath'] } : {}),
+          }));
+        }
+        case 'skillSaveDraft': {
+          const input = isRecord(payload) ? payload : {};
+          const workspace = typeof input['workspace'] === 'string' ? input['workspace'].trim() : '';
+          const skillPath = input['skillPath'] === null ? null : typeof input['skillPath'] === 'string' ? input['skillPath'] : undefined;
+          const reason = typeof input['reason'] === 'string' ? input['reason'] : '';
+          const baseline = typeof input['baseline'] === 'string' ? input['baseline'] : '';
+          const candidate = typeof input['candidate'] === 'string' ? input['candidate'] : '';
+          const scenario = typeof input['scenario'] === 'string' ? input['scenario'] : '';
+          const checks = Array.isArray(input['checks']) ? input['checks'].filter((item): item is string => typeof item === 'string') : undefined;
+          const evidence = Array.isArray(input['evidence']) ? input['evidence'] : [];
+          if (workspace === '' || skillPath === undefined || reason === '' || candidate === '' || scenario === '' || checks === undefined) invalid('Invalid skill draft');
+          const report = input['report'] === null || input['report'] === undefined ? null : parseAdoptionReview({ report: input['report'], checks, completedAt: new Date().toISOString() })?.report ?? null;
+          return ok(await saveSkillDraft({
+            workspace, skillPath, reason, baseline, candidate, scenario, checks,
+            evidence: evidence.filter((item): item is UiSkillDraft['evidence'][number] => isRecord(item) && typeof item['step'] === 'number'
+              && (item['role'] === 'user' || item['role'] === 'assistant') && typeof item['text'] === 'string'),
+            report,
+            backtestError: typeof input['backtestError'] === 'string' ? input['backtestError'] : null,
+          }));
+        }
+        case 'skillDismissDraft': {
+          const input = isRecord(payload) ? payload : {};
+          const id = typeof input['id'] === 'string' ? input['id'] : '';
+          if (id === '') invalid('Invalid draft');
+          return ok(await dismissSkillDraft(id));
+        }
+        case 'skillRead': {
+          const input = isRecord(payload) ? payload : {};
+          const path = typeof input['path'] === 'string' ? input['path'] : '';
+          if (path === '') invalid('Invalid skill path');
+          return ok(await readSkillText({ workspace: workspaceOf(payload), path }));
+        }
+        case 'skillVersionText': {
+          const input = isRecord(payload) ? payload : {};
+          const path = typeof input['path'] === 'string' ? input['path'] : '';
+          const versionId = typeof input['versionId'] === 'string' ? input['versionId'] : '';
+          if (path === '' || versionId === '') invalid('Invalid version read');
+          return ok(await readVersionText({ workspace: workspaceOf(payload), path, versionId }));
+        }
+        case 'skillTrash': {
+          const input = isRecord(payload) ? payload : {};
+          const workspace = workspaceOf(payload);
+          const path = typeof input['path'] === 'string' ? input['path'] : '';
+          if (path === '') invalid('Invalid skill path');
+          return ok(await trashSkill({ workspace, path }));
+        }
+        case 'skillTrashList': return ok(await listTrash());
+        case 'skillTrashRestore': {
+          const input = isRecord(payload) ? payload : {};
+          const workspace = workspaceOf(payload);
+          const id = typeof input['id'] === 'string' ? input['id'] : '';
+          if (id === '') invalid('Invalid trash entry');
+          return ok(await restoreTrash({ id, workspace }));
+        }
+        case 'skillPreferences': return ok(await readSkillPreferences());
+        case 'setSkillAutoAdopt': {
+          const input = isRecord(payload) ? payload : {};
+          if (typeof input['autoAdopt'] !== 'boolean') invalid('Invalid preference');
+          return ok(await saveSkillPreferences({ autoAdopt: input['autoAdopt'] }));
+        }
+        case 'skillAutoAdopt': {
+          const input = isRecord(payload) ? payload : {};
+          const workspace = typeof input['workspace'] === 'string' && input['workspace'].trim() !== '' ? input['workspace'].trim() : process.cwd();
+          const path = typeof input['path'] === 'string' ? input['path'] : '';
+          const candidate = typeof input['candidate'] === 'string' ? input['candidate'] : '';
+          const baselineHash = typeof input['baselineHash'] === 'string' ? input['baselineHash'] : '';
+          const review = parseAdoptionReview(input['review']);
+          if (path === '' || candidate === '' || !/^[a-f0-9]{64}$/.test(baselineHash) || review === null) invalid('Invalid adoption review');
+          return ok(await autoAdoptSkill({ workspace, path, candidate, baselineHash, review }));
+        }
+        case 'skillCreate': {
+          const input = isRecord(payload) ? payload : {};
+          const workspace = typeof input['workspace'] === 'string' && input['workspace'].trim() !== '' ? input['workspace'].trim() : process.cwd();
+          const root = typeof input['root'] === 'string' ? input['root'] : '';
+          const name = typeof input['name'] === 'string' ? input['name'] : '';
+          const description = typeof input['description'] === 'string' ? input['description'] : '';
+          if (root === '' || name === '' || description === '') invalid('Invalid skill');
+          return ok(await createSkill({ workspace, root, name, description, ...(typeof input['body'] === 'string' ? { body: input['body'] } : {}) }));
+        }
+        case 'skillVersions': {
+          const input = isRecord(payload) ? payload : {};
+          const workspace = typeof input['workspace'] === 'string' && input['workspace'].trim() !== '' ? input['workspace'].trim() : process.cwd();
+          const path = typeof input['path'] === 'string' ? input['path'] : '';
+          if (path === '' || workspace.length > 4096) invalid('Invalid skill path');
+          return ok(await skillVersions({ workspace, path }));
+        }
+        case 'skillAdopt': {
+          const input = isRecord(payload) ? payload : {};
+          const workspace = typeof input['workspace'] === 'string' && input['workspace'].trim() !== '' ? input['workspace'].trim() : process.cwd();
+          const path = typeof input['path'] === 'string' ? input['path'] : '';
+          const candidate = typeof input['candidate'] === 'string' ? input['candidate'] : '';
+          const baselineHash = typeof input['baselineHash'] === 'string' ? input['baselineHash'] : '';
+          if (path === '' || candidate === '' || !/^[a-f0-9]{64}$/.test(baselineHash)) invalid('Invalid skill write');
+          return ok(await adoptSkill({ workspace, path, candidate, baselineHash }));
+        }
+        case 'skillRestore': {
+          const input = isRecord(payload) ? payload : {};
+          const workspace = typeof input['workspace'] === 'string' && input['workspace'].trim() !== '' ? input['workspace'].trim() : process.cwd();
+          const path = typeof input['path'] === 'string' ? input['path'] : '';
+          const versionId = typeof input['versionId'] === 'string' ? input['versionId'] : '';
+          const baselineHash = typeof input['baselineHash'] === 'string' ? input['baselineHash'] : '';
+          if (path === '' || versionId === '' || !/^[a-f0-9]{64}$/.test(baselineHash)) invalid('Invalid skill restore');
+          return ok(await restoreSkill({ workspace, path, versionId, baselineHash }));
         }
         case 'skillConversations':
           return ok(task?.conversations?.() ?? []);
@@ -425,12 +587,52 @@ export function createRpcHandler(source: MemorySource, settings?: SettingsLike, 
         case 'edit': return ok(await source.edit(editRequest(payload)));
         case 'withdraw': return ok(await source.withdraw(withdrawRequest(payload)));
         case 'graph': return ok(await source.graph(graphRequest(payload)));
+        case 'projects': return ok(await source.projects());
+        case 'embeddingDiagnostics': return ok(await source.embeddingDiagnostics());
+        case 'organizeMemories': {
+          if (task === undefined) return fail('task agents are unavailable in this build', 'PROVIDER_UNAVAILABLE');
+          if (!isRecord(payload)) invalid('Invalid organize request');
+          const instruction = typeof payload['instruction'] === 'string' ? payload['instruction'].trim() : '';
+          if (instruction === '' || instruction.length > 2000) invalid('instruction is required');
+          const projectId = typeof payload['projectId'] === 'string' && payload['projectId'].trim() !== '' ? payload['projectId'].trim() : undefined;
+          return ok(await organizeMemories(source, task, { instruction, ...(projectId === undefined ? {} : { projectId }) }, signal));
+        }
+        case 'idleReviewRun': {
+          if (task === undefined) return fail('task agents are unavailable in this build', 'PROVIDER_UNAVAILABLE');
+          const input = isRecord(payload) ? payload : {};
+          const sessionId = typeof input['sessionId'] === 'string' ? input['sessionId'].trim() : '';
+          if (sessionId === '') invalid('sessionId is required.');
+          const projectId = typeof input['projectId'] === 'string' && input['projectId'].trim() !== '' ? input['projectId'].trim() : undefined;
+          return ok(await runIdleReview(source, task, sessionId, projectId, signal));
+        }
         case 'explore': {
           const request = exploreRequest(payload);
           return ok(await source.explore(request));
         }
         case 'injection': return ok(await source.injection());
         case 'rules': return ok(await source.rules());
+        case 'ruleUsage': return ok(await source.ruleUsage());
+        case 'ruleArchive': return ok(await source.ruleArchive());
+        case 'archiveCapacities': return ok(await source.archiveCapacities());
+        case 'archiveSearch': {
+          if (!isRecord(payload)) invalid('Invalid archive search');
+          const { projectId, query, limit, includeArchived } = payload;
+          if (typeof projectId !== 'string' || projectId.trim() === '' || typeof query !== 'string' || query.trim() === '') invalid('Invalid archive search');
+          if (limit !== undefined && (typeof limit !== 'number' || !Number.isSafeInteger(limit) || limit < 1 || limit > 50)) invalid('Invalid archive search limit');
+          if (includeArchived !== undefined && typeof includeArchived !== 'boolean') invalid('Invalid archive search scope');
+          return ok(await source.searchArchives({ projectId, query, ...(limit === undefined ? {} : { limit }), ...(includeArchived === undefined ? {} : { includeArchived }) }));
+        }
+        case 'archiveHistory': {
+          if (!isRecord(payload) || typeof payload['entryId'] !== 'string') invalid('Invalid archive history request');
+          return ok(await source.archiveHistory(payload['entryId']));
+        }
+        case 'setArchiveState': {
+          if (!isRecord(payload)) invalid('Invalid archive state request');
+          const { entryId, state, baseVersion } = payload;
+          if (typeof entryId !== 'string' || (state !== 'active' && state !== 'archived')
+            || typeof baseVersion !== 'number' || !Number.isSafeInteger(baseVersion) || baseVersion < 1) invalid('Invalid archive state request');
+          return ok(await source.setArchiveState(entryId, state, baseVersion));
+        }
         case 'createRule': return ok(await source.createRule(ruleCreateRequest(payload)));
         case 'editRule': {
           const request = ruleEditRequest(payload);

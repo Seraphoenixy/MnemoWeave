@@ -25,7 +25,7 @@ const skillsOutfile = join(root, 'skills.mjs');
 const modalOutfile = join(root, 'modal.mjs');
 type PanelComponent = (props: Record<string, unknown>) => ReactElement | null;
 type Panels = Record<'ExplorePanel' | 'GraphSection' | 'EntitiesPanel' | 'ArchivesPanel' | 'RuntimePanel' | 'MemoryPageHeader' | 'MemoryOverviewPanel' | 'SettingsPanel' | 'CreateMemoryForm', PanelComponent>;
-type SkillPanels = Record<'SkillBacktestPanel', PanelComponent>;
+type SkillPanels = Record<'SkillBacktestPanel' | 'SkillListPanel', PanelComponent>;
 type ModalPanels = Record<'Modal', PanelComponent>;
 let panels: Panels;
 let skills: SkillPanels;
@@ -71,12 +71,12 @@ const exploreResult: UiExplore = {
   hits: [
     {
       memoryId: '11111111-1111-4111-8111-111111111111', revisionId: '22222222-2222-4222-8222-222222222222',
-      providerMemoryId: 'p1', state: 'active', content: '第一条命中的正文',
+      providerMemoryId: 'p1', state: 'active', content: '第一条命中的正文', projectId: null,
       score: 0.93, publishedAt: '2026-11-10T00:00:00.000Z', category: 'decision',
     },
     {
       memoryId: '33333333-3333-4333-8333-333333333333', revisionId: '44444444-4444-4444-8444-444444444444',
-      providerMemoryId: 'p2', state: 'superseded',
+      providerMemoryId: 'p2', state: 'superseded', projectId: null,
       content: '第二条命中的正文', score: 0.61, publishedAt: '2026-11-09T00:00:00.000Z',
     },
   ],
@@ -84,8 +84,8 @@ const exploreResult: UiExplore = {
 
 const graphFixture: UiGraph = {
   nodes: [
-    { memoryId: '11111111-1111-4111-8111-111111111111', state: 'active', publishedAt: '2026-11-10T00:00:00.000Z', importance: 5 },
-    { memoryId: '22222222-2222-4222-8222-222222222222', state: 'superseded', publishedAt: '2026-11-09T00:00:00.000Z', category: 'decision' },
+    { memoryId: '11111111-1111-4111-8111-111111111111', projectId: null, state: 'active', publishedAt: '2026-11-10T00:00:00.000Z', importance: 5 },
+    { memoryId: '22222222-2222-4222-8222-222222222222', projectId: null, state: 'superseded', publishedAt: '2026-11-09T00:00:00.000Z', category: 'decision' },
   ],
   edges: [{
     relationId: 'edge-1', kind: 'Supersedes',
@@ -113,6 +113,36 @@ const syncFixture: UiSyncStatus = {
   updatedAt: '2026-11-11T05:00:00.000Z',
   scopes: [{ scope: 'global', cursor: 12, lastPullAt: '2026-11-11T05:00:00.000Z', lastError: null, pending: 1, unknown: 0, unapplied: 0 }],
 };
+
+test('the settings page shows the Provider recall diagnosis without inventing values', () => {
+  const base = {
+    settings: settingsFixture, language: 'zh', busy: false, notice: null,
+    connectionTest: null, wakeTest: null, registerTest: null,
+    sync: syncFixture, syncError: null, syncPass: null,
+    onSaveInterface: noop, onSaveConnection: noop, onSaveInjection: noop, onSaveAutoStart: noop,
+    onRegisterTask: noop, onTestConnection: noop, onTestWake: noop, onRefreshSync: noop,
+  };
+  const report = {
+    provider: 'mnemon' as const, model: 'nomic-embed-text', protocol: 'ollama',
+    serviceAvailable: false, modelAvailable: false, embedded: 2, total: 4, coverage: 0.5,
+    recallMode: 'keyword' as const, degraded: true, lastError: 'embedding service unreachable',
+    checkedAt: '2026-11-11T00:00:00.000Z',
+    backfill: { state: 'failed' as const, startedAt: '2026-11-11T00:00:00.000Z', finishedAt: '2026-11-11T00:01:00.000Z', detail: { error: 'PROVIDER_UNAVAILABLE' } },
+  };
+  const html = render(panels.SettingsPanel, { ...base, diagnostics: report });
+  assert.match(html, /召回诊断/, 'the diagnosis has its own group');
+  assert.match(html, /关键词召回/, 'the recall mode is named');
+  assert.match(html, /2\/4 · 50%/, 'coverage is shown as a count and a ratio');
+  assert.match(html, /embedding service unreachable/, 'the last failure is shown as reported');
+  assert.match(html, /已降级/, 'a degraded backend is labelled');
+  assert.match(html, /向量补建/, 'the last backfill job is named');
+  assert.match(html, /失败 · PROVIDER_UNAVAILABLE/, 'the job outcome carries its error code');
+
+  const loading = render(panels.SettingsPanel, { ...base, diagnostics: undefined });
+  assert.doesNotMatch(loading, /关键词召回/, 'a loading read shows no made-up mode');
+  const failed = render(panels.SettingsPanel, { ...base, diagnostics: null });
+  assert.doesNotMatch(failed, /undefined/, 'a failed read prints no raw field');
+});
 
 test('the settings page carries the sync state instead of a page-level tab', () => {
   const html = render(panels.SettingsPanel, {
@@ -168,7 +198,7 @@ test('memory forms are modal windows instead of page layout', () => {
   assert.match(modalHtml, /mwui-modal-body/, 'its content scrolls inside the window');
 
   const formHtml = render(panels.CreateMemoryForm, {
-    draft: { content: '', knowledgeType: 'Practice', category: '', importance: '', tags: '', entities: '', reason: '' },
+    draft: { content: '', knowledgeType: 'Practice', category: '', importance: '', tags: '', entities: '', projectId: '', reason: '' },
     busy: false, error: null, language: 'zh', onChange: noop, onCancel: noop, onSubmit: noop,
   });
   assert.doesNotMatch(formHtml, /mwui-pane/, 'the form brings no card chrome of its own');
@@ -226,6 +256,13 @@ test('the formal-memory header names the page, its count and its four views', ()
     count: '已载入 3 条', language: 'zh', active: 'content', creating: false, saving: false,
     onSelect: noop, onCreate: noop,
   });
+  assert.doesNotMatch(html, /整理记忆/, 'the organize entry needs a Host that can run tasks');
+
+  const organized = render(panels.MemoryPageHeader, {
+    count: '已载入 3 条', language: 'zh', active: 'content', creating: false, saving: false,
+    onSelect: noop, onCreate: noop, onOrganize: noop,
+  });
+  assert.match(organized, /整理记忆/, 'the organize entry sits beside creation');
   assert.match(html, /正式记忆/, 'the page names itself');
   assert.match(html, /已载入 3 条/, 'the loaded count is in the header');
   for (const label of ['概览', '检索', '内容', '实体']) assert.ok(html.includes(label), `the page offers the "${label}" view`);
@@ -233,6 +270,17 @@ test('the formal-memory header names the page, its count and its four views', ()
   assert.match(html, /data-active="true">内容</, 'the active view is marked');
   assert.match(html, /新增记忆/, 'the page-level action is in the header');
   assert.doesNotMatch(html, /undefined/, 'no field is printed raw');
+  // The project selector belongs to this page, not to the conversation; without a handler the
+  // header does not draw one at all.
+  assert.doesNotMatch(html, /查看项目/);
+  const scoped = render(panels.MemoryPageHeader, {
+    count: '已载入 3 条', language: 'zh', active: 'content', creating: false, saving: false,
+    projects: [{ projectId: null, count: 2 }, { projectId: 'alpha', count: 1 }],
+    project: 'alpha', onProject: noop, onSelect: noop, onCreate: noop,
+  });
+  assert.match(scoped, /查看项目/, 'the page names its project selector');
+  assert.match(scoped, /value="alpha"/, 'the current project is selected');
+  assert.match(scoped, /alpha \(1\)/, 'the selector lists known projects with their counts');
 });
 
 test('the formal-memory overview counts what it holds and embeds the graph', () => {
@@ -309,4 +357,36 @@ test('a graph with nodes but no relations explains the empty canvas', () => {
   });
   assert.match(html, /还没有目录关系/, 'the reason for an edgeless graph is stated');
   assert.equal((html.match(/<g /g) ?? []).length, 2, 'the nodes are still drawn');
+});
+
+test('the skills page lists loadable skills with scope and unloadable count', () => {
+  const html = render(skills.SkillListPanel, {
+    language: 'zh', error: null, onRefresh: noop,
+    report: {
+      roots: ['/w/.dsh/skills', '/w/.agents/skills', '/h/.dsh/skills', '/h/.agents/skills'],
+      items: [
+        { name: 'alpha', description: 'Project skill', path: '/w/.dsh/skills/alpha/SKILL.md', root: '/w/.dsh/skills', scope: 'project', hash: 'a'.repeat(64), bodyBytes: 12 },
+        { name: 'gamma', description: 'User skill', path: '/h/.dsh/skills/gamma/SKILL.md', root: '/h/.dsh/skills', scope: 'user', hash: 'b'.repeat(64), bodyBytes: 9 },
+      ],
+      invalid: [{ path: '/w/.agents/skills/bad/SKILL.md', reason: 'missing-frontmatter' }],
+    },
+  });
+  assert.match(html, /可加载技能/);
+  assert.match(html, /alpha/);
+  assert.match(html, /项目/);
+  assert.match(html, /gamma/);
+  assert.match(html, /用户/);
+  assert.match(html, /1 个文件无法加载/);
+  const empty = render(skills.SkillListPanel, { language: 'zh', report: { roots: [], items: [], invalid: [] }, error: null, onRefresh: noop });
+  assert.match(empty, /没有可加载的/);
+
+  const compared = render(skills.SkillListPanel, {
+    language: 'zh', report: { roots: [], items: [], invalid: [] }, error: null, onRefresh: noop,
+    selected: '/w/.dsh/skills/alpha/SKILL.md',
+    versions: [{ id: 'v-1', hash: 'c'.repeat(64), savedAt: '2026-11-12T00:00:00.000Z', source: 'adopt' }],
+    diff: { versionId: 'v-1', lines: [{ kind: 'remove', text: 'old body' }, { kind: 'add', text: 'new body' }] },
+  });
+  assert.match(compared, /\+1 行，-1 行/);
+  assert.match(compared, /old body/);
+  assert.match(compared, /new body/);
 });

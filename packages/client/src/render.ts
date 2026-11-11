@@ -8,7 +8,6 @@ export interface RenderableView {
   memories?: Array<{
     content: string;
     excerpt?: boolean | undefined;
-    scope?: string | undefined;
     applicability?: string | undefined;
     sourceReference?: string | undefined;
   }> | undefined;
@@ -30,9 +29,8 @@ export function renderView(view: RenderableView): string {
   const memories = (view.memories ?? []).filter(memory => memory.content.trim() !== '');
   if (memories.length > 0) {
     blocks.push(`Formal memories:\n${memories.map(memory => {
-      const scope = memory.scope === 'global' ? 'global' : 'project';
       const truncated = memory.excerpt === true ? ' [excerpt]' : '';
-      return `- (${scope}) ${memory.content}${truncated}`;
+      return `- ${memory.content}${truncated}`;
     }).join('\n')}`);
   }
   return blocks.join('\n\n');

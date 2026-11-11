@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { MemoryClient, ensureServer, prewarmBudgetMs } from '../../../../packages/client/src/index.ts';
 import { createRpcHandler } from './rpc.ts';
 import { createTaskRunner } from './task-runner.ts';
+import { runIdleReview } from './idle-review-task.ts';
 import { SettingsService } from './settings.ts';
 import { MemorySource } from './memory-source.ts';
 import { BUNDLE_NAME, isHostArtifact, reloadBundle, shouldWatch, watchLib } from './hot-reload.ts';
@@ -184,6 +185,24 @@ export function apply(ctx: HostContext, config?: unknown): void {
       if (getAgents === accessor) getAgents = undefined;
     }, 'dsh-mnemo-weave: task agents');
   });
+  // Idle review is a background improvement: one pass at a time, only when a model route exists,
+  // and every failure is contained by the next tick. The Server owns single-flight per session.
+  let reviewing = false;
+  const idleTimer = setInterval(() => {
+    if (reviewing || getAgents === undefined) return;
+    reviewing = true;
+    void (async () => {
+      try {
+        for (const session of (await source.idleReviewPending()).slice(0, 3)) {
+          await runIdleReview(source, createTaskRunner(() => getAgents?.()), session.sessionId);
+        }
+      } catch {
+        // A missing model route or an already running session is retried on the next tick.
+      } finally { reviewing = false; }
+    })();
+  }, 10 * 60_000);
+  idleTimer.unref?.();
+  ctx.effect?.(() => () => clearInterval(idleTimer), 'dsh-mnemo-weave: idle review timer');
   ctx.effect(() => {
     const connection = ctx.connection;
     const webServer = ctx.get('webServer');

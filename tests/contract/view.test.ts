@@ -214,16 +214,33 @@ test('runtime rules are injected whole and counted separately from the memory bu
   assert.equal(view.rulesBudget?.limitTokens, 1024);
 });
 
-test('an over-budget rule set is omitted instead of trimmed', async () => {
+test('an over-budget rule is omitted as a whole and reported', async () => {
   const store = makeStore([makeEntry('content one')]);
   const rules = [{ entryId: randomUUID(), version: 1, body: '准则'.repeat(2000) }];
   const assembler = new ViewAssembler(store.app, { rules: () => rules });
   const view = await assembler.assemble({ grant: grant(), query: 'content' });
   assert.equal(view.rules, undefined);
   assert.equal(view.rulesBudget?.exceeded, true);
-  assert.ok(view.rulesBudget!.usedTokens > 1024);
+  assert.equal(view.rulesBudget?.omittedCount, 1);
+  assert.equal(view.rulesBudget?.omittedEntryIds?.[0], rules[0]!.entryId);
+  assert.equal(view.rulesBudget?.usedTokens, 0);
   assert.equal(view.memories.length, 1);
   assert.equal(view.complete, true);
+  assert.equal(view.budgetOmissions?.[0]?.kind, 'rules');
+});
+
+test('a rule that does not fit stops lower-priority rules instead of trimming them', async () => {
+  const store = makeStore([makeEntry('content one')]);
+  const rules = [
+    { entryId: randomUUID(), version: 1, body: 'a'.repeat(4000), importance: 'critical' as const },
+    { entryId: randomUUID(), version: 1, body: 'small rule', importance: 'low' as const },
+  ];
+  const assembler = new ViewAssembler(store.app, { rules: () => rules });
+  const view = await assembler.assemble({ grant: grant(), query: 'content' });
+  assert.equal(view.rules, undefined);
+  assert.equal(view.rulesBudget?.omittedCount, 2);
+  assert.deepEqual(view.rulesBudget?.omittedEntryIds, rules.map(rule => rule.entryId));
+  assert.equal(view.memories.length, 1);
 });
 
 test('a view without rules carries no rules fields', async () => {

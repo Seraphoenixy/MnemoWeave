@@ -1,5 +1,5 @@
 import type {
-  MemoriesRequest, RpcResult, UiArchive, UiCreateInput, UiCreateResult, UiConfigView, UiConnectionTest, UiEditInput, UiEditResult, UiExplore, UiGraph, UiInjection, UiMemoryDetail, UiMemoryList, UiRegisterTest, UiRule, UiRuleCreateInput, UiRuleEditInput, UiSettings, UiStatus, UiSyncPass, UiSyncStatus, UiWakeTest, UiWithdrawInput, UiWithdrawResult,
+  MemoriesRequest, RpcResult, UiArchive, UiArchiveCapacity, UiArchiveHistory, UiArchiveSearch, UiCreateInput, UiCreateResult, UiConfigView, UiConnectionTest, UiEditInput, UiEditResult, UiExplore, UiGraph, UiInjection, UiMemoryDetail, UiMemoryList, UiRegisterTest, UiRule, UiRuleArchive, UiRuleCreateInput, UiRuleEditInput, UiRuleUsage, UiSettings, UiStatus, UiSyncPass, UiSyncStatus, UiWakeTest, UiWithdrawInput, UiWithdrawResult,
 } from '../shared/contract.ts';
 import { RPC_CHANNEL } from '../shared/contract.ts';
 import type { ClientConnection } from './dsh-types.ts';
@@ -35,20 +35,49 @@ export function createApi(connection: ClientConnection) {
     skillConversations: () => call<{ id: string; workspace: string }[]>('skillConversations', {}),
     skillReview: (input: { sessionId: string; baseline: string }, signal: AbortSignal) =>
       call<import('../shared/contract.ts').SkillReviewResult>('skillReview', input, signal),
+    skillsList: (input: { workspace?: string }, signal?: AbortSignal) => call<import('../shared/contract.ts').UiSkillReport>('skillsList', input, signal),
+    skillVersions: (input: { path: string; workspace?: string }, signal?: AbortSignal) => call<import('../shared/contract.ts').UiSkillVersion[]>('skillVersions', input, signal),
+    skillCreate: (input: { root: string; name: string; description: string; body?: string; workspace?: string }, signal?: AbortSignal) => call<import('../shared/contract.ts').UiSkillCreateResult>('skillCreate', input, signal),
+    skillAdoptDraft: (input: { id: string; baselineHash: string }, signal?: AbortSignal) => call<{ draft: import('../shared/contract.ts').UiSkillDraft; hash: string; version: import('../shared/contract.ts').UiSkillVersion }>('skillAdoptDraft', input, signal),
+    skillDrafts: (input: { workspace?: string; skillPath?: string }, signal?: AbortSignal) => call<import('../shared/contract.ts').UiSkillDraft[]>('skillDrafts', input, signal),
+    skillSaveDraft: (input: Omit<import('../shared/contract.ts').UiSkillDraft, 'id' | 'createdAt' | 'adoptedAt' | 'dismissedAt'>, signal?: AbortSignal) => call<import('../shared/contract.ts').UiSkillDraft>('skillSaveDraft', input, signal),
+    skillDismissDraft: (input: { id: string }, signal?: AbortSignal) => call<import('../shared/contract.ts').UiSkillDraft>('skillDismissDraft', input, signal),
+    skillRead: (input: { path: string; workspace?: string }, signal?: AbortSignal) => call<import('../shared/contract.ts').UiSkillText>('skillRead', input, signal),
+    skillVersionText: (input: { path: string; versionId: string; workspace?: string }, signal?: AbortSignal) => call<import('../shared/contract.ts').UiSkillText>('skillVersionText', input, signal),
+    skillTrash: (input: { path: string; workspace?: string }, signal?: AbortSignal) => call<import('../shared/contract.ts').UiTrashEntry>('skillTrash', input, signal),
+    skillTrashList: (signal?: AbortSignal) => call<import('../shared/contract.ts').UiTrashEntry[]>('skillTrashList', {}, signal),
+    skillTrashRestore: (input: { id: string; workspace?: string }, signal?: AbortSignal) => call<import('../shared/contract.ts').UiTrashEntry>('skillTrashRestore', input, signal),
+    skillPreferences: (signal?: AbortSignal) => call<import('../shared/contract.ts').UiSkillsPreferences>('skillPreferences', {}, signal),
+    setSkillAutoAdopt: (input: { autoAdopt: boolean }, signal?: AbortSignal) => call<import('../shared/contract.ts').UiSkillsPreferences>('setSkillAutoAdopt', input, signal),
+    skillAutoAdopt: (input: { path: string; candidate: string; baselineHash: string; review: unknown; workspace?: string }, signal?: AbortSignal) => call<import('../shared/contract.ts').UiAdoptionResult>('skillAutoAdopt', input, signal),
+    skillAdopt: (input: { path: string; candidate: string; baselineHash: string; workspace?: string }, signal?: AbortSignal) => call<import('../shared/contract.ts').UiSkillWrite>('skillAdopt', input, signal),
+    skillRestore: (input: { path: string; versionId: string; baselineHash: string; workspace?: string }, signal?: AbortSignal) => call<import('../shared/contract.ts').UiSkillWrite>('skillRestore', input, signal),
     skillBacktest: (input: import('../shared/contract.ts').SkillBacktestInput, signal?: AbortSignal) =>
       call<import('../shared/contract.ts').SkillBacktestResult>('skillBacktest', input, signal),
     organizeMemory: (input: UiCreateInput, signal?: AbortSignal) => call<import('../shared/contract.ts').UiSaveResult>('organizeMemory', input, signal),
+    organizeMemories: (input: { instruction: string; projectId?: string }, signal?: AbortSignal) => call<import('../shared/contract.ts').UiOrganizeResult>('organizeMemories', input, signal),
     create: (input: UiCreateInput, signal?: AbortSignal): Promise<UiCreateResult> => call<UiCreateResult>('create', input, signal),
     edit: (input: UiEditInput, signal?: AbortSignal): Promise<UiEditResult> => call<UiEditResult>('edit', input, signal),
     withdraw: (input: UiWithdrawInput, signal?: AbortSignal): Promise<UiWithdrawResult> => call<UiWithdrawResult>('withdraw', input, signal),
-    explore: (input: { query: string; limit?: number; minScore?: number }, signal?: AbortSignal): Promise<UiExplore> => call<UiExplore>('explore', input, signal),
-    graph: (input: { scope?: 'all' | 'global' | 'project'; projectId?: string; limit?: number }, signal?: AbortSignal): Promise<UiGraph> => call<UiGraph>('graph', input, signal),
+    explore: (input: { query: string; limit?: number; minScore?: number; projectId?: string }, signal?: AbortSignal): Promise<UiExplore> => call<UiExplore>('explore', input, signal),
+    graph: (input: { projectId?: string; includeGlobal?: boolean; limit?: number }, signal?: AbortSignal): Promise<UiGraph> => call<UiGraph>('graph', input, signal),
+    /** Project ids the Server knows; the page selector and the create form both read this. */
+    projects: (signal?: AbortSignal): Promise<string[]> => call<string[]>('projects', {}, signal),
+    /** Official embedding coverage and the recall mode; shown on the settings page. */
+    embeddingDiagnostics: (signal?: AbortSignal): Promise<import('../shared/contract.ts').UiEmbeddingDiagnostics> =>
+      call<import('../shared/contract.ts').UiEmbeddingDiagnostics>('embeddingDiagnostics', {}, signal),
     injection: (signal?: AbortSignal): Promise<UiInjection | null> => call<UiInjection | null>('injection', {}, signal),
     rules: (signal?: AbortSignal): Promise<UiRule[]> => call<UiRule[]>('rules', {}, signal),
+    ruleUsage: (signal?: AbortSignal): Promise<UiRuleUsage> => call<UiRuleUsage>('ruleUsage', {}, signal),
+    ruleArchive: (signal?: AbortSignal): Promise<UiRuleArchive[]> => call<UiRuleArchive[]>('ruleArchive', {}, signal),
     createRule: (input: UiRuleCreateInput, signal?: AbortSignal): Promise<UiRule> => call<UiRule>('createRule', input, signal),
     editRule: (input: UiRuleEditInput & { ruleId: string }, signal?: AbortSignal): Promise<UiRule> => call<UiRule>('editRule', input, signal),
     saveArchive: (input: import('../shared/contract.ts').UiArchiveDraft & { entryId?: string; baseVersion?: number }): Promise<UiArchive> => call<UiArchive>('saveArchive', input),
     archives: (signal?: AbortSignal): Promise<UiArchive[]> => call<UiArchive[]>('archives', {}, signal),
+    archiveCapacities: (signal?: AbortSignal): Promise<UiArchiveCapacity[]> => call<UiArchiveCapacity[]>('archiveCapacities', {}, signal),
+    archiveSearch: (input: { projectId: string; query: string; limit?: number; includeArchived?: boolean }): Promise<UiArchiveSearch> => call<UiArchiveSearch>('archiveSearch', input),
+    archiveHistory: (entryId: string, signal?: AbortSignal): Promise<UiArchiveHistory[]> => call<UiArchiveHistory[]>('archiveHistory', { entryId }, signal),
+    setArchiveState: (input: { entryId: string; state: 'active' | 'archived'; baseVersion: number }): Promise<UiArchive> => call<UiArchive>('setArchiveState', input),
     sync: (signal?: AbortSignal): Promise<UiSyncStatus> => call<UiSyncStatus>('sync', {}, signal),
     syncRefresh: (signal?: AbortSignal): Promise<UiSyncPass> => call<UiSyncPass>('syncRefresh', {}, signal),
     /** Grouped settings with the source of each value; never carries the token. */

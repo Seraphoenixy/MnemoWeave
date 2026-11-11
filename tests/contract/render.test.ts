@@ -36,7 +36,7 @@ test('a view without rules renders no rule block and no omission note', () => {
   const text = renderView({ memories: [{ content: 'Only memory.' }] });
   assert.equal(text.includes('Runtime rules'), false);
   assert.equal(text.includes('omitted'), false);
-  assert.equal(text, 'Formal memories:\n- (project) Only memory.');
+  assert.equal(text, 'Formal memories:\n- Only memory.');
 });
 
 test('empty or blank rule bodies never produce an empty bullet', () => {

@@ -33,8 +33,7 @@ test('the DSH Host half lists, reads, edits and reports injections through a rea
   const seed = new SqliteCandidates(resolve(join(dir, 'state', 'governance.db')));
   const seedProvider = new MnemonCliProvider({ binary: mnemonBinary(), dataDir: resolve(join(dir, 'provider')), store: 'dsh_host' });
   const request = RememberInput.parse({
-    idempotencyKey: `seed-${randomUUID()}`, content: '插件读取的初始正文。', knowledgeType: 'Practice', tags: [],
-    scope: 'project', projectId: 'alpha',
+    idempotencyKey: `seed-${randomUUID()}`, content: '插件读取的初始正文。', knowledgeType: 'Practice', tags: [], projectId: 'alpha',
     provenance: {
       source: 'local-user', sourceReference: 'e2e:dsh-host', evidence: ['seed'], verificationStatus: 'verified',
       confidence: 1, applicability: 'alpha', limitations: '无（验收固定值）', lastVerified: '2026-11-10T10:00:00.000Z',

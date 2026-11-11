@@ -32,9 +32,9 @@ async function fixture() {
   };
   const app = new MemoryApplication(provider, repo, repo);
   repo.runtime.register('project-a');
-  const hostGrant = grant('host-a', ['project-a'], false);
-  const publish = (content: string, projectId = 'project-a', scope: 'project' | 'global' = 'project') => {
-    const request = RememberInput.parse({ idempotencyKey: randomUUID(), content, scope, ...(scope === 'project' ? { projectId } : {}), knowledgeType: 'Constraint', provenance: { source: 'runtime-test', sourceReference: 'fixture', evidence: ['fixture'], verificationStatus: 'verified', confidence: 1, applicability: 'fixture', limitations: 'isolated test', lastVerified: null } });
+  const hostGrant = grant('host-a', ['project-a'], true);
+  const publish = (content: string, applicability = 'project-a') => {
+    const request = RememberInput.parse({ idempotencyKey: randomUUID(), content, knowledgeType: 'Constraint', provenance: { source: 'runtime-test', sourceReference: 'fixture', evidence: ['fixture'], verificationStatus: 'verified', confidence: 1, applicability, limitations: 'isolated test', lastVerified: null } });
     const candidate = repo.submit(request);
     repo.review(candidate.id, 'approve', 'operator', 'fixture', null);
     const id = randomUUID(); contents.set(id, content);
@@ -79,23 +79,25 @@ test('Runtime pins survive restart and Host/Session pins never leak to another s
   } finally { reopened.close(); }
 });
 
-test('Permission filtering precedes model rerank and applies to direct and pinned reads', async () => {
+test('A grant gates global formal memory and a valid grant reads every memory', async () => {
   const f = await fixture();
   try {
-    const allowed = f.publish('Allowed project content');
-    const denied = f.publish('Private project B secret', 'project-b');
-    const global = f.publish('Global secret', '', 'global');
-    // No model route exists any more, so the guard under test is the authorization filter
-    // itself: unauthorized content must not reach the delivered View at all.
+    const first = f.publish('First project content');
+    const second = f.publish('Second project content', 'project-b');
+    // Formal memories are global: a grant that does not include global memory sees none of them.
+    const noGlobal = grant('host-a', ['project-a'], false);
     const assembler = new ViewAssembler(f.app);
-    const view = await assembler.assemble({ grant: f.grant, query: 'project', rerank: true, pinned: [{ memoryId: denied.memoryId, tier: 'critical' }] });
-    assert.ok(view.memories.every(memory => memory.memoryId === allowed.memoryId));
-    assert.equal(view.memories.some(memory => memory.content.includes('secret')), false);
+    const hidden = await assembler.assemble({ grant: noGlobal, query: 'project', rerank: true });
+    assert.equal(hidden.memories.length, 0, 'no global inclusion means no formal memory is visible');
+    const view = await assembler.assemble({ grant: f.grant, query: 'project', rerank: true, pinned: [{ memoryId: second.memoryId, tier: 'critical' }] });
+    assert.deepEqual(view.memories.map(memory => memory.memoryId).sort(), [first.memoryId, second.memoryId].sort());
     assert.equal(view.rerank.status, 'not_requested', 'the Server never calls a model for ordering');
     const recall = await f.app.recall({ query: 'project' }, f.grant);
-    assert.equal(recall.memories.length, 1);
-    await assert.rejects(f.app.readMemory(denied, f.grant), /UNAUTHORIZED/);
-    await assert.rejects(f.app.readMemory(global, f.grant), /UNAUTHORIZED/);
+    assert.equal(recall.memories.length, 2);
+    // An expired grant is refused even though the memory itself is global.
+    const expired = { ...f.grant, expiresAt: new Date(Date.now() - 1_000).toISOString() };
+    await assert.rejects(f.app.readMemory(second, expired), /UNAUTHORIZED/);
+    assert.equal((await f.app.readMemory(second, f.grant)).content, 'Second project content');
   } finally { f.repo.close(); }
 });
 

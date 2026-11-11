@@ -77,7 +77,7 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
     try {
       this.transaction(() => {
         const version = Number(this.db.prepare('PRAGMA user_version').get()!['user_version']);
-      if (version > 15) throw new Error('Unsupported governance schema version');
+      if (version > 21) throw new Error('Unsupported governance schema version');
         if (version === 0) {
           if (this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").get()) throw new Error('Refusing to initialize an unidentified existing database');
           this.db.exec(`
@@ -362,6 +362,146 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
           `);
         });
       }
+      if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) === 15) {
+        this.db.prepare('VACUUM INTO ?').run(`${path}.pre-v16.${randomUUID()}.db`);
+        this.transaction(() => {
+          if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) !== 15) return;
+          // v16: byte-accounted runtime rules and archive state/history.
+          //
+          // Rules keep their old `scope`/`project_id` columns for compatibility with the v15
+          // payloads, but gains importance, a pinned flag and a local archive. Archives gain an
+          // active/archived state and an append-only revision table; existing rows are backfilled
+          // with their current version so no history is invented.
+          this.db.exec(`
+            ALTER TABLE runtime_rules ADD COLUMN importance TEXT NOT NULL DEFAULT 'normal';
+            ALTER TABLE runtime_rules ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE runtime_rules ADD COLUMN created_at TEXT NOT NULL DEFAULT '';
+            ALTER TABLE runtime_rules ADD COLUMN archived_at TEXT;
+            UPDATE runtime_rules SET created_at = updated_at WHERE created_at = '';
+            CREATE TABLE runtime_rule_archive(
+              archive_id TEXT PRIMARY KEY,
+              rule_id TEXT NOT NULL,
+              rule_version INTEGER NOT NULL,
+              body TEXT NOT NULL,
+              importance TEXT NOT NULL,
+              pinned INTEGER NOT NULL,
+              archived_at TEXT NOT NULL,
+              reason TEXT NOT NULL,
+              UNIQUE(rule_id, rule_version)
+            );
+            CREATE INDEX runtime_rules_active ON runtime_rules(archived_at, enabled);
+            ALTER TABLE project_archives ADD COLUMN state TEXT NOT NULL DEFAULT 'active';
+            ALTER TABLE project_archives ADD COLUMN archived_at TEXT;
+            CREATE INDEX project_archives_state ON project_archives(project_id, state);
+            CREATE TABLE project_archive_revisions(
+              revision_id TEXT PRIMARY KEY,
+              entry_id TEXT NOT NULL,
+              version INTEGER NOT NULL,
+              project_id TEXT NOT NULL,
+              title TEXT NOT NULL,
+              body TEXT NOT NULL,
+              source TEXT NOT NULL,
+              verification TEXT NOT NULL,
+              evidence TEXT NOT NULL,
+              state TEXT NOT NULL,
+              archived_at TEXT,
+              recorded_at TEXT NOT NULL,
+              UNIQUE(entry_id, version)
+            );
+            CREATE INDEX project_archive_revisions_entry ON project_archive_revisions(entry_id, version);
+            INSERT OR IGNORE INTO project_archive_revisions(revision_id, entry_id, version, project_id, title, body, source, verification, evidence, state, archived_at, recorded_at)
+              SELECT entry_id, entry_id, version, project_id, title, body, source, verification, evidence, 'active', NULL, updated_at FROM project_archives;
+            PRAGMA user_version=16;
+          `);
+        });
+      }
+      if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) === 16) {
+        this.db.prepare('VACUUM INTO ?').run(`${path}.pre-v17.${randomUUID()}.db`);
+        this.transaction(() => {
+          if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) !== 16) return;
+          // v17: a formal memory belongs to one project or to general knowledge. Existing rows
+          // keep a null owner, which is exactly "general": no body, id, revision, relation or
+          // Provider mapping is rewritten by this step.
+          this.db.exec(`
+            ALTER TABLE catalog_memories ADD COLUMN project_id TEXT;
+            CREATE INDEX catalog_memories_project ON catalog_memories(project_id);
+            PRAGMA user_version=17;
+          `);
+        });
+      }
+      if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) === 17) {
+        this.db.prepare('VACUUM INTO ?').run(`${path}.pre-v18.${randomUUID()}.db`);
+        this.transaction(() => {
+          if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) !== 17) return;
+          // v18: durable maintenance jobs. The Provider work runs in this process; the row keeps
+          // its state across restarts, and a job left `running` is marked interrupted on open.
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS diagnostic_jobs(
+              id TEXT PRIMARY KEY, kind TEXT NOT NULL, state TEXT NOT NULL,
+              started_at TEXT NOT NULL, finished_at TEXT, detail_json TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE INDEX IF NOT EXISTS diagnostic_jobs_kind ON diagnostic_jobs(kind, started_at);
+            PRAGMA user_version=18;
+          `);
+        });
+      }
+      if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) === 18) {
+        this.db.prepare('VACUUM INTO ?').run(`${path}.pre-v19.${randomUUID()}.db`);
+        this.transaction(() => {
+          if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) !== 18) return;
+          // v19: idle-review watermark and selected signals, per host session. Selection is
+          // deterministic; these rows are the durable evidence the task Agent reads later.
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS idle_review_state(
+              host_id TEXT NOT NULL, session_id TEXT NOT NULL, last_turn INTEGER NOT NULL, updated_at TEXT NOT NULL,
+              PRIMARY KEY(host_id, session_id)
+            );
+            CREATE TABLE IF NOT EXISTS idle_review_signals(
+              id TEXT PRIMARY KEY, host_id TEXT NOT NULL, session_id TEXT NOT NULL, turn_id INTEGER NOT NULL,
+              event_id TEXT NOT NULL, text TEXT NOT NULL, project_id TEXT, reason TEXT NOT NULL, created_at TEXT NOT NULL,
+              UNIQUE(host_id, session_id, event_id)
+            );
+            CREATE INDEX IF NOT EXISTS idle_review_signals_session ON idle_review_signals(host_id, session_id, turn_id);
+            PRAGMA user_version=19;
+          `);
+        });
+      }
+      if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) === 19) {
+        this.db.prepare('VACUUM INTO ?').run(`${path}.pre-v20.${randomUUID()}.db`);
+        this.transaction(() => {
+          if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) !== 19) return;
+          // v20: one idle-review run per session at a time, with per-item results the task Agent
+          // reports after its writes. A run left running by a killed process is interrupted on open.
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS idle_review_runs(
+              id TEXT PRIMARY KEY, host_id TEXT NOT NULL, session_id TEXT NOT NULL, state TEXT NOT NULL,
+              attempt INTEGER NOT NULL, started_at TEXT NOT NULL, finished_at TEXT, error TEXT NOT NULL DEFAULT '',
+              items_json TEXT NOT NULL DEFAULT '[]'
+            );
+            CREATE INDEX IF NOT EXISTS idle_review_runs_session ON idle_review_runs(host_id, session_id, started_at);
+            PRAGMA user_version=20;
+          `);
+        });
+      }
+      if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) === 20) {
+        this.db.prepare('VACUUM INTO ?').run(`${path}.pre-v21.${randomUUID()}.db`);
+        this.transaction(() => {
+          if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) !== 20) return;
+          // v21: a signal is reserved by the run that is processing it. A failed or cancelled run
+          // releases its signals so a retry sees them again; a succeeded run keeps them consumed.
+          const hasRunId = this.db.prepare("PRAGMA table_info(idle_review_signals)").all().some(row => row['name'] === 'run_id');
+          this.db.exec(`
+            ${hasRunId ? '' : 'ALTER TABLE idle_review_signals ADD COLUMN run_id TEXT;'}
+            CREATE INDEX IF NOT EXISTS idle_review_signals_run ON idle_review_signals(host_id, run_id);
+            PRAGMA user_version=21;
+          `);
+        });
+      }
+      this.db.prepare("UPDATE idle_review_signals SET run_id=NULL WHERE run_id IN (SELECT id FROM idle_review_runs WHERE state='running')").run();
+      this.db.prepare("UPDATE idle_review_runs SET state='interrupted', finished_at=? WHERE state='running'").run(new Date().toISOString());
+
+      // No job survives this process: a row still marked running belongs to a killed run.
+      this.db.prepare("UPDATE diagnostic_jobs SET state='interrupted', finished_at=? WHERE state='running'").run(new Date().toISOString());
       this.db.prepare('SELECT knowledge_type, category, importance, tags_json, entities_json FROM catalog_revisions LIMIT 0').all();
       this.db.prepare('SELECT memory_id, version, provider_id, content, content_hash, scope, state FROM share_outbox LIMIT 0').all();
       this.ledger = new SqliteSyncLedger(this.db, operation => this.transaction(operation));
@@ -549,7 +689,7 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
         : Number((this.db.prepare('SELECT revision_number FROM catalog_revisions WHERE memory_id=? ORDER BY revision_number DESC LIMIT 1').get(memoryId) as { revision_number?: number } | undefined)?.revision_number ?? 1);
       // Durable share marker, same transaction as the publication: if the process dies before
       // the listener runs, the next start still knows this memory owes a shared change.
-      const shareScope = 'global';
+      const shareScope = request.projectId ? `project:${request.projectId}` : 'global';
       this.db.prepare(`
         INSERT INTO share_outbox(memory_id, version, provider_id, content, content_hash, scope, state, attempts, last_error, created_at, updated_at)
         VALUES(?, ?, ?, ?, ?, ?, 'pending', 0, NULL, ?, ?)
@@ -562,7 +702,9 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
     // Outside the transaction: the listener may touch the network or the ledger, and a
     // publication that committed must not be rolled back because sharing it failed. The
     // durable row written inside `finish` is what makes a crash here recoverable.
-    const projectId = null;
+    // The owner travels with the publication: a project memory is shared into that project's
+    // scope, and a general memory into the global scope.
+    const projectId = published.request.projectId ?? null;
     this.announcePublished(
       published.memoryId, result.id, published.number, published.request.content, published.contentHash,
       projectId ? `project:${projectId}` : 'global', projectId,

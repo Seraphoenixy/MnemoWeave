@@ -96,27 +96,37 @@ test('recall and read_memory carry the host identity and stay reads', async () =
   assert.equal(readCall.init.method, 'GET');
 });
 
-test('the runtime-memory tool reads rules and refuses an unqualified project scope', async () => {
+test('the runtime-memory tool reads the global rule set', async () => {
   calls = [];
   const [, , runtime] = createTools(CONFIG);
-  await assert.rejects(async () => runtime!.execute({ scope: 'project' } as never, { signal: undefined }), /projectId/);
-  await runtime!.execute({ scope: 'project', projectId: 'alpha' } as never, { signal: undefined });
+  await runtime!.execute({}, { signal: undefined });
   const call = calls.at(-1)!;
-  assert.equal(call.url, 'http://127.0.0.1:4399/v1/rules?scope=project&projectId=alpha');
+  assert.equal(call.url, 'http://127.0.0.1:4399/v1/rules');
   assert.equal(call.init.method, 'GET');
 });
 
 test('project archive search returns metadata and reading returns one document', async () => {
   const previousFetch = globalThis.fetch;
-  const archive = { entryId: '00000000-0000-4000-8000-000000000001', title: 'Design', body: 'Project notes', verification: 'open', version: 1 };
+  const archive = { entryId: '00000000-0000-4000-8000-000000000001', projectId: 'alpha', title: 'Design', body: 'Project notes', verification: 'open', version: 1, state: 'active' };
+  const seen: string[] = [];
   globalThis.fetch = async url => {
-    assert.equal(String(url), 'http://127.0.0.1:4399/v1/archives?projectId=alpha');
-    return Response.json({ items: [archive] });
+    seen.push(String(url));
+    if (String(url).includes('/v1/archives/search?')) {
+      return Response.json({
+        query: 'notes', total: 1, truncated: false,
+        results: [{ entryId: archive.entryId, title: archive.title, verification: archive.verification, version: 1, state: 'active', excerpt: 'Project notes', excerptTruncated: false }],
+      });
+    }
+    assert.equal(String(url), `http://127.0.0.1:4399/v1/archives/${archive.entryId}/history`);
+    return Response.json({ entryId: archive.entryId, items: [archive] });
   };
   try {
     const tool = createTools({ ...CONFIG, projectId: 'alpha' }).find(item => item.name === 'mnemoweave_project_archives')!;
-    const { body, ...metadata } = archive;
-    assert.deepEqual(await tool.execute({ query: 'notes' } as never), { items: [metadata] });
+    assert.deepEqual(await tool.execute({ query: 'notes' } as never), {
+      query: 'notes', total: 1, truncated: false,
+      items: [{ entryId: archive.entryId, title: 'Design', verification: 'open', version: 1, state: 'active', excerpt: 'Project notes', excerptTruncated: false }],
+    });
+    assert.equal(seen[0], 'http://127.0.0.1:4399/v1/archives/search?projectId=alpha&query=notes&limit=10');
     assert.deepEqual(await tool.execute({ entryId: archive.entryId } as never), archive);
   } finally {
     globalThis.fetch = previousFetch;
@@ -135,8 +145,9 @@ test('remember submits a candidate with host-generated provenance, never a publi
   assert.equal(call.init.method, 'POST');
   const body = JSON.parse(String(call.init.body));
   assert.match(body.idempotencyKey, /^[A-Za-z0-9_-]{8,128}$/);
-  assert.equal(body.scope, 'global');
+  assert.equal('scope' in body, false, 'a candidate has no project scope');
   assert.equal(body.provenance.source, 'agent');
+  assert.equal(body.provenance.applicability, 'global');
   assert.equal(body.provenance.sourceReference, 'dsh-mnemo-weave:agent-1');
   assert.equal(body.provenance.verificationStatus, 'unverified');
   assert.equal(body.provenance.lastVerified, null);
@@ -148,6 +159,58 @@ test('a missing service token fails before any request is sent', async () => {
   const tools = createTools({ serverUrl: 'http://127.0.0.1:4399', hostId: 'dsh-test' });
   await assert.rejects(async () => tools[0]!.execute({ query: 'x' } as never, { signal: undefined }), /token is not configured/);
   assert.equal(calls.length, 0, 'no request leaves the process without a token');
+});
+
+test('later model steps in one turn reuse the accepted View, the next turn fetches again', async () => {
+  calls = [];
+  const { ctx, handlers } = hostContext();
+  apply(ctx, CONFIG);
+  const events: Array<{ type: string; data: { turn: number } }> = [{ type: 'turn/start', data: { turn: 7 } }];
+  const agentHandlers = new Map<string, (...args: never[]) => unknown>();
+  const agent = {
+    id: 'session-fixed-view',
+    session: { snapshotEvents: () => events },
+    ctx: { on: (event: string, handler: never) => { agentHandlers.set(event, handler); return () => undefined; } },
+  };
+  handlers.get('agent/created')!({ agent });
+  const assemble = agentHandlers.get('system-prompt/assemble') as unknown as (assembly: unknown, context: unknown, next: () => Promise<unknown>) => Promise<unknown>;
+  const first = await assemble({}, {}, async () => ({ sections: [] }));
+  const second = await assemble({}, {}, async () => ({ sections: [] }));
+  assert.equal(calls.filter(call => call.url.endsWith('/v1/inject')).length, 1, 'two steps in one turn share one View');
+  assert.deepEqual(
+    (first as { sections: Array<{ text: string }> }).sections.at(-1)?.text,
+    (second as { sections: Array<{ text: string }> }).sections.at(-1)?.text,
+  );
+  events.push({ type: 'turn/end', data: { turn: 7 } }, { type: 'turn/start', data: { turn: 8 } });
+  await assemble({}, {}, async () => ({ sections: [] }));
+  assert.equal(calls.filter(call => call.url.endsWith('/v1/inject')).length, 2, 'a new turn fetches a new View');
+});
+
+test('the end of a turn asks the Server to scan completed turns for idle review', async () => {
+  calls = [];
+  const { ctx, handlers } = hostContext();
+  apply(ctx, CONFIG);
+  const events: Array<{ type: string; data: { turn: number } }> = [{ type: 'turn/start', data: { turn: 3 } }];
+  const agentHandlers = new Map<string, (...args: never[]) => unknown>();
+  const agent = {
+    id: 'session-idle',
+    session: { snapshotEvents: () => events },
+    ctx: { on: (event: string, handler: never) => { agentHandlers.set(event, handler); return () => undefined; } },
+  };
+  handlers.get('agent/created')!({ agent });
+  const assemble = agentHandlers.get('system-prompt/assemble') as unknown as (assembly: unknown, context: unknown, next: () => Promise<unknown>) => Promise<unknown>;
+  await assemble({}, {}, async () => ({ sections: [] }));
+  (agentHandlers.get('agent/turn-stopping') as unknown as () => void)();
+  const deadline = Date.now() + 1000;
+  while (Date.now() < deadline && !calls.some(call => call.url.endsWith('/v1/idle-review/scan'))) {
+    await new Promise(done => setTimeout(done, 10));
+  }
+  const scan = calls.find(call => call.url.endsWith('/v1/idle-review/scan'));
+  assert.ok(scan, 'the turn end triggers one scan');
+  const body = JSON.parse(String(scan!.init.body));
+  assert.equal(body.sessionId, 'session-idle');
+  assert.equal(body.completedThroughTurn, 3);
+  assert.equal(body.maxSignals, 10);
 });
 
 test('the prompt section is re-assembled from a fresh View on every turn', async () => {

@@ -10,7 +10,7 @@ import { SqliteCandidates } from '../../packages/infrastructure/governance/src/i
 /**
  * Documentation is part of the contract here, so it is checked like code.
  *
- * Both rules below caught real drift: `docs/dsh-ui.md` documented a `/confirm` route that had been
+ * Both rules below caught real drift: `docs/ui.md` documented a `/confirm` route that had been
  * removed, and the README still claimed schema v10 while the code had reached v14. A reader would
  * have trusted either one.
  */
@@ -52,7 +52,7 @@ test('the schema version the docs call current is the one the code creates', () 
 });
 
 test('every API path the UI doc mentions is a real route', () => {
-  const documented = [...read('docs/dsh-ui.md').matchAll(/`(\/v1\/[^`\s]+)`/g)]
+  const documented = [...read('docs/ui.md').matchAll(/`(\/v1\/[^`\s]+)`/g)]
     .map(match => match[1]!)
     // Drop a query string: `/v1/memories?query=` names the same route as `/v1/memories`.
     .map(path => path.split('?')[0]!)
@@ -72,7 +72,7 @@ test('the documented tab count matches the tab bar', async () => {
   assert.equal(tabs.length, 6, 'the page has six page-level tabs');
 
   const zh = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十'];
-  const text = read('docs/dsh-ui.md');
+  const text = read('docs/ui.md');
   const claim = [...text.matchAll(/([一二三四五六七八九十])个页签/g)].map(match => match[1]!);
   assert.ok(claim.length > 0, 'the UI doc states how many tabs there are');
   for (const numeral of claim) {

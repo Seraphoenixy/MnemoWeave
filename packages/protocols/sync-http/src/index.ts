@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
 import type { IncomingMessage } from 'node:http';
 import { randomUUID } from 'node:crypto';
-import { MnemoWeaveError, SyncChangeInput, SyncPullInput, publicError, statusForCode } from '../../../core/contracts/src/index.ts';
+import { MnemoWeaveError, REQUEST_BODY_MAX_BYTES, SyncChangeInput, SyncPullInput, publicError, statusForCode } from '../../../core/contracts/src/index.ts';
 import { VersionConflictError } from '../../../core/application/src/sync.ts';
 import type { SyncAcceptedValue, SyncChangeRequest, SyncEntryValue, SyncPullPageValue, SyncPullRequest, SyncScopesValue, SyncSnapshotValue } from '../../../core/contracts/src/index.ts';
 
@@ -35,7 +35,7 @@ export interface SyncServerOptions {
 }
 
 export const SYNC_PROTOCOL_VERSION = 1;
-const MAX_BODY_BYTES = 262144;
+const MAX_BODY_BYTES = REQUEST_BODY_MAX_BYTES;
 
 export function createSyncServer(options: SyncServerOptions) {
   const now = options.now ?? (() => new Date());

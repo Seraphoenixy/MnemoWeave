@@ -4,9 +4,7 @@ export interface Preferences {
   defaultTab: string;
   serverUrl: string | null;
   hostId: string | null;
-  defaultScope: string;
   pageSize: number;
-  projectId: string | null;
   injectTimeoutMs: number;
   autoStart: boolean;
 }
@@ -30,7 +28,7 @@ export interface ResolvedHostConfig {
   projectId: string | undefined;
   injectTimeoutMs: number;
   autoStart: boolean;
-  preferences: { defaultTab: string; defaultScope: string; pageSize: number; path: string };
+  preferences: { defaultTab: string; pageSize: number; path: string };
   taskName: string;
   sources: ConfigSources;
 }
@@ -43,7 +41,7 @@ export interface HostConfigDescription {
   autoStart: boolean;
   taskName: string;
   tokenStatus: { configured: boolean; source: ConfigSource };
-  preferences: { defaultTab: string; defaultScope: string; pageSize: number; path: string };
+  preferences: { defaultTab: string; pageSize: number; path: string };
   sources: ConfigSources;
 }
 

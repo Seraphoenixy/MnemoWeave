@@ -45,7 +45,7 @@ test('HTTP/MCP candidate submission survives actual Server restart and never wri
     MNEMOWEAVE_WORKER: 'off',
   };
   const input = {
-    idempotencyKey: 'http-candidate-001', content: '候选内容必须经过原审核方案才能进入正式记忆。', knowledgeType: 'Constraint', tags: ['test'],
+    idempotencyKey: 'http-candidate-001', content: '自动整理写入的内容必须保留来源与证据。', knowledgeType: 'Constraint', tags: ['test'],
     provenance: { source: 'test', sourceReference: 'test:lifecycle', evidence: ['actual protocol test'], verificationStatus: 'unverified', confidence: 0.5, applicability: 'test only', limitations: 'not approved', lastVerified: null },
   };
   const headers = testHostHeaders(env.MNEMOWEAVE_TOKEN);
@@ -56,6 +56,7 @@ test('HTTP/MCP candidate submission survives actual Server restart and never wri
     const response = await submit(input);
     assert.equal(response.status, 202);
     const candidate = await response.json() as CandidateRecord;
+    // A submission stays a candidate: the Worker is off here, so nothing is published.
     assert.equal(candidate.status, 'pending_review');
     assert.equal(candidate.receipt.status, 'candidate');
     assert.deepEqual(await (await submit(input)).json(), candidate);

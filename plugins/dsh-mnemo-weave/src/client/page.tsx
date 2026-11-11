@@ -1,7 +1,8 @@
-import { SkillBacktestPanel } from './skill-backtest.tsx';
+import { SkillBacktestPanel, SkillListPanel } from './skill-backtest.tsx';
+import { diffLines, type DiffLine } from '../shared/skills-diff.ts';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CreateDraft } from './panels.tsx';
-import type { ListSort, UiArchive, UiConfigView, UiConnectionTest, UiExplore, UiGraph, UiInjection, UiMemoryDetail, UiMemoryList, UiMemorySummary, UiRegisterTest, UiRule, UiSettings, UiStatus, UiSyncPass, UiSyncStatus, UiWakeTest } from '../shared/contract.ts';
+import type { ListSort, UiArchive, UiArchiveCapacity, UiArchiveHistory, UiConfigView, UiConnectionTest, UiEmbeddingDiagnostics, UiExplore, UiGraph, UiInjection, UiMemoryDetail, UiMemoryList, UiMemorySummary, UiOrganizeItem, UiRegisterTest, UiRule, UiRuleUsage, UiSettings, UiSkillDraft, UiSkillEntry, UiSkillReport, UiSkillVersion, UiStatus, UiSyncPass, UiSyncStatus, UiTrashEntry, UiWakeTest } from '../shared/contract.ts';
 import { createApi, RpcFailure } from './api.ts';
 import type { ClientConnection, LocaleService } from './dsh-types.ts';
 import { normalizeLanguage, translate, type Language, type MessageKey } from './i18n.ts';
@@ -32,6 +33,7 @@ const CATEGORY_VALUES = ['preference', 'decision', 'fact', 'insight', 'context',
 /** The empty creation draft, restored whenever the create window closes without publishing. */
 const EMPTY_CREATE_DRAFT: CreateDraft = {
   content: '', knowledgeType: 'Practice', category: '', importance: '', tags: '', entities: '',
+  projectId: '',
   reason: '',
 };
 
@@ -78,7 +80,7 @@ function ChipRow({ chips, ariaLabel }: { chips: Chip[]; ariaLabel: string }): JS
   );
 }
 
-/** A card summarizing one memory: text first, then scope, classification, revision and age. */
+/** A card summarizing one memory: text first, then classification, revision and age. */
 function MemoryCard({ item, active, language, now, onSelect }: { item: UiMemorySummary; active: boolean; language: Language; now: number; onSelect(id: string): void }): JSX.Element {
   // No separate title exists, so the body's first line is the headline and the rest the excerpt.
   const [firstLine, ...rest] = item.content.split('\n');
@@ -96,6 +98,7 @@ function MemoryCard({ item, active, language, now, onSelect }: { item: UiMemoryS
         {excerpt === '' ? null : <span className="mwui-memcard-excerpt">{excerpt}</span>}
         <span className="mwui-memcard-meta">
           {label === undefined ? null : <span className="mwui-chip-slim" data-tone="category">{label}</span>}
+          <span className="mwui-chip-slim" data-tone="category">{item.projectId ?? translate(language, 'memory.general')}</span>
           <span className="mwui-chip-slim">{translate(language, 'detail.revision')} v{item.entryVersion}</span>
           {item.tags === undefined || item.tags.length === 0 ? null : (
             <span className="mwui-memcard-tags">{item.tags.slice(0, 3).map(tag => `#${tag}`).join(' ')}</span>
@@ -575,8 +578,13 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
    */
   const [memoryView, setMemoryView] = useState<MemoryView>('content');
   const [rules, setRules] = useState<UiRule[] | null | undefined>(undefined);
+  const [ruleUsage, setRuleUsage] = useState<UiRuleUsage | null | undefined>(undefined);
   const [archives, setArchives] = useState<UiArchive[] | null | undefined>(undefined);
+  const [archiveCapacities, setArchiveCapacities] = useState<UiArchiveCapacity[] | null | undefined>(undefined);
+  const [archiveHistory, setArchiveHistory] = useState<UiArchiveHistory[] | null | undefined>(undefined);
   const [sync, setSync] = useState<UiSyncStatus | null | undefined>(undefined);
+  /** Provider embedding coverage; undefined while loading, null when the read failed. */
+  const [diagnostics, setDiagnostics] = useState<UiEmbeddingDiagnostics | null | undefined>(undefined);
   const [rulesError, setRulesError] = useState<string | null>(null);
   const [archivesError, setArchivesError] = useState<string | null>(null);
   const [syncError, setSyncError] = useState<string | null>(null);
@@ -588,13 +596,20 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
   const [listError, setListError] = useState<string | null>(null);
   const [detail, setDetail] = useState<UiMemoryDetail | null>(null);
   const [query, setQuery] = useState('');
-  /** `all`, `global`, or `project:<id>`; the default comes from the stored preference. */
   /** Classification filter; empty means every category. */
   const [categoryFilter, setCategoryFilter] = useState<string>('');
   /** Entity filter; empty means every entity. */
   const [entityFilter, setEntityFilter] = useState<string>('');
   /** Scan order; changing it restarts the scan, because a cursor belongs to one order. */
   const [sort, setSort] = useState<ListSort>('newest');
+  /**
+   * The management page's project: undefined shows every project, null shows general memory,
+   * a string shows that project. This is not the conversation's project; it only narrows this
+   * page's queries and edits.
+   */
+  const [projectFilter, setProjectFilter] = useState<string | null | undefined>(undefined);
+  /** Projects known to the Server, used for the selector and the create form. */
+  const [projects, setProjects] = useState<Array<{ projectId: string | null; count: number }>>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   /** Which revision the detail panel is showing; undefined means the current one. */
   const [viewedRevisionId, setViewedRevisionId] = useState<string | undefined>(undefined);
@@ -641,7 +656,11 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     setGraphLoading(true);
     setGraphError(null);
     try {
-      setGraph(await api.graph({ limit: 500 }));
+      const project = projectRef.current;
+      setGraph(await api.graph({
+        limit: 500,
+        ...(project === undefined ? {} : project === null ? { includeGlobal: false } : { projectId: project, includeGlobal: true }),
+      }));
     } catch (failure) {
       setGraphError(failureText(failure, language));
     } finally {
@@ -658,7 +677,7 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
   }, [tab, memoryView, graphAttempted, graphLoading, loadGraph]);
 
   /**
-   * Entity index. Loaded with a one-row page: the index describes the whole scoped set, so a
+   * Entity index. Loaded with a one-row page: the index describes the whole visible set, so a
    * larger page would cost body reads without changing the answer.
    */
   const [entities, setEntities] = useState<Array<{ value: string; count: number }>>([]);
@@ -698,18 +717,30 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
 
   useEffect(() => { ensureStyles(); }, []);
 
+  // The selected archive's history is read on selection and refreshed after a state change.
+  useEffect(() => {
+    if (archiveId === null) { setArchiveHistory(undefined); return; }
+    const controller = new AbortController();
+    api.archiveHistory(archiveId, controller.signal)
+      .then(items => { if (!controller.signal.aborted) setArchiveHistory(items); })
+      .catch(() => { if (!controller.signal.aborted) setArchiveHistory(null); });
+    return () => controller.abort();
+  }, [api, archiveId]);
+
   const loadStatus = useCallback(async (signal?: AbortSignal): Promise<void> => {
     // The injection report is informational: a host that never injected, or a Server that
     // cannot answer, must not turn the whole status row into an error.
     const settle = async <T,>(promise: Promise<T>): Promise<{ value?: T; error?: string }> => {
       try { return { value: await promise }; } catch (error) { return { error: error instanceof RpcFailure ? error.code : 'RPC_FAILED' }; }
     };
-    const [nextStatus, nextConfig, nextInjection, nextRules, nextArchives, nextSync] = await Promise.all([
+    const [nextStatus, nextConfig, nextInjection, nextRules, nextRuleUsage, nextArchives, nextCapacities, nextSync] = await Promise.all([
       api.status(signal),
       api.config(signal),
       api.injection(signal).catch(() => null),
       settle(api.rules(signal)),
+      settle(api.ruleUsage(signal)),
       settle(api.archives(signal)),
+      settle(api.archiveCapacities(signal)),
       settle(api.sync(signal)),
     ]);
     setStatus(nextStatus);
@@ -717,8 +748,10 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     setInjection(nextInjection);
     setRules(nextRules.value ?? null);
     setRulesError(nextRules.error ?? null);
+    setRuleUsage(nextRuleUsage.value ?? null);
     setArchives(nextArchives.value ?? null);
     setArchivesError(nextArchives.error ?? null);
+    setArchiveCapacities(nextCapacities.value ?? null);
     setSync(nextSync.value ?? null);
     setSyncError(nextSync.error ?? null);
   }, [api]);
@@ -732,7 +765,10 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
    * identity — that would re-run the search effect and fetch the first page a second time.
    */
   const pageSizeRef = useRef<number>(LIST_LIMIT);
+  /** Read by `loadList` so changing the project does not change the callback's identity. */
+  const projectRef = useRef<string | null | undefined>(undefined);
   const loadList = useCallback(async (options: { query: string; category?: string; entity?: string; sort?: ListSort; cursor?: string; append: boolean }, signal?: AbortSignal): Promise<void> => {
+    const project = projectRef.current;
     const page = await api.memories({
       ...(options.query.trim() === '' ? {} : { query: options.query.trim() }),
       limit: pageSizeRef.current,
@@ -740,6 +776,9 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
       ...(options.entity === undefined || options.entity === '' ? {} : { entity: options.entity }),
       ...(options.sort === undefined ? {} : { sort: options.sort }),
       ...(options.cursor === undefined ? {} : { cursor: options.cursor }),
+      // A project view keeps general knowledge; the general view is expressed as
+      // includeGlobal=false with no project id.
+      ...(project === undefined ? {} : project === null ? { includeGlobal: false } : { projectId: project, includeGlobal: true }),
     }, signal);
     setList(current => {
       if (!options.append || current === null) return page;
@@ -773,7 +812,7 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     return () => controller.abort();
   }, [loadStatus, loadList, language]);
 
-  // Debounced search and scope changes share one path: the previous request is aborted so a
+  // Debounced search and filter changes share one path: the previous request is aborted so a
   // late result for the old filter cannot land in the new list.
   const firstSearch = useRef(true);
   useEffect(() => {
@@ -794,7 +833,19 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
       })();
     }, 280);
     return () => { clearTimeout(timer); controller.abort(); };
-  }, [query, categoryFilter, entityFilter, sort, loadList, language]);
+  }, [query, categoryFilter, entityFilter, sort, projectFilter, loadList, language]);
+
+  // The project index travels with every list read, so the selector keeps its counts current.
+  useEffect(() => {
+    if (list?.projects !== undefined) setProjects(list.projects);
+  }, [list]);
+
+  // Embedding coverage is a Provider fact, read once per page open; the settings card shows it.
+  useEffect(() => {
+    const controller = new AbortController();
+    void api.embeddingDiagnostics(controller.signal).then(setDiagnostics, () => setDiagnostics(null));
+    return () => controller.abort();
+  }, [api]);
 
   useEffect(() => {
     if (selectedId === null) return;
@@ -882,6 +933,26 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
   const [createError, setCreateError] = useState<string | null>(null);
   const [createDraft, setCreateDraft] = useState<CreateDraft>(EMPTY_CREATE_DRAFT);
 
+  /** 「整理记忆」: a natural-language instruction plus the scope it may act on. */
+  const [organizing, setOrganizing] = useState(false);
+  const [organizeInstruction, setOrganizeInstruction] = useState('');
+  const [organizeScope, setOrganizeScope] = useState<string | null>(null);
+  const [organizeBusy, setOrganizeBusy] = useState(false);
+  const [organizeError, setOrganizeError] = useState<string | null>(null);
+  const [organizeItems, setOrganizeItems] = useState<UiOrganizeItem[] | null>(null);
+  /** Skills DSH can load; read when the skills tab opens. */
+  const [skillsReport, setSkillsReport] = useState<UiSkillReport | null>(null);
+  const [skillsError, setSkillsError] = useState<string | null>(null);
+  const [selectedSkill, setSelectedSkill] = useState<{ name: string; path: string; hash: string } | null>(null);
+  const [skillVersionsState, setSkillVersionsState] = useState<UiSkillVersion[]>([]);
+  const [skillBusy, setSkillBusy] = useState(false);
+  const [skillNotice, setSkillNotice] = useState<string | null>(null);
+  const [autoAdopt, setAutoAdopt] = useState(false);
+  const [trashEntries, setTrashEntries] = useState<UiTrashEntry[]>([]);
+  const [skillDiff, setSkillDiff] = useState<{ versionId: string; lines: DiffLine[] } | null>(null);
+  const [skillDrafts, setSkillDrafts] = useState<UiSkillDraft[]>([]);
+  const [loadedDraft, setLoadedDraft] = useState<UiSkillDraft | null>(null);
+
   /**
    * Publish a new memory. The Server treats this as already-confirmed user knowledge, so there is
    * no review step to wait for — only the publisher's write.
@@ -898,6 +969,7 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
         ...(createDraft.importance === '' ? {} : { importance: Number(createDraft.importance) }),
         ...(toList(createDraft.tags).length === 0 ? {} : { tags: toList(createDraft.tags) }),
         ...(toList(createDraft.entities).length === 0 ? {} : { entities: toList(createDraft.entities) }),
+        ...(createDraft.projectId === '' ? {} : { projectId: createDraft.projectId }),
         ...(createDraft.reason.trim() === '' ? {} : { reason: createDraft.reason.trim() }),
       };
       const result = organize
@@ -915,10 +987,10 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
         setMemoryView('content');
         setSelectedId(result.entryId);
       } else if (result.kind === 'runtime') {
-        await api.rules().then(items => { setRules(items); setRulesError(null); },
+        await Promise.all([api.rules(), api.ruleUsage()]).then(([items, usage]) => { setRules(items); setRuleUsage(usage); setRulesError(null); },
           failure => { setRules(null); setRulesError(failureText(failure, language)); });
       } else {
-        await api.archives().then(items => { setArchives(items); setArchivesError(null); },
+        await Promise.all([api.archives(), api.archiveCapacities()]).then(([items, capacities]) => { setArchives(items); setArchiveCapacities(capacities); setArchivesError(null); },
           failure => { setArchives(null); setArchivesError(failureText(failure, language)); });
         setArchiveId(result.entryId);
       }
@@ -928,6 +1000,158 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
       setSaving(false);
     }
   }, [api, createDraft, saving, language, query, categoryFilter, entityFilter, sort, loadList]);
+
+  const loadSkills = useCallback(async (): Promise<void> => {
+    try {
+      setSkillsReport(await api.skillsList({}));
+      setSkillsError(null);
+    } catch (failure) {
+      setSkillsReport(null);
+      setSkillsError(failureText(failure, language));
+    }
+  }, [api, language]);
+  useEffect(() => {
+    if (tab !== 'skills' || skillsReport !== null) return;
+    void loadSkills();
+    void api.skillPreferences().then(preferences => setAutoAdopt(preferences.autoAdopt), () => undefined);
+    void api.skillTrashList().then(setTrashEntries, () => undefined);
+    void api.skillDrafts({}).then(setSkillDrafts, () => undefined);
+  }, [tab, skillsReport, loadSkills, api]);
+
+  const adoptSkillDraft = useCallback(async (candidate: string): Promise<void> => {
+    if (selectedSkill === null) return;
+    try {
+      await api.skillAdopt({ path: selectedSkill.path, candidate, baselineHash: selectedSkill.hash });
+      setSkillsError(null);
+      setNotice(translate(language, 'skills.adopted'));
+      setSkillsReport(null);
+      setSelectedSkill(null);
+      await loadSkills();
+    } catch (failure) {
+      setSkillsError(failureText(failure, language));
+    }
+  }, [api, selectedSkill, language, loadSkills]);
+
+  const selectSkill = useCallback(async (entry: UiSkillEntry): Promise<void> => {
+    setSelectedSkill({ name: entry.name, path: entry.path, hash: entry.hash });
+    setSkillNotice(null);
+    setSkillDiff(null);
+    try { setSkillVersionsState(await api.skillVersions({ path: entry.path })); }
+    catch (failure) { setSkillsError(failureText(failure, language)); }
+  }, [api, language]);
+
+  const reloadSkills = useCallback(async (path: string): Promise<void> => {
+    const report = await api.skillsList({});
+    setSkillsReport(report);
+    const fresh = report.items.find(item => item.path === path);
+    if (fresh === undefined) { setSelectedSkill(null); setSkillVersionsState([]); return; }
+    setSelectedSkill({ name: fresh.name, path: fresh.path, hash: fresh.hash });
+    setSkillVersionsState(await api.skillVersions({ path: fresh.path }));
+  }, [api]);
+
+  const restoreSkillVersion = useCallback(async (versionId: string): Promise<void> => {
+    if (selectedSkill === null) return;
+    setSkillBusy(true);
+    try {
+      await api.skillRestore({ path: selectedSkill.path, versionId, baselineHash: selectedSkill.hash });
+      setSkillNotice(translate(language, 'skills.restored'));
+      await reloadSkills(selectedSkill.path);
+    } catch (failure) {
+      setSkillsError(failureText(failure, language));
+    } finally { setSkillBusy(false); }
+  }, [api, selectedSkill, language, reloadSkills]);
+
+  const createSkillFile = useCallback(async (input: { root: string; name: string; description: string }): Promise<void> => {
+    setSkillBusy(true);
+    try {
+      const created = await api.skillCreate(input);
+      setSkillNotice(translate(language, 'skills.created'));
+      await reloadSkills(created.path);
+    } catch (failure) {
+      setSkillsError(failureText(failure, language));
+    } finally { setSkillBusy(false); }
+  }, [api, language, reloadSkills]);
+
+  const trashSkillFile = useCallback(async (path: string): Promise<void> => {
+    setSkillBusy(true);
+    try {
+      await api.skillTrash({ path });
+      setSkillNotice(translate(language, 'skills.trashed'));
+      setSelectedSkill(null);
+      await loadSkills();
+      setTrashEntries(await api.skillTrashList());
+    } catch (failure) {
+      setSkillsError(failureText(failure, language));
+    } finally { setSkillBusy(false); }
+  }, [api, language, loadSkills]);
+
+  const adoptStoredDraftEntry = useCallback(async (draft: UiSkillDraft): Promise<void> => {
+    if (draft.skillPath === null) return;
+    setSkillBusy(true);
+    try {
+      const current = await api.skillRead({ path: draft.skillPath });
+      await api.skillAdoptDraft({ id: draft.id, baselineHash: current.hash });
+      setSkillNotice(translate(language, 'skills.draftAdoptedNow'));
+      setSkillDrafts(await api.skillDrafts({}));
+      await reloadSkills(draft.skillPath);
+    } catch (failure) {
+      setSkillsError(failureText(failure, language));
+    } finally { setSkillBusy(false); }
+  }, [api, language, reloadSkills]);
+
+  const dismissSkillDraftEntry = useCallback(async (id: string): Promise<void> => {    try { await api.skillDismissDraft({ id }); setSkillDrafts(await api.skillDrafts({})); }
+    catch (failure) { setSkillsError(failureText(failure, language)); }
+  }, [api, language]);
+
+  const compareSkillVersion = useCallback(async (versionId: string): Promise<void> => {    if (selectedSkill === null) return;
+    setSkillBusy(true);
+    try {
+      const [current, version] = await Promise.all([
+        api.skillRead({ path: selectedSkill.path }),
+        api.skillVersionText({ path: selectedSkill.path, versionId }),
+      ]);
+      setSkillDiff({ versionId, lines: diffLines(current.text, version.text) });
+    } catch (failure) {
+      setSkillsError(failureText(failure, language));
+    } finally { setSkillBusy(false); }
+  }, [api, selectedSkill, language]);
+
+  const restoreTrashEntry = useCallback(async (id: string): Promise<void> => {
+    setSkillBusy(true);
+    try {
+      await api.skillTrashRestore({ id });
+      setSkillNotice(translate(language, 'skills.restoredTrash'));
+      await loadSkills();
+      setTrashEntries(await api.skillTrashList());
+    } catch (failure) {
+      setSkillsError(failureText(failure, language));
+    } finally { setSkillBusy(false); }
+  }, [api, language, loadSkills]);
+
+  const beginOrganize = useCallback((): void => {    setOrganizeInstruction('');
+    // The page's current project filter is the default scope; "all projects" is not a scope the
+    // task can act in, so it falls back to general memory.
+    setOrganizeScope(typeof projectFilter === 'string' ? projectFilter : null);
+    setOrganizeItems(null);
+    setOrganizeError(null);
+    setOrganizing(true);
+  }, [projectFilter]);
+
+  const runOrganize = useCallback(async (): Promise<void> => {
+    const instruction = organizeInstruction.trim();
+    if (instruction === '' || organizeBusy) return;
+    setOrganizeBusy(true);
+    setOrganizeError(null);
+    try {
+      const result = await api.organizeMemories({ instruction, ...(organizeScope === null ? {} : { projectId: organizeScope }) });
+      setOrganizeItems(result.items);
+      await loadList({ query, category: categoryFilter, entity: entityFilter, sort, append: false });
+    } catch (failure) {
+      setOrganizeError(failureText(failure, language));
+    } finally {
+      setOrganizeBusy(false);
+    }
+  }, [api, organizeInstruction, organizeBusy, organizeScope, query, categoryFilter, entityFilter, sort, loadList, language]);
 
   /**
    * Rule writes use the same identity as memory writes: the service token plus this Host. The
@@ -939,6 +1163,8 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
       const created = await api.createRule({
         body: draft.body.trim(),
         enabled: draft.enabled,
+        importance: draft.importance ?? 'normal',
+        pinned: draft.pinned === true,
       });
       setNotice(translate(language, 'runtime.created'));
       await loadStatus();
@@ -948,9 +1174,12 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     }
   }, [api, language, loadStatus]);
 
-  const saveRule = useCallback(async (target: string, input: { body: string; enabled: boolean; baseVersion: number }): Promise<void> => {
+  const saveRule = useCallback(async (target: string, input: { body: string; enabled: boolean; importance: 'critical' | 'normal' | 'low'; pinned: boolean; baseVersion: number }): Promise<void> => {
     try {
-      const updated = await api.editRule({ ruleId: target, body: input.body.trim(), enabled: input.enabled, baseVersion: input.baseVersion });
+      const updated = await api.editRule({
+        ruleId: target, body: input.body.trim(), enabled: input.enabled,
+        importance: input.importance, pinned: input.pinned, baseVersion: input.baseVersion,
+      });
       setNotice(translate(language, 'runtime.saved'));
       await loadStatus();
       setRuleId(updated.entryId);
@@ -962,9 +1191,21 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     }
   }, [api, language, loadStatus]);
 
+  const changeArchiveState = useCallback(async (entryId: string, state: 'active' | 'archived', baseVersion: number): Promise<void> => {
+    const updated = await api.setArchiveState({ entryId, state, baseVersion });
+    setArchives(previous => previous?.map(item => item.entryId === entryId ? updated : item));
+    setNotice(translate(language, state === 'archived' ? 'archives.archive' : 'archives.restore'));
+    const [capacities, history] = await Promise.all([
+      api.archiveCapacities().catch(() => null),
+      api.archiveHistory(entryId).catch(() => null),
+    ]);
+    if (capacities !== null) setArchiveCapacities(capacities);
+    setArchiveHistory(history);
+  }, [api, language]);
+
   /**
-   * Load the entity index for the current scope. A one-row page is enough: the Server builds the
-   * index from every scoped memory, not from the page it is about to return.
+   * Load the entity index for the current filters. A one-row page is enough: the Server builds
+   * the index from every visible memory, not from the page it is about to return.
    */
   const loadEntities = useCallback(async (signal?: AbortSignal): Promise<void> => {
     setEntitiesLoading(true);
@@ -1131,6 +1372,15 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     setSelectedId(memoryId);
   }, []);
 
+  /**
+   * Change the management page's project. The ref is updated before React renders so the next
+   * list read already carries the new filter; the debounced search effect then reloads.
+   */
+  const changeProject = useCallback((next: string | null | undefined): void => {
+    projectRef.current = next;
+    setProjectFilter(next);
+  }, []);
+
   const changeTab = useCallback((next: Tab): void => {
     setTab(next);
   }, []);
@@ -1210,9 +1460,8 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
   };
 
   /**
-   * Load the settings surface once at start, so preferences such as the default tab, default
-   * scope and page size are in effect for the first render rather than after a visit to the
-   * settings tab.
+   * Load the settings surface once at start, so preferences such as the default tab and page
+   * size are in effect for the first render rather than after a visit to the settings tab.
    */
   useEffect(() => {
     void api.settings()
@@ -1341,7 +1590,11 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     setExploreError(null);
     try {
       setExploreLimit(limit);
-      setExplore(await api.explore({ query: text, limit, minScore: exploreMinScore }));
+      const project = projectRef.current;
+      setExplore(await api.explore({
+        query: text, limit, minScore: exploreMinScore,
+        ...(project === undefined || project === null ? {} : { projectId: project }),
+      }));
     } catch (failure) {
       setExploreError(failureText(failure, language));
     } finally {
@@ -1426,8 +1679,12 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
           active={memoryView}
           creating={creating}
           saving={saving}
+          projects={projects}
+          project={projectFilter}
+          onProject={changeProject}
           onSelect={changeMemoryView}
           onCreate={beginCreate}
+          onOrganize={beginOrganize}
         />
       {memoryView === 'overview' ? (
         <MemoryOverviewPanel
@@ -1612,6 +1869,69 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
       </div>
       </>
       )}
+      {organizing ? (
+        <Modal
+          title={translate(language, 'organize.title')}
+          language={language}
+          busy={organizeBusy}
+          onClose={() => setOrganizing(false)}
+        >
+          <div className="mwui-form">
+            <p className="mwui-edit-hint" data-tone="muted">{translate(language, 'organize.hint')}</p>
+            <label className="mwui-field">
+              <span>{translate(language, 'organize.instruction')}</span>
+              <textarea
+                className="mwui-input"
+                rows={4}
+                maxLength={2000}
+                value={organizeInstruction}
+                onChange={event => setOrganizeInstruction(event.target.value)}
+              />
+            </label>
+            <label className="mwui-field">
+              <span>{translate(language, 'organize.scope')}</span>
+              <select
+                className="mwui-input mwui-select"
+                value={organizeScope ?? ''}
+                onChange={event => setOrganizeScope(event.target.value === '' ? null : event.target.value)}
+              >
+                <option value="">{translate(language, 'organize.general')}</option>
+                {projects.filter(entry => entry.projectId !== null).map(entry => (
+                  <option key={entry.projectId!} value={entry.projectId!}>{entry.projectId!}</option>
+                ))}
+              </select>
+            </label>
+            {organizeError === null ? null : <div className="mwui-banner" data-tone="bad">{organizeError}</div>}
+            {organizeItems === null ? null : (
+              <ul className="mwui-list">
+                {organizeItems.map(item => (
+                  <li key={item.index} className="mwui-list-row">
+                    <span className="mwui-mono">{item.action}</span>
+                    <span>{translate(language, `organize.state.${item.state}` as MessageKey)}</span>
+                    {item.targetId === undefined ? null : <span className="mwui-mono">{item.targetId}</span>}
+                    {typeof item.detail?.['reason'] === 'string' ? <span className="mwui-muted">{item.detail['reason']}</span> : null}
+                    {typeof item.detail?.['before'] === 'string' ? <span className="mwui-muted">{item.detail['before']}</span> : null}
+                  </li>
+                ))}
+              </ul>
+            )}
+            <div className="mwui-actions">
+              <button type="button" className="mwui-button" onClick={() => setOrganizing(false)}>
+                {translate(language, 'organize.close')}
+              </button>
+              <button
+                type="button"
+                className="mwui-button"
+                data-variant="primary"
+                disabled={organizeBusy || organizeInstruction.trim() === ''}
+                onClick={() => { void runOrganize(); }}
+              >
+                {translate(language, organizeBusy ? 'organize.running' : 'organize.run')}
+              </button>
+            </div>
+          </div>
+        </Modal>
+      ) : null}
       {creating ? (
         <Modal
           title={translate(language, 'create.title')}
@@ -1625,6 +1945,7 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
             busy={saving}
             error={createError}
             language={language}
+            projects={projects}
             onChange={patch => setCreateDraft(current => ({ ...current, ...patch }))}
             onCancel={closeCreate}
             onSubmit={() => { void submitCreate(); }}
@@ -1688,9 +2009,9 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
       ) : tab === 'overview' ? (
         <OverviewPanel status={status} config={config} injection={injection} memories={list} rules={rules} archives={archives} sync={sync} language={language} now={now} onOpen={changeTab} />
       ) : tab === 'runtime' ? (
-        <RuntimePanel rules={rules} error={rulesError} selected={ruleId} language={language} onSelect={setRuleId} onCreate={submitRule} onSave={saveRule} />
+        <RuntimePanel rules={rules} usage={ruleUsage} error={rulesError} selected={ruleId} language={language} onSelect={setRuleId} onCreate={submitRule} onSave={saveRule} />
       ) : tab === 'archives' ? (
-        <ArchivesPanel archives={archives} error={archivesError} selected={archiveId} language={language} onSelect={setArchiveId} onSave={async (draft, target) => {
+        <ArchivesPanel archives={archives} capacities={archiveCapacities} history={archiveHistory} error={archivesError} selected={archiveId} language={language} onSelect={setArchiveId} onSetState={changeArchiveState} onSave={async (draft, target) => {
           const saved = await api.saveArchive({ ...draft, ...(target ? { entryId: target.entryId, baseVersion: target.version } : {}) });
           setArchives(previous => previous?.some(item => item.entryId === saved.entryId)
             ? previous.map(item => item.entryId === saved.entryId ? saved : item)
@@ -1698,7 +2019,64 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
           setArchiveId(saved.entryId);
         }} />
       ) : tab === 'skills' ? (
-        <SkillBacktestPanel language={language} run={api.skillBacktest} conversations={api.skillConversations} review={api.skillReview} />
+        <>
+          <SkillListPanel
+            language={language}
+            report={skillsReport}
+            error={skillsError}
+            onRefresh={() => { void loadSkills(); }}
+            selected={selectedSkill?.path ?? null}
+            onSelect={entry => { void selectSkill(entry); }}
+            versions={skillVersionsState}
+            roots={skillsReport?.roots}
+            onRestore={versionId => { void restoreSkillVersion(versionId); }}
+            onCreate={input => { void createSkillFile(input); }}
+            busy={skillBusy}
+            notice={skillNotice}
+            autoAdopt={autoAdopt}
+            trash={trashEntries}
+            onTrash={path => { void trashSkillFile(path); }}
+            onRestoreTrash={id => { void restoreTrashEntry(id); }}
+            diff={skillDiff}
+            onDiff={versionId => { void compareSkillVersion(versionId); }}
+            drafts={skillDrafts}
+            onDismissDraft={id => { void dismissSkillDraftEntry(id); }}
+            onAdoptDraft={draft => { void adoptStoredDraftEntry(draft); }}
+            onLoadDraft={draft => setLoadedDraft(draft)}
+            onAutoAdoptChange={enabled => {
+              setAutoAdopt(enabled);
+              void api.setSkillAutoAdopt({ autoAdopt: enabled }).catch(failure => setSkillsError(failureText(failure, language)));
+            }}
+          />
+          <SkillBacktestPanel
+            language={language}
+            run={api.skillBacktest}
+            conversations={api.skillConversations}
+            review={api.skillReview}
+            selectedSkill={selectedSkill}
+            onAdopt={candidate => { void adoptSkillDraft(candidate); }}
+            loadedDraft={loadedDraft}
+            onReviewed={(draft, workspace) => {
+              void api.skillSaveDraft({
+                workspace: workspace === '' ? '/unknown-workspace' : workspace,
+                skillPath: selectedSkill?.path ?? null,
+                reason: draft.reason, evidence: draft.evidence,
+                baseline: draft.input.baseline, candidate: draft.input.candidate,
+                scenario: draft.input.scenario, checks: draft.input.checks,
+                report: draft.report ?? null, backtestError: draft.backtestError ?? null,
+              }).then(() => api.skillDrafts({})).then(setSkillDrafts, () => undefined);
+              if (selectedSkill === null || draft.report === undefined) return;
+              void api.skillAutoAdopt({
+                path: selectedSkill.path, candidate: draft.input.candidate, baselineHash: selectedSkill.hash,
+                review: { report: draft.report, checks: draft.input.checks, completedAt: new Date().toISOString() },
+              }).then(result => {
+                if (!result.adopted) return;
+                setSkillNotice(translate(language, 'skills.autoAdopted'));
+                void reloadSkills(selectedSkill.path);
+              }).catch(failure => setSkillsError(failureText(failure, language)));
+            }}
+          />
+        </>
       ) : (
         settings === null
           ? <div className="mwui-empty">{translate(language, 'list.loading')}</div>
@@ -1714,6 +2092,7 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
               sync={sync}
               syncError={syncError}
               syncPass={syncPass}
+              diagnostics={diagnostics}
               onSaveInterface={patch => { void saveSettings(() => api.saveInterface(patch)); }}
               onSaveConnection={input => { void saveSettings(() => api.saveConnection(input)); }}
               onSaveInjection={input => { void saveSettings(() => api.saveInjection(input)); }}

@@ -1,8 +1,9 @@
-import { mayRead } from './access.ts';
+import { mayReadMemory } from './access.ts';
 import { randomUUID } from 'node:crypto';
 import { MnemoWeaveError, ReadGrant, RerankOutput, View } from '../../contracts/src/index.ts';
 import type { ReadGrantRecord, ViewRecord, ViewRuleRecord } from '../../contracts/src/index.ts';
 import type { MemoryCatalogReader } from './catalog-ports.ts';
+import { MODEL_EVIDENCE_BODY_BYTES, MODEL_EVIDENCE_LIMIT, MODEL_EVIDENCE_TOTAL_BYTES } from '../../contracts/src/capacity.ts';
 
 /**
  * Minimal read surface needed for View assembly. The Server uses the Application Core;
@@ -21,7 +22,7 @@ export interface ViewSource {
  */
 export function estimateTokens(text: string): number { return Math.ceil(Buffer.byteLength(text, 'utf8') / 3); }
 export const DEFAULT_INJECTION_BUDGET_TOKENS = 4096;
-/** Rules are injected whole or not at all; this budget rejects enabling, it never truncates. */
+/** Rules are injected whole or not at all; this budget selects entries, it never truncates. */
 export const RULE_BUDGET_TOKENS = 1024;
 /** Reserved for envelope metadata (ids, scope note, budget block) on top of memory content. */
 export const ENVELOPE_RESERVE_TOKENS = 96;
@@ -75,29 +76,58 @@ export class ViewAssembler {
     const grant = ReadGrant.parse(input.grant);
     this.checkGrant(grant);
     if (input.projectId && !grant.projects.includes('*') && !grant.projects.includes(input.projectId)) throw new MnemoWeaveError('UNAUTHORIZED');
+    /**
+     * A View is drawn for one session: general memory plus the session's project. Attribution
+     * is stored per memory, so a project memory outside this session is not a candidate even
+     * when the Host holds a grant for it.
+     */
+    const inSessionScope = (owner: string | null | undefined): boolean => owner === null || owner === undefined || owner === input.projectId;
+    const usableBy = (grant0: typeof grant, descriptor: { state: string; projectId?: string | null | undefined } | null | undefined): boolean =>
+      descriptor !== null && descriptor !== undefined && descriptor.state === 'active'
+      && mayReadMemory(grant0, descriptor.projectId ?? null) && inSessionScope(descriptor.projectId ?? null);
     const generation = this.generation++;
     const query = input.query;
-    // Rules are read before assembly and delivered whole; exceeding the rule budget omits
-    // the block entirely instead of trimming a rule.
+    // Rules are read before memories and delivered whole. Selection is deterministic: pinned
+    // first, then importance, then age and id. A rule that does not fit is omitted as a whole;
+    // no body is ever trimmed. Rule metadata (id, version, markers) is accounted separately.
     const ruleRows = this.rules?.() ?? [];
-    const ruleUsed = ruleRows.reduce((sum, rule) => sum + estimateTokens(rule.body) + 8, 0);
-    const rulesExceeded = ruleUsed > RULE_BUDGET_TOKENS;
-    const rules = rulesExceeded ? [] : ruleRows;
+    const rank = { critical: 0, normal: 1, low: 2 } as const;
+    const orderedRules = [...ruleRows].sort((left, right) =>
+      Number(right.pinned === true) - Number(left.pinned === true)
+      || rank[left.importance ?? 'normal'] - rank[right.importance ?? 'normal']
+      || (left.createdAt ?? '').localeCompare(right.createdAt ?? '')
+      || left.entryId.localeCompare(right.entryId));
+    const selectedRules: ViewRuleRecord[] = [];
+    const omittedRules: string[] = [];
+    let ruleBodyTokens = 0;
+    let ruleUsed = 0;
+    for (const rule of orderedRules) {
+      const bodyTokens = estimateTokens(rule.body);
+      const metadataTokens = 8;
+      if (ruleUsed + bodyTokens + metadataTokens > RULE_BUDGET_TOKENS) { omittedRules.push(...orderedRules.slice(orderedRules.indexOf(rule)).map(item => item.entryId)); break; }
+      selectedRules.push(rule);
+      ruleBodyTokens += bodyTokens;
+      ruleUsed += bodyTokens + metadataTokens;
+    }
+    const rulesBudget = ruleRows.length > 0
+      ? {
+        limitTokens: RULE_BUDGET_TOKENS, usedTokens: ruleUsed, exceeded: omittedRules.length > 0,
+        omittedCount: omittedRules.length, omittedEntryIds: omittedRules,
+        bodyTokens: ruleBodyTokens, metadataTokens: selectedRules.length * 8,
+      }
+      : undefined;
     const recall = query
       ? (this.app.recallDetailed
-        ? await this.app.recallDetailed({ query, limit: input.limit ?? 10 })
-        : { ...(await this.app.recall({ query, limit: input.limit ?? 10 })), unregistered: [] as string[] })
+        ? await this.app.recallDetailed({ query, limit: Math.min(input.limit ?? MODEL_EVIDENCE_LIMIT, MODEL_EVIDENCE_LIMIT), ...(input.projectId === undefined ? {} : { projectId: input.projectId }) })
+        : { ...(await this.app.recall({ query, limit: Math.min(input.limit ?? MODEL_EVIDENCE_LIMIT, MODEL_EVIDENCE_LIMIT) })), unregistered: [] as string[] })
       : { memories: [] as { id: string; content: string; score?: number }[], complete: true, unregistered: [] as string[] };
     const excluded: ViewRecord['excluded'] = [];
     // A Provider hit this machine never published is reported, not silently dropped.
     for (const providerId of recall.unregistered ?? []) excluded.push({ memoryId: providerId, reason: 'unregistered' });
     // Dynamic candidates: visible per the catalog; version state re-checked again before delivery.
-    let dynamic = recall.memories.filter(memory => this.app.catalogReader!.currentMemoryIds(memory.id).some(id => {
-      const descriptor = this.safeDescriptor(id);
-      return descriptor?.state === 'active' && mayRead(grant);
-    }));
+    let dynamic = recall.memories.filter(memory => this.app.catalogReader!.currentMemoryIds(memory.id).some(id => usableBy(grant, this.safeDescriptor(id))));
     dynamic = await Promise.all(dynamic.map(async memory => {
-      const id = this.app.catalogReader!.currentMemoryIds(memory.id).find(id => { const descriptor = this.safeDescriptor(id); return descriptor?.state === 'active' && mayRead(grant); })!;
+      const id = this.app.catalogReader!.currentMemoryIds(memory.id).find(id => usableBy(grant, this.safeDescriptor(id)))!;
       const descriptor = this.app.catalogReader!.get(id);
       const read = await this.app.readMemory({ memoryId: id, revisionId: descriptor.currentRevisionId });
       return { ...memory, content: read.content };
@@ -114,23 +144,25 @@ export class ViewAssembler {
       seenPinned.add(item.memoryId);
       const descriptor = this.safeDescriptor(item.memoryId);
       if (!descriptor || descriptor.state !== 'active') { excluded.push({ memoryId: item.memoryId, reason: descriptor && descriptor.state === 'superseded' ? 'superseded' : 'not_visible' }); continue; }
-      if (!mayRead(grant)) { excluded.push({ memoryId: item.memoryId, reason: 'grant_scope' }); continue; }
+      if (!mayReadMemory(grant, descriptor.projectId ?? null) || !inSessionScope(descriptor.projectId ?? null)) { excluded.push({ memoryId: item.memoryId, reason: 'grant_scope' }); continue; }
       const revision = descriptor.revisions.find((value: { id: string }) => value.id === descriptor.currentRevisionId)!;
       const read = await this.app.readMemory({ memoryId: item.memoryId });
       pinned.push({
         memoryId: descriptor.id, revisionId: revision.id, providerMemoryId: revision.providerMemoryId,
         tier: item.tier === 'critical' ? 'pinned-critical' : 'pinned-normal',
         applicability: descriptor.applicability,
+        projectId: descriptor.projectId ?? null,
         content: read.content, excerpt: item.tier !== 'critical',
         sourceReference: `readMemory:${revision.providerMemoryId}`,
       });
     }
-    // Budget pass (VIEW-01/VIEW-02): critical must fit whole or the assembly fails loudly.
+    // Rules, session envelope and metadata are reserved before any memory content.
     const usedFor = (entry: { content: string }) => estimateTokens(entry.content) + 100;
+    let remaining = budgetTokens - envelopeReserve - ruleUsed;
     const critical = pinned.filter(entry => entry.tier === 'pinned-critical');
     const criticalTokens = critical.reduce((sum, entry) => sum + usedFor(entry), 0);
-    if (criticalTokens > budgetTokens - envelopeReserve) throw new MnemoWeaveError('VIEW_BUDGET_EXCEEDED');
-    let remaining = budgetTokens - envelopeReserve - criticalTokens;
+    if (criticalTokens > remaining) throw new MnemoWeaveError('VIEW_BUDGET_EXCEEDED');
+    remaining -= criticalTokens;
     const normal = pinned.filter(entry => entry.tier === 'pinned-normal');
     const memories: ViewRecord['memories'] = [...critical];
     for (const entry of normal) {
@@ -145,6 +177,8 @@ export class ViewAssembler {
     // anchors (dedup aliases may anchor several scoped memories), then re-check version state.
     // Logical memories already delivered as pinned content are not duplicated as dynamic rows.
     const pinnedIds = new Set(pinned.map(entry => entry.memoryId));
+    let dynamicDelivered = 0;
+    let dynamicBytes = 0;
     for (const memory of dynamic) {
       const logicalIds = this.app.catalogReader!.currentMemoryIds(memory.id);
       // The Provider answered with an id this machine never registered: it is not hidden
@@ -154,37 +188,54 @@ export class ViewAssembler {
         if (pinnedIds.has(logicalId)) continue;
         const descriptor = this.safeDescriptor(logicalId);
         if (!descriptor || descriptor.state !== 'active') { excluded.push({ memoryId: logicalId, reason: descriptor && descriptor.state === 'superseded' ? 'superseded' : 'not_visible' }); continue; }
-        if (!mayRead(grant)) { excluded.push({ memoryId: logicalId, reason: 'grant_scope' }); continue; }
+        if (!mayReadMemory(grant, descriptor.projectId ?? null) || !inSessionScope(descriptor.projectId ?? null)) { excluded.push({ memoryId: logicalId, reason: 'grant_scope' }); continue; }
+        if (dynamicDelivered >= MODEL_EVIDENCE_LIMIT) { excluded.push({ memoryId: logicalId, reason: 'budget' }); continue; }
         const revision = descriptor.revisions.find((value: { id: string }) => value.id === descriptor.currentRevisionId)!;
+        const full = (await this.app.readMemory({ memoryId: logicalId, revisionId: revision.id })).content;
+        const content = utf8Prefix(full, MODEL_EVIDENCE_BODY_BYTES);
+        const contentBytes = Buffer.byteLength(content, 'utf8');
+        if (dynamicBytes + contentBytes > MODEL_EVIDENCE_TOTAL_BYTES) { excluded.push({ memoryId: logicalId, reason: 'budget' }); continue; }
         const entry: ViewRecord['memories'][number] = {
           memoryId: descriptor.id, revisionId: revision.id, providerMemoryId: revision.providerMemoryId,
           tier: 'dynamic', applicability: descriptor.applicability,
-          content: (await this.app.readMemory({ memoryId: logicalId, revisionId: revision.id })).content, excerpt: false,
+          projectId: descriptor.projectId ?? null,
+          content,
+          excerpt: content.length < full.length,
           ...(memory.score === undefined ? {} : { score: memory.score }),
           sourceReference: `readMemory:${revision.providerMemoryId}`,
         };
         const cost = usedFor(entry);
         if (cost > remaining) { excluded.push({ memoryId: descriptor.id, reason: 'budget' }); continue; }
         memories.push(entry);
+        dynamicDelivered += 1;
+        dynamicBytes += contentBytes;
         remaining -= cost;
       }
     }
     // Reject changed publications rather than labeling old text with a new current pointer.
     for (const memory of memories) {
       const current = this.safeDescriptor(memory.memoryId);
-      if (!current || current.state !== 'active' || current.currentRevisionId !== memory.revisionId || !mayRead(grant)) throw new MnemoWeaveError('INVALID_STATE');
+      if (!current || current.state !== 'active' || current.currentRevisionId !== memory.revisionId || !mayReadMemory(grant, current.projectId ?? null) || !inSessionScope(current.projectId ?? null)) throw new MnemoWeaveError('INVALID_STATE');
     }
     // Delivery checks: grant may have been revoked or expired while content was assembled.
     this.checkGrant(grant);
-    const usedTokens = memories.reduce((sum, entry) => sum + usedFor(entry), 0) + envelopeReserve + (rulesExceeded ? 0 : ruleUsed);
+    const usedTokens = memories.reduce((sum, entry) => sum + usedFor(entry), 0) + envelopeReserve + ruleUsed;
+    if (usedTokens > budgetTokens) throw new MnemoWeaveError('VIEW_BUDGET_EXCEEDED');
+    const budgetOmissions = (omittedRules.length > 0 || excluded.some(item => item.reason === 'budget'))
+      ? [
+        ...(omittedRules.length > 0 ? [{ kind: 'rules' as const, count: omittedRules.length, reason: 'rule budget could not hold complete rules; lower-priority rules were omitted' }] : []),
+        ...(excluded.filter(item => item.reason === 'budget').length > 0 ? [{ kind: 'memories' as const, count: excluded.filter(item => item.reason === 'budget').length, reason: 'remaining token budget could not hold the next complete memory record' }] : []),
+      ]
+      : undefined;
     const view = View.parse({
       viewId: randomUUID(), generation, createdAt: new Date().toISOString(),
       grantId: grant.grantId, query: query ?? null,
       scopeNote: { projects: [...grant.projects], globalIncluded: grant.globalIncluded },
       budget: { limitTokens: budgetTokens, usedTokens, estimator: 'utf8-bytes-3', estimated: true, envelopeReserveTokens: envelopeReserve },
       memories,
-      ...(rules.length > 0 ? { rules } : {}),
-      ...(ruleRows.length > 0 ? { rulesBudget: { limitTokens: RULE_BUDGET_TOKENS, usedTokens: ruleUsed, exceeded: rulesExceeded } } : {}),
+      ...(selectedRules.length > 0 ? { rules: selectedRules } : {}),
+      ...(rulesBudget === undefined ? {} : { rulesBudget }),
+      ...(budgetOmissions === undefined ? {} : { budgetOmissions }),
       excluded,
       complete: excluded.every(item => item.reason !== 'budget') && recall.complete !== false,
       rerank: rerankStatus,
