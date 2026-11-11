@@ -90,12 +90,22 @@ test('a user edit is confirmed remotely, applied locally and published once', as
     const listingAfter = await app.client!.memories({ query: '第二次编辑', limit: 10 });
     assert.equal(listingAfter.items[0]?.content, '第二次编辑后的正文。');
     assert.equal(listingAfter.items[0]?.entryVersion, 2);
+    // One edit is one local Revision: the initial publish plus two edits is three, not four.
+    // Appending from both the sync apply step and the direct-edit path doubled the history.
+    const inspect = new SqliteCandidates(resolve(join(dir, 'state', 'governance.db')));
+    try {
+      const detail = inspect.catalog.get(memoryId);
+      assert.equal(detail.revisions.length, 3, `expected 3 revisions (initial + 2 edits), got ${detail.revisions.length}`);
+      assert.deepEqual(detail.revisions.map(revision => revision.number), [1, 2, 3]);
+      assert.equal(detail.revisions[2]?.parentId, detail.revisions[1]?.id);
+      assert.equal(detail.revisions[1]?.parentId, detail.revisions[0]?.id);
+    } finally { inspect.close(); }
   } catch (error) {
     console.error('EDIT_E2E_FAILED', error);
     throw error;
   } finally {
     await app.close();
-    await new Promise<void>((done) => server.close(() => done()));
+    await new Promise<void>((done) => { server.closeAllConnections(); server.close(() => done()); });
     remote.close();
   }
 });

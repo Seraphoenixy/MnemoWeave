@@ -66,6 +66,8 @@ test('v2 published receipts backfill v3 without changing Candidate or Provider i
     DROP TABLE session_event_refs; DROP TABLE session_events; DROP TABLE governance_candidate_bodies;
     DROP TABLE IF EXISTS entry_versions; DROP TABLE IF EXISTS sync_state; DROP TABLE IF EXISTS sync_outbox; DROP TABLE IF EXISTS sync_inbox; DROP TABLE IF EXISTS formal_map; DROP TABLE IF EXISTS runtime_rules; DROP TABLE IF EXISTS project_archives; DROP TABLE IF EXISTS project_bindings; DROP TABLE IF EXISTS runtime_injections;
     DROP TABLE IF EXISTS sync_log; DROP TABLE IF EXISTS sync_grants; DROP TABLE IF EXISTS sync_license_state;
+    -- v13's share queue did not exist in a genuine v2 store.
+    DROP TABLE IF EXISTS share_outbox;
     ALTER TABLE governance_candidates DROP COLUMN body_cleared_at; ALTER TABLE governance_lifecycle DROP COLUMN changed_at;
     DROP TABLE runtime_user_events; DROP TABLE runtime_projects; DROP TABLE runtime_pins; DROP TABLE runtime_sessions; DROP TABLE runtime_event_ids; DROP TABLE runtime_capture_tasks; DROP TABLE runtime_capture_runs; DROP TABLE runtime_capture_receipts;
     PRAGMA user_version=2;`); old.close();
@@ -77,4 +79,40 @@ test('v2 published receipts backfill v3 without changing Candidate or Provider i
     assert.equal(candidate.executionReceipts.length, 1);
   } finally { upgraded.close(); }
   assert.ok((await readdir(f.root)).some(name => name.includes('pre-v3')));
+});
+
+/**
+ * Classification must survive storage, not just the wire. A local Remember records knowledgeType
+ * and tags; a synced entry records category, importance, tags and entities. Both are kept, and a
+ * missing value stays missing instead of turning into an empty one.
+ */
+test('revision classification is stored and read back without inventing values', async () => {
+  const f = await fixture();
+  try {
+    const memory = f.repo.catalog.get(f.publication.memoryId);
+    const first = memory.revisions[0]!;
+    assert.equal(first.knowledgeType, 'Practice', 'a local Remember records its knowledge type');
+    assert.deepEqual(first.tags, []);
+    assert.equal(first.category, undefined, 'no category is invented from the knowledge type');
+    assert.equal(first.importance, undefined);
+
+    // A synced revision carries the payload's classification instead.
+    const second = f.repo.catalog.publishSynced(
+      memory.id,
+      RememberInput.parse({ idempotencyKey: 'synced-meta', content: '另一台机器的正文。', knowledgeType: 'Practice', tags: [], provenance: { source: 'sync', sourceReference: 'x', evidence: ['e'], verificationStatus: 'verified', confidence: 1, applicability: 'isolated test', limitations: 'n', lastVerified: null } }),
+      'provider-synced',
+      createHash('sha256').update('另一台机器的正文。').digest('hex'),
+      '2026-11-11T00:00:00.000Z',
+      'sync',
+      'synced revision 2',
+      { category: 'decision', importance: 4, tags: ['发布'], entities: ['MnemoWeave'] },
+    );
+    const updated = f.repo.catalog.get(memory.id);
+    const row = updated.revisions.find(revision => revision.id === second.revisionId)!;
+    assert.equal(row.category, 'decision');
+    assert.equal(row.importance, 4);
+    assert.deepEqual(row.tags, ['发布']);
+    assert.deepEqual(row.entities, ['MnemoWeave']);
+    assert.equal(row.knowledgeType, undefined, 'a synced revision does not claim a local knowledge type');
+  } finally { f.repo.close(); }
 });

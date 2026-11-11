@@ -27,6 +27,8 @@ const NativeRemember = z.discriminatedUnion('action', [
 ]);
 const Status = z.object({ total_insights: z.number().int().nonnegative() });
 const NativeMemory = z.object({ id: z.string().min(1), content: z.string() });
+/** `--basic` recall rows carry the source, which is how a lost sync write is found again. */
+const NativeSourcedMemory = z.object({ id: z.string().min(1), content: z.string(), source: z.string().optional() });
 const NativeForget = z.object({ id: z.string().min(1), status: z.literal('deleted') });
 const NativeRelated = z.array(z.object({ id: z.string().min(1), content: z.string(), depth: z.number().int().optional(), via_edge_type: z.string().optional() }));
 const EdgeTypes = ['supersedes', 'semantic', 'causal', 'entity', 'temporal'] as const;
@@ -38,10 +40,26 @@ export class MnemonCliProvider implements MemoryProvider {
   private readonly runner: Runner;
   private readonly prefix: string[];
   private queue: Promise<unknown> = Promise.resolve();
-  constructor(options: { binary: string; dataDir: string; store: string; runner?: Runner }) {
+  /**
+   * The version check used to run before every command, which cost one extra CLI process per
+   * call (~85 ms on Windows) — `/health/ready` alone started two processes. The version string is
+   * fixed for a given binary, so it is cached; the TTL still notices an in-place upgrade within
+   * a minute, and a failed check is never cached.
+   */
+  private versionCheckedAt = 0;
+  private static readonly VERSION_TTL_MS = 60_000;
+  /**
+   * Readiness is polled by the page and by monitoring. Caching it for a second keeps a burst of
+   * page opens from spawning one process each, and every consumer is documented as at most this
+   * stale.
+   */
+  private healthCache: { at: number; value: Health } | undefined;
+  private readonly healthTtlMs: number;
+  constructor(options: { binary: string; dataDir: string; store: string; runner?: Runner; healthTtlMs?: number }) {
     if (!isAbsolute(options.dataDir) || !/^[a-zA-Z0-9_-]+$/.test(options.store)) throw new Error('Explicit absolute dataDir and safe store are required');
     this.runner = options.runner ?? createRunner(options.binary);
     this.prefix = ['--data-dir', options.dataDir, '--store', options.store];
+    this.healthTtlMs = options.healthTtlMs ?? 1_000;
   }
   private serial<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.queue.then(operation);
@@ -49,19 +67,66 @@ export class MnemonCliProvider implements MemoryProvider {
     return result;
   }
   private async checked(args: string[]): Promise<string> {
-    const version = (await this.runner(['--version'])).trim();
-    if (version !== 'mnemon version 0.2.13') throw new MnemoWeaveError('UNSUPPORTED_VERSION');
-    return this.runner([...this.prefix, ...args]);
+    // A cached "supported" answer still re-verifies after the TTL, so replacing the binary in
+    // place cannot leave the Server believing in a version that is no longer there.
+    if (this.versionCheckedAt === 0 || Date.now() - this.versionCheckedAt > MnemonCliProvider.VERSION_TTL_MS) {
+      const version = (await this.runner(['--version'])).trim();
+      if (version !== 'mnemon version 0.2.13') throw new MnemoWeaveError('UNSUPPORTED_VERSION');
+      this.versionCheckedAt = Date.now();
+    }
+    const output = await this.runner([...this.prefix, ...args]);
+    this.storeOpened = true;
+    return output;
+  }
+  /**
+   * Read-only commands run against an immutable snapshot. The CLI documents `--readonly` as
+   * "open an immutable database snapshot (reject writes; create no WAL files)", which is both
+   * safer than a read-write open for a pure lookup and measurably cheaper (~20% here).
+   *
+   * The one exception is the first read of this process: a store that does not exist yet cannot
+   * be opened read-only (the CLI answers "database not found"), so that read opens normally and
+   * creates it. After any successful call the store provably exists and every read uses the
+   * snapshot. Deliberately not a retry-on-failure: that would swallow a genuine Provider outage.
+   */
+  private async checkedRead(args: string[]): Promise<string> {
+    if (!this.storeOpened) return this.checked(args);
+    return this.checked(['--readonly', ...args]);
+  }
+  /**
+   * Bodies are immutable per memory id: an edit writes a new memory and supersedes the old one,
+   * and a withdrawal removes the id. So a body, once read, stays valid until that id is
+   * forgotten — which is the only path that clears it. Without this cache every page load paid
+   * one CLI process per visible row.
+   */
+  /** Set once a call has proved the store exists; enables the read-only snapshot path. */
+  private storeOpened = false;
+  private readonly bodyCache = new Map<string, string>();
+  private static readonly BODY_CACHE_LIMIT = 500;
+  private rememberBody(id: string, content: string): void {
+    if (this.bodyCache.size >= MnemonCliProvider.BODY_CACHE_LIMIT) {
+      // Oldest first: Map preserves insertion order.
+      const oldest = this.bodyCache.keys().next();
+      if (!oldest.done) this.bodyCache.delete(oldest.value);
+    }
+    this.bodyCache.set(id, content);
   }
   health(): Promise<Health> {
+    const cached = this.healthCache;
+    if (cached !== undefined && Date.now() - cached.at < this.healthTtlMs) return Promise.resolve(cached.value);
     return this.serial(async () => {
-      decode(Status, await this.checked(['status']));
-      return { ready: true, version: '0.2.13', capabilities: ['health', 'recall', 'remember'] };
+      // Re-check inside the queue: a batch of callers may all have arrived before the first
+      // answer landed, and only one spawn should happen.
+      const again = this.healthCache;
+      if (again !== undefined && Date.now() - again.at < this.healthTtlMs) return again.value;
+      decode(Status, await this.checkedRead(['status']));
+      const value: Health = { ready: true, version: '0.2.13', capabilities: ['health', 'recall', 'remember'] };
+      this.healthCache = { at: Date.now(), value };
+      return value;
     });
   }
   recall(request: RecallRequest): Promise<RecallResult> {
     return this.serial(async () => {
-      const result = decode(NativeRecall, await this.checked(['recall', '--limit', String(request.limit), '--', request.query]));
+      const result = decode(NativeRecall, await this.checkedRead(['recall', '--limit', String(request.limit), '--', request.query]));
       return { memories: result.results.map(({ id, content, score, superseded }) => ({ id, content, score, ...(superseded === undefined ? {} : { superseded }) })) };
     });
   }
@@ -69,7 +134,7 @@ export class MnemonCliProvider implements MemoryProvider {
   inspectExact(content: string): Promise<{ matches: { id: string; content: string }[]; complete: boolean }> {
     if (!content.trim() || Buffer.byteLength(content, 'utf8') > 8000) return Promise.reject(new MnemoWeaveError('INVALID_INPUT'));
     return this.serial(async () => {
-      const rows = decode(z.array(NativeMemory).nullable(), await this.checked(['recall', '--basic', '--limit', '200', '--', content])) ?? [];
+      const rows = decode(z.array(NativeMemory).nullable(), await this.checkedRead(['recall', '--basic', '--limit', '200', '--', content])) ?? [];
       // LIKE treats % and _ as patterns. Filter exact content and report truncation.
       return { matches: rows.filter(row => row.content === content), complete: rows.length < 200 };
     });
@@ -77,16 +142,60 @@ export class MnemonCliProvider implements MemoryProvider {
   verifyContent(id: string, expectedContent: string): Promise<boolean> {
     if (!id.trim()) return Promise.reject(new MnemoWeaveError('INVALID_INPUT'));
     return this.serial(async () => {
-      const memory = decode(NativeMemory, await this.checked(['show', '--', id]));
+      const memory = decode(NativeMemory, await this.checkedRead(['show', '--', id]));
       return memory.id === id && memory.content === expectedContent;
     });
   }
   readMemory(id: string): Promise<{ id: string; content: string }> {
     if (!id.trim()) return Promise.reject(new MnemoWeaveError('INVALID_INPUT'));
+    const cached = this.bodyCache.get(id);
+    if (cached !== undefined) return Promise.resolve({ id, content: cached });
     return this.serial(async () => {
-      const result = decode(NativeMemory, await this.checked(['show', '--', id]));
+      const again = this.bodyCache.get(id);
+      if (again !== undefined) return { id, content: again };
+      const result = decode(NativeMemory, await this.checkedRead(['show', '--', id]));
       if (result.id !== id) throw new MnemoWeaveError('PROVIDER_PROTOCOL');
+      this.rememberBody(result.id, result.content);
       return result;
+    });
+  }
+  /**
+   * Read several bodies at once.
+   *
+   * The whole batch is serialized against writes (so it cannot interleave with one), but misses
+   * inside it run a few at a time: each miss is its own CLI process, and the list view needs one
+   * body per row. Cached bodies cost nothing.
+   *
+   * The default window is deliberately small. Measured on this machine over 25 rows: one process
+   * per row 2219 ms, window 2 1256 ms, window 3 1290 ms, window 4 1336 ms, window 8 1490 ms,
+   * window 16 1852 ms. Spawning is CPU-bound and every read opens an immutable snapshot, so
+   * running wider only adds contention.
+   */
+  readMany(ids: string[], concurrency = 4): Promise<{ id: string; content: string }[]> {
+    if (ids.length === 0) return Promise.resolve([]);
+    const missing = ids.filter(id => !this.bodyCache.has(id));
+    if (missing.length === 0) return Promise.resolve(ids.map(id => ({ id, content: this.bodyCache.get(id)! })));
+    return this.serial(async () => {
+      const stillMissing = missing.filter(id => !this.bodyCache.has(id));
+      const queue = [...stillMissing];
+      const worker = async (): Promise<void> => {
+        for (;;) {
+          const id = queue.shift();
+          if (id === undefined) return;
+          try {
+            const result = decode(NativeMemory, await this.checkedRead(['show', '--', id]));
+            if (result.id === id) this.rememberBody(result.id, result.content);
+          } catch {
+            // A body that cannot be read is reported by readMemory on the retry path; the batch
+            // stays partial so one bad row does not hide the rest of the page.
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(concurrency, queue.length) }, worker));
+      return ids.flatMap(id => {
+        const content = this.bodyCache.get(id);
+        return content === undefined ? [] : [{ id, content }];
+      });
     });
   }
   /** Internal relation projection only; approval and publication are owned by the workflow. */
@@ -128,12 +237,31 @@ export class MnemonCliProvider implements MemoryProvider {
       return { id: result.action === 'skipped' ? result.replaced_id : result.id, action: result.action, replacedId: result.action === 'skipped' ? result.replaced_id : null };
     });
   }
+  /**
+   * Locate a memory written under an exact `source`. `remember --no-diff` has no
+   * idempotency, so a sync write that lost its response is recovered here instead of
+   * being re-issued. `recall --basic` needs a keyword, so the source text itself is
+   * used and the rows are then filtered to an exact source match.
+   */
+  findBySource(source: string): Promise<{ id: string; content: string } | null> {
+    if (!source.trim() || source.length > 200) return Promise.reject(new MnemoWeaveError('INVALID_INPUT'));
+    return this.serial(async () => {
+      const rows = decode(z.array(NativeSourcedMemory).nullable(), await this.checked(['recall', '--basic', '--source', source, '--limit', '200', '--', source])) ?? [];
+      const matches = rows.filter(row => row.source === source);
+      // More than one row means a previous replay already duplicated the write; the caller
+      // must not pick one silently.
+      if (matches.length > 1) throw new MnemoWeaveError('PROVIDER_INTEGRITY');
+      return matches.length === 1 ? { id: matches[0]!.id, content: matches[0]!.content } : null;
+    });
+  }
   /** Soft delete. Historical edges pointing at the insight disappear, so sync never uses this for withdrawal. */
   forget(id: string): Promise<{ id: string; status: 'deleted' }> {
     if (!id.trim()) return Promise.reject(new MnemoWeaveError('INVALID_INPUT'));
     return this.serial(async () => {
       const result = decode(NativeForget, await this.checked(['forget', id]));
       if (result.id !== id) throw new MnemoWeaveError('PROVIDER_PROTOCOL');
+      // The body cache is keyed by id and a deleted id must never be served again.
+      this.bodyCache.delete(id);
       return result;
     });
   }
@@ -141,7 +269,7 @@ export class MnemonCliProvider implements MemoryProvider {
   related(id: string, edge: (typeof EdgeTypes)[number] = 'supersedes', depth = 1): Promise<{ id: string; content: string; depth: number; viaEdgeType: string | null }[]> {
     if (!id.trim() || !EdgeTypes.includes(edge) || !Number.isInteger(depth) || depth < 1 || depth > 5) return Promise.reject(new MnemoWeaveError('INVALID_INPUT'));
     return this.serial(async () => {
-      const rows = decode(NativeRelated, await this.checked(['related', id, '--edge', edge, '--depth', String(depth)]));
+      const rows = decode(NativeRelated, await this.checkedRead(['related', id, '--edge', edge, '--depth', String(depth)]));
       return rows.map((row) => ({ id: row.id, content: row.content, depth: row.depth ?? 1, viaEdgeType: row.via_edge_type ?? null }));
     });
   }

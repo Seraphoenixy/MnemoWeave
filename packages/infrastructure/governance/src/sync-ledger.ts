@@ -103,7 +103,29 @@ export class SqliteSyncLedger implements SyncLedgerPort {
     const rows = (state
       ? this.db.prepare('SELECT * FROM sync_outbox WHERE state = ? ORDER BY created_at ASC LIMIT ?').all(state, limit)
       : this.db.prepare('SELECT * FROM sync_outbox ORDER BY created_at ASC LIMIT ?').all(limit)) as unknown as OutboxDbRow[];
-    return rows.map((row) => ({
+    return rows.map(row => this.outboxRow(row));
+  }
+
+  /**
+   * Unconfirmed work for one entry, ignoring page limits. Confirmed history is kept in the
+   * same table, so a bounded newest-N scan would silently stop seeing an entry's own row
+   * once enough history accumulated, both for duplicate suppression and for result lookup.
+   */
+  outboxForEntry(entryId: string): SyncOutboxRow | null {
+    const row = this.db.prepare(`
+      SELECT * FROM sync_outbox WHERE entry_id = ? AND state IN ('pending', 'unknown')
+      ORDER BY created_at DESC LIMIT 1
+    `).get(entryId) as unknown as OutboxDbRow | undefined;
+    return row ? this.outboxRow(row) : null;
+  }
+
+  outboxChange(changeId: string): SyncOutboxRow | null {
+    const row = this.db.prepare('SELECT * FROM sync_outbox WHERE change_id = ?').get(changeId) as unknown as OutboxDbRow | undefined;
+    return row ? this.outboxRow(row) : null;
+  }
+
+  private outboxRow(row: OutboxDbRow): SyncOutboxRow {
+    return {
       changeId: row.change_id,
       scope: row.scope,
       entryId: row.entry_id,
@@ -115,7 +137,7 @@ export class SqliteSyncLedger implements SyncLedgerPort {
       lastError: row.last_error,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
-    }));
+    };
   }
 
   markOutbox(changeId: string, state: OutboxState, error: string | null, at: string): void {
@@ -141,7 +163,29 @@ export class SqliteSyncLedger implements SyncLedgerPort {
       SELECT scope, seq, change_id, entry_id, version, operation, entry_json, state, error
       FROM sync_inbox WHERE scope = ? AND state <> 'applied' ORDER BY seq ASC LIMIT ?
     `).all(scope, limit) as unknown as InboxDbRow[];
-    return rows.map((row) => ({
+    return rows.map(row => this.inboxRow(row));
+  }
+
+  /** One inbox row by scope/seq; applied rows stay readable so a pending check is accurate. */
+  inboxEntry(scope: string, seq: number): SyncInboxRow | null {
+    const row = this.db.prepare(`
+      SELECT scope, seq, change_id, entry_id, version, operation, entry_json, state, error
+      FROM sync_inbox WHERE scope = ? AND seq = ?
+    `).get(scope, seq) as unknown as InboxDbRow | undefined;
+    return row ? this.inboxRow(row) : null;
+  }
+
+  /** One inbox row by change id; applied rows stay readable so a confirmation can be read back. */
+  inboxChange(changeId: string): SyncInboxRow | null {
+    const row = this.db.prepare(`
+      SELECT scope, seq, change_id, entry_id, version, operation, entry_json, state, error
+      FROM sync_inbox WHERE change_id = ? ORDER BY seq ASC LIMIT 1
+    `).get(changeId) as unknown as InboxDbRow | undefined;
+    return row ? this.inboxRow(row) : null;
+  }
+
+  private inboxRow(row: InboxDbRow): SyncInboxRow {
+    return {
       scope: row.scope,
       seq: row.seq,
       changeId: row.change_id,
@@ -151,7 +195,7 @@ export class SqliteSyncLedger implements SyncLedgerPort {
       entry: SyncEntry.parse(JSON.parse(row.entry_json)),
       state: row.state as InboxState,
       error: row.error,
-    }));
+    };
   }
 
   markInbox(scope: string, seq: number, state: InboxState, error: string | null = null): void {

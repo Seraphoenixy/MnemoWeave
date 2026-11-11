@@ -60,6 +60,10 @@ export const RememberInput = z.object({
   content: z.string().min(1).refine(value => value.trim().length > 0 && Buffer.byteLength(value, 'utf8') <= 8000, 'Content must contain 1–8000 UTF-8 bytes'),
   knowledgeType: z.enum(['Concept', 'Practice', 'Architecture', 'Troubleshooting', 'Constraint', 'Procedure', 'Reference']),
   tags: z.array(z.string().trim().min(1).max(100)).max(20).default([]),
+  /** Classification a publication may carry; absent means it was never recorded. */
+  category: z.enum(['preference', 'decision', 'fact', 'insight', 'context', 'general']).optional(),
+  importance: z.number().int().min(1).max(5).optional(),
+  entities: z.array(z.string().trim().min(1).max(200)).max(50).optional(),
   scope: z.enum(['project', 'global']).default('project'),
   projectId: z.string().trim().min(1).max(200).optional(),
   change: ChangeIntent.optional(),
@@ -93,6 +97,17 @@ export const RevisionDescriptor = z.object({
   providerMemoryId: z.string().min(1), contentHash: z.string().regex(/^[a-f0-9]{64}$/),
   candidateId: z.uuid(), publishedAt: z.iso.datetime(), effectiveAt: z.iso.datetime(),
   applicability: z.string(), scope: z.enum(['project', 'global']), projectId: z.string().optional(),
+  /**
+   * Classification attached to this revision. `knowledgeType` comes from a local Remember; the
+   * rest arrive with a synced formal entry. They are separate dimensions, not synonyms, so a
+   * revision may carry one, both or neither — never a value invented by mapping one to the other.
+   */
+  knowledgeType: z.enum(['Concept', 'Practice', 'Architecture', 'Troubleshooting', 'Constraint', 'Procedure', 'Reference']).optional(),
+  category: z.enum(['preference', 'decision', 'fact', 'insight', 'context', 'general']).optional(),
+  importance: z.number().int().min(1).max(5).optional(),
+  /** Absent means no classification was recorded; an empty array means it was recorded as empty. */
+  tags: z.array(z.string()).optional(),
+  entities: z.array(z.string()).optional(),
 });
 export const LogicalRelation = z.object({
   id: z.uuid(), kind: z.enum(['Supersedes', 'RelatedTo']), sourceMemoryId: z.uuid(), sourceRevisionId: z.uuid(), targetMemoryId: z.uuid(), targetRevisionId: z.uuid(),
@@ -126,12 +141,147 @@ export const MemoryListItem = z.object({
   scope: z.enum(['project', 'global']), projectId: z.string().optional(),
   applicability: z.string(), publishedAt: z.iso.datetime(), content: z.string(),
   entryVersion: z.number().int().nonnegative(),
+  /**
+   * Classification of the current revision, so a card can show what the memory is without
+   * opening it. Absent means it was never recorded.
+   */
+  knowledgeType: z.enum(['Concept', 'Practice', 'Architecture', 'Troubleshooting', 'Constraint', 'Procedure', 'Reference']).optional(),
+  category: z.enum(['preference', 'decision', 'fact', 'insight', 'context', 'general']).optional(),
+  importance: z.number().int().min(1).max(5).optional(),
+  tags: z.array(z.string()).optional(),
+  entities: z.array(z.string()).optional(),
 }).strict();
 export const MemoryListQuery = z.object({
   query: z.string().trim().max(500).optional(),
   limit: z.coerce.number().int().min(1).max(200).default(50),
+  /**
+   * `all` (default), `global`, or one project. Filtering happens before body matching so a
+   * project whose memories sort late is still reachable.
+   */
+  scope: z.enum(['all', 'global', 'project']).default('all'),
+  projectId: z.string().trim().min(1).max(200).optional(),
+  /**
+   * Keep only memories whose current revision carries this classification. Applied to the
+   * candidate set like `scope`, before the body is read, so a filtered page costs no more than
+   * an unfiltered one.
+   */
+  category: z.enum(['preference', 'decision', 'fact', 'insight', 'context', 'general']).optional(),
+  knowledgeType: z.enum(['Concept', 'Practice', 'Architecture', 'Troubleshooting', 'Constraint', 'Procedure', 'Reference']).optional(),
+  /** Keep only memories whose current revision names this entity (case-insensitive). */
+  entity: z.string().trim().min(1).max(200).optional(),
+  /** Scan order. Changing it invalidates any cursor issued for a different one. */
+  sort: z.enum(['newest', 'oldest', 'importance']).optional(),
+  /**
+   * Opaque position in the stable scan order. It records how far the scan reached rather than
+   * how many rows matched, so candidates skipped for not matching the query do not stall paging.
+   */
+  cursor: z.string().trim().max(500).optional(),
+}).strict().refine(
+  value => value.scope !== 'project' || value.projectId !== undefined,
+  'scope=project requires projectId',
+);
+/**
+ * Semantic search over the Provider, mapped back to this machine's catalog.
+ *
+ * This is not the list endpoint with a different query: the list matches body text over a stable
+ * scan, while explore ranks by the Provider's own similarity. Only memories this machine knows
+ * and may read are returned; Provider hits with no catalog entry are counted, never shown.
+ */
+export const ExploreInput = z.object({
+  query: z.string().trim().min(1).max(500),
+  limit: z.coerce.number().int().min(1).max(50).default(20),
+  /**
+   * Drop hits the Provider scored below this. Scores are the Provider's own, observed in `[0, 1]`,
+   * where an unrelated query still returns low-scoring matches — so a threshold is what turns a
+   * ranked list into an answer.
+   */
+  minScore: z.coerce.number().min(0).max(1).default(0),
 }).strict();
-export const MemoryList = z.object({ items: z.array(MemoryListItem) }).strict();
+export const ExploreHit = z.object({
+  memoryId: z.uuid(), revisionId: z.uuid(), providerMemoryId: z.string().min(1),
+  scope: z.enum(['project', 'global']), projectId: z.string().optional(),
+  state: z.enum(['active', 'superseded', 'unverified']),
+  content: z.string(), score: z.number(), publishedAt: z.iso.datetime(),
+  /** Classification of the current revision, when it was recorded. */
+  category: z.string().optional(), knowledgeType: z.string().optional(), tags: z.array(z.string()).optional(),
+}).strict();
+export const ExploreOutput = z.object({
+  query: z.string(),
+  hits: z.array(ExploreHit),
+  /**
+   * Provider memories that matched but were never published here. Counted so the page can say so
+   * rather than presenting a short list as complete.
+   */
+  unregistered: z.number().int().nonnegative(),
+  /**
+   * True when the result filled the requested limit, so more matches may exist. Explore is a
+   * ranking, not a scan: there is no cursor, and asking again with a larger limit is the only way
+   * to see further down the same order.
+   */
+  truncated: z.boolean(),
+}).strict();
+export type ExploreInputRecord = z.infer<typeof ExploreInput>;
+export type ExploreOutputRecord = z.infer<typeof ExploreOutput>;
+
+/**
+ * The relation graph over the visible catalog.
+ *
+ * Structure only: a node carries what the catalog knows, not the body. Bodies are Provider reads,
+ * and a graph of a few hundred nodes would otherwise cost one CLI process per node just to draw a
+ * label; a renderer resolves the names of the nodes it actually shows.
+ */
+export const MemoryGraphQuery = z.object({
+  scope: z.enum(['all', 'global', 'project']).default('all'),
+  projectId: z.string().trim().min(1).max(200).optional(),
+  /** Cap on nodes; edges are then limited to those whose endpoints are both present. */
+  limit: z.coerce.number().int().min(1).max(500).default(200),
+}).strict().refine(value => value.scope !== 'project' || value.projectId !== undefined, 'scope=project requires projectId');
+export const MemoryGraphNode = z.object({
+  memoryId: z.uuid(),
+  scope: z.enum(['global', 'project']),
+  projectId: z.string().optional(),
+  /**
+   * A retired memory is still a node: a supersede edge points *at* one by definition, so excluding
+   * them would make every supersede edge undrawable. Withdrawn memories never appear.
+   */
+  state: z.enum(['active', 'superseded', 'unverified']),
+  publishedAt: z.iso.datetime(),
+  category: z.string().optional(),
+  knowledgeType: z.string().optional(),
+  importance: z.number().int().min(1).max(5).optional(),
+}).strict();
+export const MemoryGraphEdge = z.object({
+  relationId: z.string().min(1),
+  /** Conflicts links two memories that disagree and both still exist. */
+  kind: z.enum(['Supersedes', 'RelatedTo', 'Conflicts']),
+  sourceMemoryId: z.uuid(),
+  targetMemoryId: z.uuid(),
+  reason: z.string(),
+  effectiveAt: z.iso.datetime(),
+}).strict();
+export const MemoryGraph = z.object({
+  nodes: z.array(MemoryGraphNode),
+  /** Every edge has both endpoints in `nodes`; a dangling edge would be undrawable. */
+  edges: z.array(MemoryGraphEdge),
+  /** True when the node cap was reached, so the graph is a subset rather than the whole set. */
+  truncated: z.boolean(),
+}).strict();
+export type MemoryGraphRecord = z.infer<typeof MemoryGraph>;
+
+export const MemoryList = z.object({  items: z.array(MemoryListItem),
+  /** Present when more candidates remain; absent once the scan is exhausted. */
+  nextCursor: z.string().optional(),
+  /** Projects that appear in the browsable set, so the filter never hides an existing project. */
+  projects: z.array(z.object({ projectId: z.string(), count: z.number().int().nonnegative() }).strict()).optional(),
+  /**
+   * Classification values present in the scoped set. Indexed before the category filter is
+   * applied, so choosing one category cannot remove the others from the picker.
+   */
+  categories: z.array(z.object({ value: z.string(), count: z.number().int().nonnegative() }).strict()).optional(),
+  knowledgeTypes: z.array(z.object({ value: z.string(), count: z.number().int().nonnegative() }).strict()).optional(),
+  /** Entities named by the current revisions in the scoped set, in their recorded spelling. */
+  entities: z.array(z.object({ value: z.string(), count: z.number().int().nonnegative() }).strict()).optional(),
+}).strict();
 export type MemoryListItemRecord = z.infer<typeof MemoryListItem>;
 export type MemoryListRecord = z.infer<typeof MemoryList>;
 
@@ -178,17 +328,70 @@ export type ArchiveCreateInput = z.infer<typeof ArchiveCreate>;
 export type ArchiveRecordValue = z.infer<typeof ArchiveRecord>;
 export type ArchiveListRecord = z.infer<typeof ArchiveList>;
 export type MemoryEditRecord = z.infer<typeof MemoryEditOutput>;
+/**
+ * Direct user creation: publishes a formal memory without a review round.
+ *
+ * The user's own input is treated as already-confirmed knowledge, so this is deliberately not a
+ * candidate submission — but it still goes through the same publication pipeline (Provider write,
+ * catalog record, sync outbox), and it is recorded as a `local-user` review decision so the
+ * history says who asked for it. Model output has no such path.
+ */
+export const MemoryCreateInput = z.object({
+  content: z.string().refine(value => value.trim().length > 0 && Buffer.byteLength(value, 'utf8') <= 8000, 'Content must contain 1–8000 UTF-8 bytes'),
+  /** Knowledge type is required on creation: there is no previous revision to inherit from. */
+  knowledgeType: z.enum(['Concept', 'Practice', 'Architecture', 'Troubleshooting', 'Constraint', 'Procedure', 'Reference']),
+  category: z.enum(['preference', 'decision', 'fact', 'insight', 'context', 'general']).optional(),
+  importance: z.number().int().min(1).max(5).optional(),
+  tags: z.array(z.string().trim().min(1).max(100)).max(20).optional(),
+  entities: z.array(z.string().trim().min(1).max(200)).max(50).optional(),
+  scope: z.enum(['global', 'project']).default('global'),
+  projectId: z.string().trim().min(1).max(200).optional(),
+  reason: z.string().trim().min(1).max(4000).optional(),
+}).strict().refine(
+  value => value.scope === 'global' ? value.projectId === undefined : value.projectId !== undefined,
+  'Project-scoped memories require projectId',
+);
+export const MemoryCreateOutput = z.object({
+  memoryId: z.uuid(), revisionId: z.uuid(), providerMemoryId: z.string().min(1),
+  contentHash: z.string().regex(/^[a-f0-9]{64}$/),
+  /** Always 1 for a new memory, but returned so the page can open the editor on a known base. */
+  entryVersion: z.number().int().nonnegative(),
+}).strict();
+export type MemoryCreateRecord = z.infer<typeof MemoryCreateOutput>;
 /** Direct user edit: appends an immutable revision to an existing memory without a review round. */
 export const MemoryEditInput = z.object({
   content: z.string().refine(value => value.trim().length > 0 && Buffer.byteLength(value, 'utf8') <= 8000, 'Content must contain 1–8000 UTF-8 bytes'),
   reason: z.string().trim().min(1).max(4000).optional(),
   /** Base version read from the list/detail API; the server never fills it in. */
   entryVersion: z.number().int().nonnegative(),
+  /**
+   * Classification the new revision should carry. Omitted fields are inherited from the revision
+   * being edited, so a body-only edit cannot silently drop what the memory was classified as.
+   */
+  category: z.enum(['preference', 'decision', 'fact', 'insight', 'context', 'general']).optional(),
+  knowledgeType: z.enum(['Concept', 'Practice', 'Architecture', 'Troubleshooting', 'Constraint', 'Procedure', 'Reference']).optional(),
+  importance: z.number().int().min(1).max(5).optional(),
+  /** An empty array clears the tags; omitting the field keeps them. */
+  tags: z.array(z.string().trim().min(1).max(100)).max(20).optional(),
 }).strict();
 export const MemoryEditOutput = z.object({
   memoryId: z.uuid(), revisionId: z.uuid(), providerMemoryId: z.string().min(1),
   contentHash: z.string().regex(/^[a-f0-9]{64}$/),
   entryVersion: z.number().int().positive(),
+}).strict();
+/**
+ * Withdrawing stops recall and injection but keeps the history readable. It carries the same
+ * base version as an edit, because it appends a revision like any other write.
+ */
+export const MemoryWithdrawInput = z.object({
+  reason: z.string().trim().min(1).max(4000),
+  entryVersion: z.number().int().nonnegative(),
+}).strict();
+export const MemoryWithdrawOutput = z.object({
+  memoryId: z.uuid(),
+  revisionId: z.uuid(),
+  entryVersion: z.number().int().positive(),
+  withdrawnAt: z.iso.datetime(),
 }).strict();
 export const PublishedMemoryOutput = MemoryDescriptor.extend({ selectedRevisionId: z.uuid(),selectedRevision:RevisionDescriptor, content: z.string(), entryVersion: z.number().int().nonnegative() });
 export type MemoryCatalogRecord = z.infer<typeof MemoryDescriptor>;
@@ -348,8 +551,8 @@ export const openapi = {
   components: { securitySchemes: { bearer: { type: 'http', scheme: 'bearer' } } },
   security: [{ bearer: [] }],
   paths: { '/health/live': { get: {
-    description: 'Process liveness. Still requires the service token: only local non-browser clients are served.',
-    responses: { '200': { description: 'Process is live', content: jsonContent(z.object({ live: z.literal(true) }).strict()) }, '401': { description: 'Unauthorized' } },
+    description: 'Process liveness. Still requires the service token: only local non-browser clients are served. `service` and `protocol` identify the responder so a host can tell this Server apart from another program holding the port; a rejected token carries the same identity fields so a host reports a token mismatch rather than an intruder.',
+    responses: { '200': { description: 'Process is live', content: jsonContent(z.object({ live: z.literal(true), service: z.literal('mnemoweave'), protocol: z.number().int().positive() }).strict()) }, '401': { description: 'Unauthorized; the body still names this service so the caller reports a token mismatch', content: jsonContent(z.object({ code: z.string(), service: z.literal('mnemoweave'), protocol: z.number().int().positive(), traceId: z.string() })) } },
   } },
   '/health/ready': { get: {
     description: 'Provider dependency readiness.',
@@ -428,11 +631,19 @@ Object.assign(openapi.paths, {
     requestBody: { required: true, content: jsonContent(CancelVersionInput) },
     responses: { '200': { description: 'Operation cancelled; candidate rejected', content: jsonContent(Candidate) }, '401': { description: 'Operator credential required' }, '409': { description: 'Operation already published, invoking or verified' } },
   } },
-  '/v1/memories': { get: {
-    description: 'List published memories with their current Provider text; optional space-separated query filters the list.',
-    parameters: [{ name: 'query', in: 'query', schema: z.toJSONSchema(z.string().max(500)) }, { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 200 } }],
-    responses: { '200': { description: 'Memory list', content: jsonContent(MemoryList) }, '401': { description: 'Unauthorized' }, '503': { description: 'Provider unavailable' } },
-  } },
+  '/v1/memories': {
+    get: {
+      description: 'List published memories with their current Provider text; optional space-separated query filters the list.',
+      parameters: [{ name: 'query', in: 'query', schema: z.toJSONSchema(z.string().max(500)) }, { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 200 } }],
+      responses: { '200': { description: 'Memory list', content: jsonContent(MemoryList) }, '401': { description: 'Unauthorized' }, '503': { description: 'Provider unavailable' } },
+    },
+    post: {
+      description: 'Create a formal memory directly, without a review round. User input is treated as already-confirmed knowledge; the write still goes through the ordinary publication pipeline and is recorded as a local-user review decision. Model output has no such path.',
+      parameters: [{ name: 'x-mnemoweave-host', in: 'header', required: true, schema: z.toJSONSchema(z.string().min(1)) }],
+      requestBody: { required: true, content: jsonContent(MemoryCreateInput) },
+      responses: { '200': { description: 'Memory published', content: jsonContent(MemoryCreateOutput) }, '400': { description: 'Invalid input' }, '401': { description: 'Missing host identity' }, '409': { description: 'The publisher is not running, or the write failed' }, '503': { description: 'Provider unavailable, or the outcome is not yet known' } },
+    },
+  },
   '/v1/memories/{memoryId}': {
     get: {
       description: 'Read selected/current published version from authoritative Provider and check content hash.',
@@ -440,12 +651,34 @@ Object.assign(openapi.paths, {
       responses: { '200': { description: 'Published metadata and verified Provider text', content: jsonContent(PublishedMemoryOutput) }, '404': { description: 'Memory/revision not found' }, '503': { description: 'Provider missing or content integrity mismatch' } },
     },
     patch: {
-      description: 'User edit: append an immutable revision with the new text, supersede the previous Provider memory and move the current pointer. No review round is inserted; the edit is recorded as an operator review decision.',
+      description: 'User edit: append an immutable revision with the new text, supersede the previous Provider memory and move the current pointer. No review round is inserted; the edit is recorded as a local-user review decision attributed to the calling Host.',
       parameters: [{ name: 'memoryId', in: 'path', required: true, schema: z.toJSONSchema(z.uuid()) }],
       requestBody: { required: true, content: jsonContent(MemoryEditInput) },
-      responses: { '200': { description: 'New revision published', content: jsonContent(MemoryEditOutput) }, '400': { description: 'Invalid input' }, '404': { description: 'Memory not found' }, '409': { description: 'Memory is superseded or unverified' }, '503': { description: 'Provider unavailable or content mismatch' } },
+      responses: { '200': { description: 'New revision published', content: jsonContent(MemoryEditOutput) }, '400': { description: 'Invalid input' }, '401': { description: 'Service token rejected or Host identity missing' }, '404': { description: 'Memory not found' }, '409': { description: 'Memory is superseded, unverified, or the base version is stale' }, '503': { description: 'Provider unavailable or content mismatch' } },
     },
   },
+  '/v1/memories/graph': { get: {
+    description: 'The relation graph over the visible catalog. Structure only — nodes carry what the catalog knows, not the body, because reading bodies would cost one Provider process per node. Every edge has both endpoints present.',
+    parameters: [
+      { name: 'x-mnemoweave-host', in: 'header', required: true, schema: z.toJSONSchema(z.string().min(1)) },
+      { name: 'scope', in: 'query', schema: z.toJSONSchema(z.enum(['all', 'global', 'project'])) },
+      { name: 'projectId', in: 'query', schema: z.toJSONSchema(z.string().min(1).max(200)) },
+      { name: 'limit', in: 'query', schema: z.toJSONSchema(z.coerce.number().int().min(1).max(500)) },
+    ],
+    responses: { '200': { description: 'Nodes and edges, with `truncated` when the node cap was reached', content: jsonContent(MemoryGraph) }, '400': { description: 'Invalid scope, missing projectId for scope=project, or an out-of-range limit' }, '401': { description: 'Missing host identity' } },
+  } },
+  '/v1/memories/explore': { post: {
+    description: 'Provider-ranked semantic search, mapped to memories this machine published. Distinct from the list endpoint, which matches body text over a stable scan. Provider hits with no catalog entry are counted in `unregistered` and never returned.',
+    parameters: [{ name: 'x-mnemoweave-host', in: 'header', required: true, schema: z.toJSONSchema(z.string().min(1)) }],
+    requestBody: { required: true, content: jsonContent(ExploreInput) },
+    responses: { '200': { description: 'Ranked hits and the count of unpublished Provider matches', content: jsonContent(ExploreOutput) }, '400': { description: 'Empty query or invalid limit' }, '401': { description: 'Missing host identity' }, '503': { description: 'Provider unavailable' } },
+  } },
+  '/v1/memories/{memoryId}/withdraw': { post: {
+    description: 'Withdraw a published memory. Recall and injection stop serving it; its revisions remain readable. Appends the withdrawal as a new version so every machine stops recalling it.',
+    parameters: [{ name: 'memoryId', in: 'path', required: true, schema: z.toJSONSchema(z.uuid()) }],
+    requestBody: { required: true, content: jsonContent(MemoryWithdrawInput) },
+    responses: { '200': { description: 'Withdrawal recorded', content: jsonContent(MemoryWithdrawOutput) }, '400': { description: 'Invalid input' }, '401': { description: 'Service token rejected or Host identity missing' }, '404': { description: 'Memory not found' }, '409': { description: 'Version conflict, already withdrawn, or the change is queued/unknown' }, '503': { description: 'Provider unavailable' } },
+  } },
   '/v1/inject': { post: {
     description: 'One-call Host injection: assemble the immutable View for a session. Identity comes from the x-mnemoweave-host header.',
     parameters: [{ name: 'x-mnemoweave-host', in: 'header', required: true, schema: z.toJSONSchema(z.string().min(1)) }],

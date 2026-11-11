@@ -20,11 +20,11 @@ async function harness() {
   const server = createHttpServer({} as unknown as MemoryApplication, TOKEN, OPERATOR, client, () => ({ usedBytes: 0, state: 'ok' }));
   await new Promise<void>((done) => server.listen(0, '127.0.0.1', () => done()));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  return { seen, base, close: () => new Promise<void>((done) => server.close(() => done())) };
+  return { seen, base, close: () => new Promise<void>((done) => { server.closeAllConnections(); server.close(() => done()); }) };
 }
 
 function headers(extra: Record<string, string> = {}) {
-  return { authorization: `Bearer ${TOKEN}`, 'x-mnemoweave-host': HOST, 'content-type': 'application/json', ...extra };
+  return { authorization: `Bearer ${TOKEN}`, 'x-mnemoweave-host': HOST, 'content-type': 'application/json', connection: 'close', ...extra };
 }
 
 test('the project header supplies the project when the body omits it', async () => {

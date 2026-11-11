@@ -33,27 +33,29 @@ export interface LocalWriteInput {
   operation: SyncChangeRequest['operation'];
   entry: SyncEntryDraftValue;
   baseVersion: number;
+  /** Optional caller-supplied id; lets the caller find its own inbox row after the flush. */
+  changeId?: string;
 }
 
 export async function submitLocalChange(input: LocalWriteInput, ports: LocalWritePorts): Promise<LocalWriteResult> {
-  const outstanding = ports.ledger.outbox().find(row => row.entryId === input.entry.entryId && (row.state === 'pending' || row.state === 'unknown'));
-  if (outstanding) throw new MnemoWeaveError('SYNC_QUEUED');
+  const outstanding = ports.ledger.outboxForEntry(input.entry.entryId);
+  if (outstanding && (outstanding.state === 'pending' || outstanding.state === 'unknown')) throw new MnemoWeaveError('SYNC_QUEUED');
   const change = SyncChangeInput.parse(buildChange({
-    changeId: randomUUID(),
+    changeId: input.changeId ?? randomUUID(),
     baseVersion: input.baseVersion,
     operation: input.operation,
     entry: input.entry,
   }));
   ports.ledger.enqueue(change, ports.now());
   await ports.flush();
-  const row = ports.ledger.outbox().find(item => item.changeId === change.changeId);
+  const row = ports.ledger.outboxChange(change.changeId);
   if (!row) throw new MnemoWeaveError('INTERNAL');
   if (row.state === 'conflict') throw new MnemoWeaveError('VERSION_CONFLICT');
   if (row.state === 'needs_review') throw new MnemoWeaveError('NEEDS_REVIEW');
   if (row.state === 'unknown') return { state: 'unknown', accepted: null };
   if (row.state !== 'confirmed') return { state: 'queued', accepted: null };
   // A confirmed change is fed back into the inbox; its version is the remote's answer.
-  const record = ports.ledger.inbox(input.entry.scope, 200).find(item => item.changeId === change.changeId);
+  const record = ports.ledger.inboxChange(change.changeId);
   return { state: 'confirmed', accepted: record ? { version: record.version, seq: record.seq } : null };
 }
 

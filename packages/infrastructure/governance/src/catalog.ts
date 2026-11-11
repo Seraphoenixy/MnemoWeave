@@ -6,6 +6,17 @@ import type { MemoryCatalogReader } from '../../../core/application/src/catalog-
 import type { VersionPlan, VersionCheckpoint, VersionOperation } from '../../../core/application/src/version-ports.ts';
 
 type Transaction = <T>(operation: () => T) => T;
+/**
+ * Classification a revision may carry. Both dimensions exist because a local Remember and a
+ * synced formal entry describe their content differently; neither is derived from the other.
+ */
+export interface RevisionMeta {
+  knowledgeType?: string;
+  category?: string;
+  importance?: number;
+  tags?: string[];
+  entities?: string[];
+}
 const REVIEW_DAY_MS = 86_400_000;
 /** KNOWLEDGE-01 defaults: version/platform-sensitive, regular practice, long-term principles. */
 export const REVIEW_INTERVAL_DAYS: Readonly<Record<string, number>> = {
@@ -18,6 +29,22 @@ export const DEFAULT_REVIEW_INTERVAL_DAYS = 90;
 export type SyncHook = (op: string, entityId: string, payload: Record<string, unknown>) => void;
 
 /** v3 metadata only: immutable Provider references and logical current pointers. */
+/**
+ * Classification carried by a publication request.
+ *
+ * Absent fields stay absent: "not recorded" is a different statement from "recorded as empty", and
+ * the catalog keeps that distinction all the way to the API.
+ */
+function revisionMetaOf(request: RememberRequest): RevisionMeta {
+  return {
+    knowledgeType: request.knowledgeType,
+    tags: request.tags,
+    ...(request.category === undefined ? {} : { category: request.category }),
+    ...(request.importance === undefined ? {} : { importance: request.importance }),
+    ...(request.entities === undefined ? {} : { entities: request.entities }),
+  };
+}
+
 export class SqliteMemoryCatalog implements MemoryCatalogReader {
   private readonly db: DatabaseSync;
   private readonly transaction:Transaction;
@@ -95,8 +122,12 @@ export class SqliteMemoryCatalog implements MemoryCatalogReader {
     // During the v2→v3 backfill the provenance columns do not exist yet (v7 adds them and
     // backfills from the candidate request); runtime publications always carry them.
     if (this.db.prepare("SELECT 1 FROM pragma_table_info('catalog_revisions') WHERE name='applicability'").get()) {
-      this.db.prepare('INSERT INTO catalog_revisions(id,memory_id,revision_number,parent_id,provider_memory_id,content_hash,candidate_id,published_at,effective_at,applicability,scope) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
-        .run(revisionId, memoryId, 1, null, providerId, hash, candidateId, time, time, request.provenance.applicability, request.scope);
+      this.insertRevision({
+        id: revisionId, memoryId, number: 1, parentId: null, providerMemoryId: providerId,
+        contentHash: hash, candidateId, publishedAt: time, effectiveAt: time,
+        applicability: request.provenance.applicability, scope: request.scope,
+        meta: revisionMetaOf(request),
+      });
     } else {
       this.db.prepare('INSERT INTO catalog_revisions(id,memory_id,revision_number,parent_id,provider_memory_id,content_hash,candidate_id,published_at,effective_at) VALUES(?,?,?,?,?,?,?,?,?)')
         .run(revisionId, memoryId, 1, null, providerId, hash, candidateId, time, time);
@@ -124,12 +155,66 @@ export class SqliteMemoryCatalog implements MemoryCatalogReader {
     if (!memory) throw new MnemoWeaveError('NOT_FOUND');
     // Revision provenance lives on the revision itself; cleared candidate bodies never affect it.
     const revisions = this.db.prepare("SELECT r.*, json_extract(c.request_json,'$.projectId') project_id FROM catalog_revisions r JOIN governance_candidates c ON c.id=r.candidate_id WHERE r.memory_id=? ORDER BY r.revision_number").all(memoryId).map(row => {
-      return { ...(row['project_id'] ? { projectId: String(row['project_id']) } : {}), id: row['id'], memoryId: row['memory_id'], number: row['revision_number'], parentId: row['parent_id'], providerMemoryId: row['provider_memory_id'], contentHash: row['content_hash'], candidateId: row['candidate_id'], publishedAt: row['published_at'], effectiveAt: row['effective_at'], applicability: row['applicability'], scope: row['scope'] };
+      const tags = row['tags_json'] === null || row['tags_json'] === undefined ? [] : (JSON.parse(String(row['tags_json'])) as string[]);
+      const entities = row['entities_json'] === null || row['entities_json'] === undefined ? [] : (JSON.parse(String(row['entities_json'])) as string[]);
+      return {
+        ...(row['project_id'] ? { projectId: String(row['project_id']) } : {}),
+        id: row['id'], memoryId: row['memory_id'], number: row['revision_number'], parentId: row['parent_id'],
+        providerMemoryId: row['provider_memory_id'], contentHash: row['content_hash'], candidateId: row['candidate_id'],
+        publishedAt: row['published_at'], effectiveAt: row['effective_at'], applicability: row['applicability'], scope: row['scope'],
+        // Absent means the classification was never recorded, which differs from an empty one.
+        ...(row['knowledge_type'] === null ? {} : { knowledgeType: row['knowledge_type'] }),
+        ...(row['category'] === null ? {} : { category: row['category'] }),
+        ...(row['importance'] === null ? {} : { importance: row['importance'] }),
+        tags, entities,
+      };
     });
     const relations = this.db.prepare('SELECT * FROM catalog_relations WHERE source_memory_id=? OR target_memory_id=?').all(memoryId,memoryId).map(row => ({ id: row['id'], kind: row['kind'], sourceMemoryId: row['source_memory_id'], sourceRevisionId: row['source_revision_id'], targetMemoryId: row['target_memory_id'], targetRevisionId: row['target_revision_id'], effectiveAt: row['effective_at'], reason: row['reason'], evidence: JSON.parse(String(row['evidence_json'])), nativeProjected: row['native_projected'] === 1 }));
     const conflicts=this.db.prepare('SELECT id FROM catalog_conflicts WHERE target_memory_id=?').all(memoryId).map(row=>this.getConflict(String(row['id'])));
     const current = revisions.find(row => row.id === memory['current_revision_id']);
     return MemoryDescriptor.parse({ ...(current?.projectId ? { projectId: current.projectId } : {}), id: memory['id'], currentRevisionId: memory['current_revision_id'], state: memory['state'], scope: memory['scope'], applicability: memory['applicability'], revisions, relations,conflicts });
+  }
+  /**
+   * Every catalogued relation, for the graph view.
+   *
+   * The per-memory read answers "what touches this memory"; a graph needs the whole edge set in
+   * one query, or a page would pay one catalog read per node just to draw lines.
+   */
+  allRelations(limit: number): Array<{ id: string; kind: string; sourceMemoryId: string; targetMemoryId: string; effectiveAt: string; reason: string }> {
+    return this.db.prepare('SELECT id,kind,source_memory_id,target_memory_id,effective_at,reason FROM catalog_relations ORDER BY effective_at DESC, id ASC LIMIT ?')
+      .all(limit)
+      .map(row => ({
+        id: String(row['id']), kind: String(row['kind']),
+        sourceMemoryId: String(row['source_memory_id']), targetMemoryId: String(row['target_memory_id']),
+        effectiveAt: String(row['effective_at']), reason: String(row['reason']),
+      }));
+  }
+  /**
+   * Conflicts that became a relation between two published memories.
+   *
+   * A conflict case is recorded between a *candidate* and a target memory, so it only connects two
+   * memories once that candidate has been published (a `coexist` resolution is the normal case).
+   * An unresolved case citing an unpublished candidate has no second endpoint to draw.
+   */
+  allConflictEdges(limit: number): Array<{ id: string; sourceMemoryId: string; targetMemoryId: string; effectiveAt: string; reason: string; state: string }> {
+    // The published side is the follow-up candidate when there is one: a `coexist` resolution
+    // rejects the conflicting candidate and publishes the qualified replacement instead, so
+    // joining on `candidate_id` alone would find no revision at all.
+    return this.db.prepare(`
+      SELECT c.id AS case_id, c.target_memory_id, c.state, r.memory_id AS source_memory_id
+      FROM catalog_conflicts c
+      JOIN catalog_revisions r ON r.candidate_id = COALESCE(c.follow_up_candidate_id, c.candidate_id)
+      WHERE r.memory_id <> c.target_memory_id
+      ORDER BY c.id ASC
+      LIMIT ?
+    `).all(limit).map(row => ({
+      id: String(row['case_id']),
+      sourceMemoryId: String(row['source_memory_id']),
+      targetMemoryId: String(row['target_memory_id']),
+      effectiveAt: '1970-01-01T00:00:00.000Z',
+      reason: `conflict ${String(row['state'])}`,
+      state: String(row['state']),
+    }));
   }
   registerConflict(candidateId:string,request:RememberRequest):void{
     if(request.change?.kind!=='conflict')return;
@@ -218,6 +303,31 @@ export class SqliteMemoryCatalog implements MemoryCatalogReader {
       this.db.prepare("UPDATE catalog_conflicts SET state='resolved' WHERE id=?").run(plan.conflictCaseId);
     }
   }
+  /**
+   * One revision row, with whatever classification this revision carries.
+   *
+   * A local Remember knows `knowledgeType` and tags; a synced formal entry knows `category`,
+   * `importance`, tags and entities. They are stored side by side and never converted into each
+   * other, so the reader can tell "no category recorded" from "category is general".
+   */
+  private insertRevision(input: {
+    id: string; memoryId: string; number: number; parentId: string | null;
+    providerMemoryId: string; contentHash: string; candidateId: string;
+    publishedAt: string; effectiveAt: string; applicability: string; scope: string;
+    meta?: RevisionMeta;
+  }): void {
+    const meta = input.meta ?? {};
+    this.db.prepare(`INSERT INTO catalog_revisions(
+      id,memory_id,revision_number,parent_id,provider_memory_id,content_hash,candidate_id,
+      published_at,effective_at,applicability,scope,knowledge_type,category,importance,tags_json,entities_json
+    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      input.id, input.memoryId, input.number, input.parentId, input.providerMemoryId, input.contentHash,
+      input.candidateId, input.publishedAt, input.effectiveAt, input.applicability, input.scope,
+      meta.knowledgeType ?? null, meta.category ?? null, meta.importance ?? null,
+      meta.tags === undefined ? null : JSON.stringify(meta.tags),
+      meta.entities === undefined ? null : JSON.stringify(meta.entities),
+    );
+  }
   publishOperation(candidateId: string, request: RememberRequest, providerId: string, hash: string, time: string): void {
     const { plan,checkpoint } = this.operation(candidateId);
     if (checkpoint.content !== 'verified' || checkpoint.providerId !== providerId || !['none','verified'].includes(checkpoint.link)) throw new MnemoWeaveError('INVALID_STATE');
@@ -226,8 +336,12 @@ export class SqliteMemoryCatalog implements MemoryCatalogReader {
     if (createHash('sha256').update(request.content).digest('hex') !== hash) throw new MnemoWeaveError('PROVIDER_INTEGRITY');
     this.assertUnambiguousPublication(providerId,plan.memoryId);
     if (plan.kind !== 'revise') this.db.prepare('INSERT INTO catalog_memories VALUES(?,?,?,?,?)').run(plan.memoryId,null,'active',request.scope,request.provenance.applicability);
-    this.db.prepare('INSERT INTO catalog_revisions(id,memory_id,revision_number,parent_id,provider_memory_id,content_hash,candidate_id,published_at,effective_at,applicability,scope) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
-      .run(plan.revisionId,plan.memoryId,plan.number,plan.parentId,providerId,hash,candidateId,time,plan.effectiveAt,request.provenance.applicability,request.scope);
+    this.insertRevision({
+      id: plan.revisionId, memoryId: plan.memoryId, number: plan.number, parentId: plan.parentId,
+      providerMemoryId: providerId, contentHash: hash, candidateId, publishedAt: time, effectiveAt: plan.effectiveAt,
+      applicability: request.provenance.applicability, scope: request.scope,
+      meta: { knowledgeType: request.knowledgeType, tags: request.tags },
+    });
     this.emit('revision', plan.revisionId, { id: plan.revisionId, memoryId: plan.memoryId, number: plan.number, parentId: plan.parentId, providerMemoryId: providerId, contentHash: hash, candidateId, publishedAt: time, effectiveAt: plan.effectiveAt, applicability: request.provenance.applicability, scope: request.scope, ...(request.projectId ? { projectId: request.projectId } : {}) });
     const changed = this.db.prepare('UPDATE catalog_memories SET current_revision_id=?,applicability=? WHERE id=? AND current_revision_id IS ?').run(plan.revisionId,request.provenance.applicability,plan.memoryId,plan.kind === 'revise' ? plan.baseRevisionId : null);
     if (changed.changes !== 1) throw new MnemoWeaveError('INVALID_STATE');
@@ -246,7 +360,7 @@ export class SqliteMemoryCatalog implements MemoryCatalogReader {
    * User edit: append one immutable revision without a review round. The edit is still recorded
    * as an operator review decision so the audit trail keeps who changed what and why.
    */
-  publishDirectEdit(memoryId: string, request: RememberRequest, providerId: string, hash: string, time: string, actor: string, reason: string): { memoryId: string; revisionId: string; candidateId: string } {
+  publishDirectEdit(memoryId: string, request: RememberRequest, providerId: string, hash: string, time: string, actor: string, reason: string, meta?: RevisionMeta): { memoryId: string; revisionId: string; candidateId: string } {
     return this.transaction(() => {
       if (createHash('sha256').update(request.content).digest('hex') !== hash) throw new MnemoWeaveError('PROVIDER_INTEGRITY');
       const memory = this.db.prepare('SELECT * FROM catalog_memories WHERE id=?').get(memoryId);
@@ -265,8 +379,24 @@ export class SqliteMemoryCatalog implements MemoryCatalogReader {
         .run(randomUUID(), candidateId, 'approve', actor, reason, null, time);
       const revisionId = randomUUID();
       const number = Number(base['revision_number']) + 1;
-      this.db.prepare('INSERT INTO catalog_revisions(id,memory_id,revision_number,parent_id,provider_memory_id,content_hash,candidate_id,published_at,effective_at,applicability,scope) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
-        .run(revisionId, memoryId, number, currentId, providerId, hash, candidateId, time, time, String(memory['applicability']), String(memory['scope']));
+      // A user edit changes the body, not necessarily the classification: fields the caller did
+      // not set are carried forward from the previous revision instead of being replaced by the
+      // synthetic request's placeholder values.
+      const previous = this.db.prepare('SELECT knowledge_type, category, importance, tags_json, entities_json FROM catalog_revisions WHERE id=?').get(currentId);
+      const carried: RevisionMeta = {
+        ...(previous?.['knowledge_type'] === null || previous?.['knowledge_type'] === undefined ? {} : { knowledgeType: String(previous['knowledge_type']) }),
+        ...(previous?.['category'] === null || previous?.['category'] === undefined ? {} : { category: String(previous['category']) }),
+        ...(previous?.['importance'] === null || previous?.['importance'] === undefined ? {} : { importance: Number(previous['importance']) }),
+        ...(previous?.['tags_json'] === null || previous?.['tags_json'] === undefined ? {} : { tags: JSON.parse(String(previous['tags_json'])) as string[] }),
+        ...(previous?.['entities_json'] === null || previous?.['entities_json'] === undefined ? {} : { entities: JSON.parse(String(previous['entities_json'])) as string[] }),
+        ...(meta ?? {}),
+      };
+      this.insertRevision({
+        id: revisionId, memoryId, number, parentId: currentId, providerMemoryId: providerId,
+        contentHash: hash, candidateId, publishedAt: time, effectiveAt: time,
+        applicability: String(memory['applicability']), scope: String(memory['scope']),
+        meta: carried,
+      });
       const changed = this.db.prepare('UPDATE catalog_memories SET current_revision_id=? WHERE id=? AND current_revision_id=?').run(revisionId, memoryId, currentId);
       if (changed.changes !== 1) throw new MnemoWeaveError('INVALID_STATE');
       this.emit('revision', revisionId, { id: revisionId, memoryId, number, parentId: currentId, providerMemoryId: providerId, contentHash: hash, candidateId, publishedAt: time, effectiveAt: time, applicability: memory['applicability'], scope: memory['scope'] });
@@ -275,11 +405,35 @@ export class SqliteMemoryCatalog implements MemoryCatalogReader {
     });
   }
   /**
+   * The Revision this machine already appended for a Provider memory, if any. A synced
+   * edit publishes through the shared apply pipeline, so the caller must adopt that
+   * Revision instead of appending a second one for the same edit.
+   */
+  currentRevisionFor(memoryId: string, providerMemoryId: string): { id: string; candidateId: string; number: number } | null {
+    const row = this.db.prepare('SELECT id, candidate_id, revision_number FROM catalog_revisions WHERE memory_id = ? AND provider_memory_id = ? ORDER BY revision_number DESC LIMIT 1')
+      .get(memoryId, providerMemoryId);
+    return row ? { id: String(row['id']), candidateId: String(row['candidate_id']), number: Number(row['revision_number']) } : null;
+  }
+
+  /**
+   * Record the user's edit as an operator decision against a Revision that already exists.
+   * The audit trail keeps who changed what and why; no second Revision is created.
+   */
+  recordEditDecision(memoryId: string, candidateId: string, actor: string, reason: string): void {
+    this.transaction(() => {
+      const existing = this.db.prepare('SELECT id FROM governance_reviews WHERE candidate_id = ? AND actor = ? AND reason = ?').get(candidateId, actor, reason);
+      if (existing) return;
+      this.db.prepare('INSERT INTO governance_reviews(id,candidate_id,decision,actor,reason,assessment_json,created_at) VALUES(?,?,?,?,?,?,?)')
+        .run(randomUUID(), candidateId, 'approve', actor, reason, null, new Date().toISOString());
+      this.emit('revision', memoryId, { memoryId, candidateId, decision: 'approve', actor });
+    });
+  }
+  /**
    * Record a revision that another machine created. The local catalog has no candidate
    * for it, so a synthetic one carries the request metadata (its body lives in the
    * Provider). The call is idempotent by provider id: a replay returns the existing row.
    */
-  publishSynced(memoryId: string, request: RememberRequest, providerId: string, hash: string, time: string, actor: string, reason: string): { memoryId: string; revisionId: string } {
+  publishSynced(memoryId: string, request: RememberRequest, providerId: string, hash: string, time: string, actor: string, reason: string, meta?: RevisionMeta): { memoryId: string; revisionId: string } {
     return this.transaction(() => {
       if (createHash('sha256').update(request.content).digest('hex') !== hash) throw new MnemoWeaveError('PROVIDER_INTEGRITY');
       const existing = this.db.prepare('SELECT id, memory_id FROM catalog_revisions WHERE provider_memory_id=?').get(providerId);
@@ -296,8 +450,12 @@ export class SqliteMemoryCatalog implements MemoryCatalogReader {
       if (!memory) {
         const revisionId = randomUUID();
         this.db.prepare('INSERT INTO catalog_memories VALUES(?,?,?,?,?)').run(memoryId, null, 'active', request.scope, request.provenance.applicability);
-        this.db.prepare('INSERT INTO catalog_revisions(id,memory_id,revision_number,parent_id,provider_memory_id,content_hash,candidate_id,published_at,effective_at,applicability,scope) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
-          .run(revisionId, memoryId, 1, null, providerId, hash, candidateId, time, time, request.provenance.applicability, request.scope);
+        this.insertRevision({
+          id: revisionId, memoryId, number: 1, parentId: null, providerMemoryId: providerId,
+          contentHash: hash, candidateId, publishedAt: time, effectiveAt: time,
+          applicability: request.provenance.applicability, scope: request.scope,
+          ...(meta === undefined ? {} : { meta }),
+        });
         this.db.prepare('UPDATE catalog_memories SET current_revision_id=? WHERE id=?').run(revisionId, memoryId);
         this.emit('memory', memoryId, { id: memoryId, currentRevisionId: revisionId, state: 'active', scope: request.scope, ...(request.projectId ? { projectId: request.projectId } : {}), applicability: request.provenance.applicability });
         this.emit('revision', revisionId, { id: revisionId, memoryId, number: 1, parentId: null, providerMemoryId: providerId, contentHash: hash, candidateId, publishedAt: time, effectiveAt: time, applicability: request.provenance.applicability, scope: request.scope, ...(request.projectId ? { projectId: request.projectId } : {}) });
@@ -310,8 +468,12 @@ export class SqliteMemoryCatalog implements MemoryCatalogReader {
       if (!base) throw new MnemoWeaveError('INVALID_STATE');
       const revisionId = randomUUID();
       const number = Number(base['revision_number']) + 1;
-      this.db.prepare('INSERT INTO catalog_revisions(id,memory_id,revision_number,parent_id,provider_memory_id,content_hash,candidate_id,published_at,effective_at,applicability,scope) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
-        .run(revisionId, memoryId, number, currentId, providerId, hash, candidateId, time, time, String(memory['applicability']), String(memory['scope']));
+      this.insertRevision({
+        id: revisionId, memoryId, number, parentId: currentId, providerMemoryId: providerId,
+        contentHash: hash, candidateId, publishedAt: time, effectiveAt: time,
+        applicability: String(memory['applicability']), scope: String(memory['scope']),
+        ...(meta === undefined ? {} : { meta }),
+      });
       const changed = this.db.prepare('UPDATE catalog_memories SET current_revision_id=? WHERE id=? AND current_revision_id=?').run(revisionId, memoryId, currentId);
       if (changed.changes !== 1) throw new MnemoWeaveError('INVALID_STATE');
       this.emit('revision', revisionId, { id: revisionId, memoryId, number, parentId: currentId, providerMemoryId: providerId, contentHash: hash, candidateId, publishedAt: time, effectiveAt: time, applicability: memory['applicability'], scope: memory['scope'] });
@@ -319,6 +481,28 @@ export class SqliteMemoryCatalog implements MemoryCatalogReader {
       return { memoryId, revisionId };
     });
   }
+  /**
+   * Withdraw a memory. A withdrawn memory leaves recall and injection, but its revisions stay
+   * readable: the body is not deleted, the pointer stops being current, and the state records
+   * why. `retireSynced` does the state change; this appends the audit trail of who withdrew it
+   * and why, reusing the operator-decision record so the history explains itself.
+   */
+  withdrawLocal(memoryId: string, actor: string, reason: string, at: string): { revisionId: string } {
+    return this.transaction(() => {
+      const memory = this.db.prepare('SELECT * FROM catalog_memories WHERE id=?').get(memoryId);
+      if (!memory) throw new MnemoWeaveError('NOT_FOUND');
+      if (String(memory['state']) !== 'active') throw new MnemoWeaveError('INVALID_STATE');
+      const currentId = String(memory['current_revision_id']);
+      const current = this.db.prepare('SELECT candidate_id FROM catalog_revisions WHERE id=?').get(currentId);
+      if (!current) throw new MnemoWeaveError('INVALID_STATE');
+      this.db.prepare('INSERT INTO governance_reviews(id,candidate_id,decision,actor,reason,assessment_json,created_at) VALUES(?,?,?,?,?,?,?)')
+        .run(randomUUID(), String(current['candidate_id']), 'withdraw', actor, reason, null, at);
+      this.db.prepare("UPDATE catalog_memories SET state='superseded' WHERE id=?").run(memoryId);
+      this.emit('memory', memoryId, { id: memoryId, currentRevisionId: currentId, state: 'superseded', scope: memory['scope'], applicability: memory['applicability'] });
+      return { revisionId: currentId };
+    });
+  }
+
   /** Hide a memory whose remote entry was withdrawn; the revision history stays. */
   retireSynced(memoryId: string): void {
     this.transaction(() => {

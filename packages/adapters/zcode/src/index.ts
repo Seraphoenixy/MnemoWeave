@@ -20,6 +20,9 @@ import type { AdapterDescriptor } from '../../shared-sdk/src/descriptor.ts';
  * event on ZCode (Stop fires per turn, not per session).
  */
 
+/** This adapter's Host identity, used when the environment does not name one explicitly. */
+export const DEFAULT_HOST_ID = 'zcode';
+
 /** Installed-version facts recorded during HOST-01 verification (2026-11-08). */
 export const ZCODE_HOST_FACTS = {
   product: 'ZCode' as const,
@@ -52,6 +55,12 @@ export interface HandlerOptions {
   projectId?: string;
   /** Monotonic foreground deadline for the additionalContext assembly (HOST-06). */
   deadlineMs?: number;
+  /**
+   * Make the local Server reachable within `budgetMs`, waking the scheduled task when nothing
+   * is listening. Returns false when the budget ran out; the turn then continues without
+   * injection instead of failing.
+   */
+  ensureReachable?: (budgetMs: number) => Promise<boolean>;
   /** Async recall used to build the injected context; wired to the Server. */
   recallAndAssemble: (query: string | null, context?: InjectionContext) => Promise<{ text: string; viewId: string } | undefined>;
 }
@@ -188,6 +197,12 @@ export function runHookStdin(options: HandlerOptions): void {
   const event = HostEvent.parse({ ...normalized, ...(options.projectId ? { projectId: options.projectId } : {}) });
   const started = performance.now();
   void (async () => {
+    // The local Server may still be starting (it is hosted by a scheduled task). Wake it only
+    // when it is refused, and only within what this turn has left of its deadline.
+    if (options.ensureReachable) {
+      const left = (options.deadlineMs ?? 2000) - (performance.now() - started);
+      if (left > 0) await options.ensureReachable(left).catch(() => false);
+    }
     await forwardEvent(options, event).catch(() => undefined);
     if (!['session.started', 'message.user'].includes(event.kind) && !(event.kind === 'tool.completed' && event.payload.outcome === 'failure')) return;
     const remaining = (options.deadlineMs ?? 2000) - (performance.now() - started);

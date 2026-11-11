@@ -8,13 +8,6 @@ export interface WriteProvider {
   verifyContent(id: string, content: string): Promise<boolean>;
   persistReviewed(content: string, writeKey: string): Promise<WriteResult>;
 }
-export interface ModelGateway {
-  assess(component: string, candidate: CandidateRecord, related: { id: string; content: string }[]): Promise<Assessment>;
-}
-/** Optional recall rerank capability (RECALL-02); results are bound to a request generation. */
-export interface RerankGateway {
-  rerank(component: string, query: string, memories: { id: string; content: string }[], generation: number): Promise<{ generation: number; order: string[] }>;
-}
 export type ReviewDecision = 'approve' | 'reject' | 'human';
 export interface Job { taskId: string; runId: string; candidateId: string; writeKey: string; checkpoint: 'ready' | 'writing' | 'retry'; owner: string }
 export interface WorkflowRepository {

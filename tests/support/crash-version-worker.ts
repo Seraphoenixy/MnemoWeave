@@ -12,4 +12,4 @@ class FaultProvider extends MnemonCliProvider{
 const repo=new SqliteCandidates(join(process.env.MNEMOWEAVE_STATE_DIR!,'governance.db'));
 const provider=new FaultProvider({binary:process.env.MNEMON_BINARY!,dataDir:process.env.MNEMON_DATA_DIR!,store:process.env.MNEMON_STORE!});
 setInterval(()=>{},1000);
-await new MemoryWorkflow(repo,provider,undefined,1000,new VersionWorkflow(repo,provider)).tick();
+await new MemoryWorkflow(repo,provider,1000,new VersionWorkflow(repo,provider)).tick();

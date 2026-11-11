@@ -30,6 +30,12 @@ class MemoryLedger implements SyncLedgerPort {
   outbox(state?: SyncOutboxRecord['state'], limit = 100): SyncOutboxRecord[] {
     return (state ? this.outboxRows.filter((row) => row.state === state) : this.outboxRows).slice(0, limit);
   }
+  outboxForEntry(entryId: string): SyncOutboxRecord | null {
+    return this.outboxRows.filter((row) => row.entryId === entryId && (row.state === 'pending' || row.state === 'unknown')).at(-1) ?? null;
+  }
+  outboxChange(changeId: string): SyncOutboxRecord | null {
+    return this.outboxRows.find((row) => row.changeId === changeId) ?? null;
+  }
   markOutbox(changeId: string, state: SyncOutboxRecord['state'], error: string | null, at: string): void {
     const row = this.outboxRows.find((item) => item.changeId === changeId);
     if (row) Object.assign(row, { state, lastError: error, attempts: row.attempts + 1, updatedAt: at });
@@ -41,6 +47,12 @@ class MemoryLedger implements SyncLedgerPort {
   }
   inbox(scope: string, limit = 100): SyncInboxRecord[] {
     return this.inboxRows.filter((row) => row.scope === scope && row.state !== 'applied').slice(0, limit);
+  }
+  inboxEntry(scope: string, seq: number): SyncInboxRecord | null {
+    return this.inboxRows.find((row) => row.scope === scope && row.seq === seq) ?? null;
+  }
+  inboxChange(changeId: string): SyncInboxRecord | null {
+    return this.inboxRows.find((row) => row.changeId === changeId) ?? null;
   }
   markInbox(scope: string, seq: number, state: SyncInboxRecord['state'], error: string | null = null): void {
     const row = this.inboxRows.find((item) => item.scope === scope && item.seq === seq);
@@ -199,8 +211,42 @@ test('a snapshot entry that cannot be applied is counted and surfaced as an erro
     async snapshot(scope) { return { scope, asOfSeq: 3, nextSince: 3, entries: [entry] }; },
   }), ledger, () => NOW);
   const result = await coordinator.captureSnapshot('project:alpha', async () => ({ status: 'needs_review' as const, error: 'PROVIDER_UNAVAILABLE' }));
-  assert.deepEqual(result, { applied: 0, failed: 1, cursor: 3 });
+  assert.deepEqual(result, { applied: 0, failed: 1, cursor: 0 });
   assert.equal(ledger.state('project:alpha').lastError, 'SNAPSHOT_APPLY_INCOMPLETE');
+});
+
+/**
+ * A partial snapshot must leave nothing committed: not the cursor, and not the inbox rows
+ * the snapshot claimed to cover. Otherwise the next pass pulls from the cut point and the
+ * entries this one failed to write are never revisited, with no persisted replay entry.
+ */
+test('a failed snapshot leaves the cursor where it was so the next pass replays it', async () => {
+  const ledger = new MemoryLedger();
+  ledger.setCursor('project:alpha', 7, NOW);
+  const stale = draft();
+  ledger.inboxRows.push({ scope: 'project:alpha', seq: 8, changeId: randomUUID(), entryId: stale.entryId, version: 1, operation: 'create', entry: { ...stale, version: 1 }, state: 'received', error: null });
+  const first = { ...draft(), version: 5 };
+  const second = { ...draft(), version: 6 };
+  const coordinator = new SyncCoordinator(remote({
+    async snapshot(scope) { return { scope, asOfSeq: 40, nextSince: 40, entries: [first, second] }; },
+  }), ledger, () => NOW);
+  const result = await coordinator.captureSnapshot('project:alpha', async (row) => (
+    row.entryId === second.entryId ? { status: 'needs_review' as const, error: 'PROVIDER_UNAVAILABLE' } : { status: 'applied' as const }
+  ));
+  assert.deepEqual(result, { applied: 1, failed: 1, cursor: 7 }, 'the cursor must not move past unwritten entries');
+  assert.equal(ledger.cursor('project:alpha'), 7);
+  assert.equal(ledger.state('project:alpha').lastError, 'SNAPSHOT_APPLY_INCOMPLETE');
+  assert.equal(ledger.inboxRows.length, 1, 'the covered inbox rows must survive for the replay');
+
+  // A retry that succeeds commits the cut point and only then drops the covered rows.
+  const retry = new SyncCoordinator(remote({
+    async snapshot(scope) { return { scope, asOfSeq: 40, nextSince: 40, entries: [first, second] }; },
+  }), ledger, () => NOW);
+  const done = await retry.captureSnapshot('project:alpha', async () => ({ status: 'applied' as const }));
+  assert.deepEqual(done, { applied: 2, failed: 0, cursor: 40 });
+  assert.equal(ledger.cursor('project:alpha'), 40);
+  assert.equal(ledger.state('project:alpha').lastError, null);
+  assert.equal(ledger.inboxRows.length, 0);
 });
 
 test('a snapshot replays every revision so the history chain matches the change stream', async () => {
@@ -224,4 +270,34 @@ test('a snapshot replays every revision so the history chain matches the change 
   });
   assert.deepEqual(result, { applied: 2, failed: 0, cursor: 40 });
   assert.deepEqual(seen, [{ version: 1, withdrawn: false }, { version: 2, withdrawn: true }]);
+});
+
+/**
+ * The periodic pass and a local write's own `applyScope` can both observe the same
+ * `received` row: it only becomes `applied` after the Provider call returns. Two passes
+ * applying the same row wrote the same Provider memory twice, which is what the replay
+ * guard in the apply step and the re-read in `applyScope` exist to prevent.
+ *
+ * Overlap that is still in flight (both calls already past their check) is the Provider's
+ * idempotency boundary, not this layer's; what must hold is that the inbox records the row
+ * once and the cursor never moves past it twice.
+ */
+test('overlapping applies record the row once and agree on the cursor', async () => {
+  const ledger = new MemoryLedger();
+  const base = change();
+  for (const seq of [1, 2, 3]) {
+    ledger.receive({ changeId: base.changeId, entryId: base.entry.entryId, scope: base.entry.scope, version: seq, seq, operation: base.operation, entry: { ...base.entry, version: seq }, deviceId: 'device-a', recordedAt: NOW });
+  }
+  const coordinator = new SyncCoordinator(remote(), ledger, () => NOW);
+  const apply = async () => {
+    await new Promise((done) => setTimeout(done, 1));
+    return { status: 'applied' as const };
+  };
+  const [first, second] = await Promise.all([
+    coordinator.applyScope('project:alpha', apply),
+    coordinator.applyScope('project:alpha', apply),
+  ]);
+  assert.equal(ledger.cursor('project:alpha'), 3);
+  assert.equal(ledger.inboxRows.filter((row) => row.state === 'applied').length, 3, 'each row is recorded applied once');
+  assert.ok(first.applied + second.applied >= 3);
 });

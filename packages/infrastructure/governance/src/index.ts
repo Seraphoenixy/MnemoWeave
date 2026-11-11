@@ -24,6 +24,17 @@ import { SessionEventStore } from './events.ts';
 import type { VersionCheckpoint } from '../../../core/application/src/version-ports.ts';
 import type {ConflictResolutionRequest} from '../../../core/contracts/src/index.ts';
 
+/** A formal memory that has just been published from a reviewed candidate. */
+export interface PublishedFormal {
+  memoryId: string;
+  providerId: string;
+  version: number;
+  content: string;
+  contentHash: string;
+  scope: string;
+  projectId: string | null;
+}
+
 /** Incremental governance schema v1. No formal memory, Revision or replica schema. */
 export class SqliteCandidates implements CandidateRepository, WorkflowRepository {
   private readonly db: DatabaseSync;
@@ -38,6 +49,20 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
   readonly runtime: SqliteRuntime;
   readonly ledger: SqliteSyncLedger;
   readonly memory: SqliteMemoryStore;
+  /**
+   * Called after a reviewed publication commits, so the Server can offer the published
+   * memory to shared sync. The catalog's `syncHook` is an internal change stream, not a
+   * publish notification: nothing set it, so an approved candidate never reached the other
+   * machines. Registered once at composition time; it runs after the transaction commits
+   * and is never allowed to fail the publication.
+   */
+  private publishListener: ((event: PublishedFormal) => void) | undefined;
+  setPublishListener(listener: ((event: PublishedFormal) => void) | undefined): void { this.publishListener = listener; }
+  private announcePublished(memoryId: string, providerId: string, version: number, content: string, contentHash: string, scope: string, projectId: string | null): void {
+    if (!this.publishListener) return;
+    try { this.publishListener({ memoryId, providerId, version, content, contentHash, scope, projectId }); }
+    catch { process.stderr.write(JSON.stringify({ event: 'publish_listener_failed', memoryId }) + String.fromCharCode(10)); }
+  }
   /** Ordered change stream (internal audit only): catalog mutations append here in the same transaction. */
   constructor(path: string, quota: { softBytes?: number; hardBytes?: number } = {}) {
     if (!isAbsolute(path)) throw new Error('Governance database path must be absolute');
@@ -52,7 +77,7 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
     try {
       this.transaction(() => {
         const version = Number(this.db.prepare('PRAGMA user_version').get()!['user_version']);
-      if (version > 12) throw new Error('Unsupported governance schema version');
+      if (version > 14) throw new Error('Unsupported governance schema version');
         if (version === 0) {
           if (this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").get()) throw new Error('Refusing to initialize an unidentified existing database');
           this.db.exec(`
@@ -256,6 +281,58 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
           `);
         });
       }
+      if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) === 12) {
+        this.db.prepare('VACUUM INTO ?').run(`${path}.pre-v13.${randomUUID()}.db`);
+        this.transaction(() => {
+          if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) !== 12) return;
+          // v13: a publication that still has to be offered to shared sync.
+          //
+          // Publishing used to commit and then notify a listener outside the transaction. A
+          // process that died in between left the memory local-only with nothing to replay, so
+          // the other machines never saw it. The row is written in the same transaction as the
+          // publication and cleared once the change is confirmed, which makes the window
+          // recoverable on the next start instead of lost.
+          this.db.exec(`
+            CREATE TABLE share_outbox(
+              memory_id TEXT PRIMARY KEY,
+              version INTEGER NOT NULL,
+              provider_id TEXT NOT NULL,
+              content TEXT NOT NULL,
+              content_hash TEXT NOT NULL,
+              scope TEXT NOT NULL,
+              state TEXT NOT NULL CHECK(state IN ('pending','confirmed','failed')),
+              attempts INTEGER NOT NULL DEFAULT 0,
+              last_error TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            CREATE INDEX share_outbox_state ON share_outbox(state);
+            PRAGMA user_version=13;
+          `);
+        });
+      }
+      if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) === 13) {
+        this.db.prepare('VACUUM INTO ?').run(`${path}.pre-v14.${randomUUID()}.db`);
+        this.transaction(() => {
+          if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) !== 13) return;
+          // v14: classification per revision.
+          //
+          // A local Remember carries `knowledgeType` and tags; a synced formal entry carries
+          // `category`, `importance`, tags and entities. They are different dimensions, so both
+          // are stored and neither is derived from the other. Existing revisions keep NULL, which
+          // the contract reports as "unknown" rather than as an empty tag list.
+          this.db.exec(`
+            ALTER TABLE catalog_revisions ADD COLUMN knowledge_type TEXT;
+            ALTER TABLE catalog_revisions ADD COLUMN category TEXT;
+            ALTER TABLE catalog_revisions ADD COLUMN importance INTEGER;
+            ALTER TABLE catalog_revisions ADD COLUMN tags_json TEXT;
+            ALTER TABLE catalog_revisions ADD COLUMN entities_json TEXT;
+            PRAGMA user_version=14;
+          `);
+        });
+      }
+      this.db.prepare('SELECT knowledge_type, category, importance, tags_json, entities_json FROM catalog_revisions LIMIT 0').all();
+      this.db.prepare('SELECT memory_id, version, provider_id, content, content_hash, scope, state FROM share_outbox LIMIT 0').all();
       this.ledger = new SqliteSyncLedger(this.db, operation => this.transaction(operation));
       this.memory = new SqliteMemoryStore(this.db, operation => this.transaction(operation), this.catalog);
       this.runtime = new SqliteRuntime(this.db, operation => this.transaction(operation), request => this.submit(request), (hostId, event, candidateId) => { this.events.record(hostId, event, true); this.events.linkEvidence(event.eventId, hostId, candidateId); });
@@ -416,16 +493,72 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
     this.transaction(()=>{this.checkJob(job);this.catalog.checkSupersedesProjection(job.candidateId,sourceProviderId);});
   }
   finish(job: Job, result: WriteResult, reconciled: boolean): void {
-    this.transaction(() => {
+    const published = this.transaction(() => {
       this.checkJob(job);
       const request = this.get(job.candidateId).request;
       const contentHash = createHash('sha256').update(request.content).digest('hex');
-      if (request.change) this.catalog.publishOperation(job.candidateId,request,result.id,contentHash,new Date().toISOString());
-      else this.catalog.publishInitial(job.candidateId, request, result.id, contentHash, new Date().toISOString());
+      let memoryId: string;
+      let revisionId: string | undefined;
+      if (request.change) {
+        this.catalog.publishOperation(job.candidateId, request, result.id, contentHash, new Date().toISOString());
+        const plan = this.catalog.operation(job.candidateId).plan;
+        memoryId = plan.memoryId;
+      } else {
+        const initial = this.catalog.publishInitial(job.candidateId, request, result.id, contentHash, new Date().toISOString());
+        memoryId = initial.memoryId;
+        revisionId = (initial as { revisionId?: string }).revisionId;
+      }
       this.recordReceipt(job, { status: 'persisted', providerMemoryId: result.id, providerAction: result.action, writeKey: job.writeKey, reconciled, contentHash });
       this.db.prepare("UPDATE governance_tasks SET state='succeeded',next_at=NULL,owner=NULL,first_failed_at=NULL,alerted_at=NULL WHERE id=?").run(job.taskId);
       this.db.prepare("UPDATE governance_runs SET state='succeeded',ended_at=? WHERE id=?").run(new Date().toISOString(), job.runId);
       this.status(job.candidateId, 'persisted');
+      // Published version of the entry this publication produced.
+      const number = revisionId
+        ? Number((this.db.prepare('SELECT revision_number FROM catalog_revisions WHERE id=?').get(revisionId) as { revision_number?: number } | undefined)?.revision_number ?? 1)
+        : Number((this.db.prepare('SELECT revision_number FROM catalog_revisions WHERE memory_id=? ORDER BY revision_number DESC LIMIT 1').get(memoryId) as { revision_number?: number } | undefined)?.revision_number ?? 1);
+      // Durable share marker, same transaction as the publication: if the process dies before
+      // the listener runs, the next start still knows this memory owes a shared change.
+      const shareScope = request.projectId ? `project:${request.projectId}` : 'global';
+      this.db.prepare(`
+        INSERT INTO share_outbox(memory_id, version, provider_id, content, content_hash, scope, state, attempts, last_error, created_at, updated_at)
+        VALUES(?, ?, ?, ?, ?, ?, 'pending', 0, NULL, ?, ?)
+        ON CONFLICT(memory_id) DO UPDATE SET version=excluded.version, provider_id=excluded.provider_id,
+          content=excluded.content, content_hash=excluded.content_hash, scope=excluded.scope,
+          state='pending', last_error=NULL, updated_at=excluded.updated_at
+      `).run(memoryId, number, result.id, request.content, contentHash, shareScope, new Date().toISOString(), new Date().toISOString());
+      return { request, memoryId, contentHash, number };
+    });
+    // Outside the transaction: the listener may touch the network or the ledger, and a
+    // publication that committed must not be rolled back because sharing it failed. The
+    // durable row written inside `finish` is what makes a crash here recoverable.
+    const projectId = published.request.projectId ?? null;
+    this.announcePublished(
+      published.memoryId, result.id, published.number, published.request.content, published.contentHash,
+      projectId ? `project:${projectId}` : 'global', projectId,
+    );
+  }
+
+  /** Publications that still have to reach shared sync; drained on start and after each publish. */
+  pendingShares(limit = 20): PublishedFormal[] {
+    const rows = this.db.prepare(
+      "SELECT memory_id, version, provider_id, content, content_hash, scope FROM share_outbox WHERE state = 'pending' ORDER BY created_at LIMIT ?",
+    ).all(limit) as unknown as { memory_id: string; version: number; provider_id: string; content: string; content_hash: string; scope: string }[];
+    return rows.map(row => ({
+      memoryId: String(row.memory_id), version: Number(row.version), providerId: String(row.provider_id),
+      content: String(row.content), contentHash: String(row.content_hash), scope: String(row.scope),
+      projectId: String(row.scope).startsWith('project:') ? String(row.scope).slice('project:'.length) : null,
+    }));
+  }
+
+  /** Mark a share attempt finished. `confirmed` clears it; `failed` keeps it for a later retry. */
+  settleShare(memoryId: string, state: 'confirmed' | 'failed', error: string | null, at: string): void {
+    this.transaction(() => {
+      if (state === 'confirmed') {
+        this.db.prepare('DELETE FROM share_outbox WHERE memory_id = ?').run(memoryId);
+        return;
+      }
+      this.db.prepare('UPDATE share_outbox SET state = ?, attempts = attempts + 1, last_error = ?, updated_at = ? WHERE memory_id = ?')
+        .run(state, error, at, memoryId);
     });
   }
   private recordReceipt(job: Job, result: unknown): void {

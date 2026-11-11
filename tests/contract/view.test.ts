@@ -115,44 +115,34 @@ test('Budget overflow excludes dynamic content, marks incompleteness and never f
   assert.ok(view.budget.usedTokens <= view.budget.limitTokens);
 });
 
-test('Explicit rerank reorders; invalid model output keeps the deterministic order and reports failure', async () => {
+/**
+ * The Server never calls an external model, so recall order is exactly what the Provider
+ * returned. `rerank: true` used to trigger a model call; it is now reported as not requested,
+ * and no ordering is invented locally.
+ */
+test('recall order is deterministic and never reranked by a model', async () => {
   const first = makeEntry('alpha candidate');
   const second = makeEntry('beta candidate');
   const store = makeStore([first, second]);
-  const validReranker = { async rerank(_c: string, _q: string, memories: { id: string }[], generation: number): Promise<RerankResult> { return { generation, order: [...memories.map(m => m.id)].reverse() }; } };
-  const assembler = new ViewAssembler(store.app, { reranker: validReranker });
+  const assembler = new ViewAssembler(store.app);
   const view = await assembler.assemble({ grant: grant(), query: 'candidate', rerank: true });
-  assert.equal(view.rerank.status, 'applied');
-  assert.equal(view.memories[0]!.memoryId, second.descriptor.id);
-  const invalidReranker = { async rerank(_c: string, _q: string, memories: { id: string }[], generation: number): Promise<RerankResult> { return { generation, order: [memories[0]!.id, memories[0]!.id] }; } };
-  const failing = new ViewAssembler(store.app, { reranker: invalidReranker });
-  const failed = await failing.assemble({ grant: grant(), query: 'candidate', rerank: true });
-  assert.equal(failed.rerank.status, 'failed');
-  assert.equal(failed.memories[0]!.memoryId, first.descriptor.id);
+  assert.equal(view.rerank.status, 'not_requested');
+  assert.match(view.rerank.reason ?? '', /never calls a model/);
+  assert.equal(view.memories[0]!.memoryId, first.descriptor.id, 'the Provider order is preserved');
 });
 
-test('Rerank runs only on explicit request or the deterministic ambiguity rule', async () => {
+test('a close score gap does not trigger reranking either', async () => {
   const first = makeEntry('alpha candidate');
   const second = makeEntry('beta candidate');
   const store = makeStore([first, second]);
-  const unconfigured = new ViewAssembler(store.app);
-  const unavailable = await unconfigured.assemble({ grant: grant(), query: 'candidate', rerank: true });
-  assert.equal(unavailable.rerank.status, 'unavailable');
-  const notRequested = await unconfigured.assemble({ grant: grant(), query: 'candidate' });
-  assert.equal(notRequested.rerank.status, 'not_requested');
-  // The fixture assigns scores 1.0 and 0.9: a 0.1 gap is above the 0.05 ambiguity threshold.
-  const reranker = { async rerank(_c: string, _q: string, memories: { id: string }[], generation: number): Promise<RerankResult> { return { generation, order: [...memories.map(m => m.id)].reverse() }; } };
-  const gapAssembler = new ViewAssembler(store.app, { reranker });
-  const notAmbiguous = await gapAssembler.assemble({ grant: grant(), query: 'candidate' });
-  assert.equal(notAmbiguous.rerank.status, 'not_requested');
-  // Close the score gap to 0.02 so the deterministic rule triggers rerank without an explicit request.
+  // A 0.02 gap used to trip the ambiguity rule and call the model.
   store.provider.recall = async request => ({ memories: [
     { id: first.descriptor.revisions[0]!.providerMemoryId, content: first.content, score: 0.52 },
     { id: second.descriptor.revisions[0]!.providerMemoryId, content: second.content, score: 0.50 },
   ].slice(0, request.limit) });
-  const autoTriggered = await gapAssembler.assemble({ grant: grant(), query: 'candidate' });
-  assert.equal(autoTriggered.rerank.status, 'applied');
-  assert.equal(autoTriggered.rerank.reason.includes('Model rerank'), true);
+  const view = await new ViewAssembler(store.app).assemble({ grant: grant(), query: 'candidate' });
+  assert.equal(view.rerank.status, 'not_requested');
+  assert.equal(view.memories.length, 2);
 });
 
 test('Late rerank results cannot rewrite a delivered view generation or a foreign candidate set', async () => {
@@ -209,7 +199,7 @@ test('HTTP View delivery requires the paired Host header and returns the assembl
     assert.ok(body.viewId);
     assert.equal(body.memories.length, 1);
   } finally {
-    await new Promise<void>((done, fail) => server.close(error => error ? fail(error) : done()));
+    await new Promise<void>((done, fail) => { server.closeAllConnections(); server.close(error => error ? fail(error) : done()); });
   }
 });
 

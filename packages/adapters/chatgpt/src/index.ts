@@ -4,6 +4,8 @@ import { HostEvent, MnemoWeaveError } from '../../../core/contracts/src/index.ts
 import { unverifiedDescriptor } from '../../shared-sdk/src/descriptor.ts';
 
 export const CHATGPT_HOOKS_EVIDENCE = 'https://learn.chatgpt.com/docs/hooks';
+/** This adapter's Host identity, used when the environment does not name one explicitly. */
+export const DEFAULT_HOST_ID = 'chatgpt-desktop';
 export const ChatgptHook = z.object({
   session_id: z.string().min(1), turn_id: z.string().optional(), tool_use_id: z.string().optional(),
   hook_event_name: z.enum(['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'Stop', 'SessionEnd']),

@@ -103,6 +103,13 @@ test('a change written on another machine reaches the local Provider and the map
   assert.equal((await provider.readMemory(providerId!)).content, '同步链路的正式记忆。');
   assert.equal(repo.memory.entryVersion(ENTRY), 1);
   assert.equal(accepted.version, 1);
+  // The classification travels with the entry, so the local view can show what the origin
+  // machine recorded instead of guessing from the body.
+  const revision = repo.catalog.get(ENTRY).revisions[0]!;
+  assert.equal(revision.category, 'fact');
+  assert.equal(revision.importance, 3);
+  assert.deepEqual(revision.tags, []);
+  assert.equal(revision.knowledgeType, undefined, 'the sync path must not claim a local knowledge type');
 });
 
 test('a later revision replaces the previous one and keeps the supersedes edge', async () => {
@@ -121,15 +128,20 @@ test('a later revision replaces the previous one and keeps the supersedes edge',
   assert.equal(repo.memory.entryVersion(ENTRY), 2);
 });
 
-test('a withdrawal removes the Provider memory and keeps a local tombstone', async () => {
+test('a withdrawal stops recall but keeps the history readable', async () => {
   remote.submit(B_TOKEN, buildChange({ changeId: randomUUID(), baseVersion: 2, operation: 'delete', entry: draft(3, '第二版正式记忆。', NOW) }));
   const coordinator = localCoordinator();
   await coordinator.pullScope(SCOPE);
   const applied = await apply(coordinator);
   assert.equal(applied.applied, 1);
   assert.equal(repo.ledger.cursor(SCOPE), 3);
-  assert.equal(repo.memory.formalProviderId(ENTRY, 3), null);
-  const second = repo.memory.formalProviderId(ENTRY, 2);
-  await assert.rejects(provider.readMemory(second!), (error: unknown) => error instanceof Error);
   assert.equal(repo.memory.entryVersion(ENTRY), 3);
+  // The protocol promises withdrawn history stays readable: the Provider copy is not deleted,
+  // only the catalog stops treating it as current. Physical deletion used to make `show` fail
+  // and silently drop edges pointing at the memory.
+  assert.ok(repo.memory.formalProviderId(ENTRY, 2), 'the previous mapping is kept');
+  const second = repo.memory.formalProviderId(ENTRY, 2);
+  const preserved = await provider.readMemory(second!);
+  assert.equal(preserved.content, '第二版正式记忆。', 'the withdrawn body is still inspectable');
+  assert.equal(repo.catalog.get(ENTRY).state, 'superseded', 'recall and injection skip it');
 });

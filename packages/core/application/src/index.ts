@@ -18,6 +18,11 @@ export interface MemoryProvider {
   health(): Promise<Health>;
   recall(request: RecallRequest): Promise<RecallResult>;
   readMemory?(id: string): Promise<{ id: string; content: string }>;
+  /**
+   * Read several bodies in one call. Optional so a test provider can omit it; the list view uses
+   * it to avoid one process per visible row.
+   */
+  readMany?(ids: string[]): Promise<{ id: string; content: string }[]>;
 }
 /** Owns only candidate/governance data; never reads Provider tables. */
 export interface CandidateRepository {

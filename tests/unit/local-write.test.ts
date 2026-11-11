@@ -33,12 +33,16 @@ function ledger(nextState: SyncOutboxRecord['state'] = 'confirmed'): FakeLedger 
       });
     },
     outbox: (state?: SyncOutboxRecord['state'], limit = 100) => (state ? rows.filter((row) => row.state === state) : rows).slice(0, limit),
+    outboxForEntry: (entryId: string) => rows.filter((row) => row.entryId === entryId && (row.state === 'pending' || row.state === 'unknown')).at(-1) ?? null,
+    outboxChange: (changeId: string) => rows.find((row) => row.changeId === changeId) ?? null,
     markOutbox: (changeId: string, state: SyncOutboxRecord['state']) => {
       const row = rows.find((item) => item.changeId === changeId);
       if (row) row.state = state;
     },
     receive: (_record: SyncChangeRecordValue) => true,
     inbox: (scope: string, limit = 100) => inboxRows.filter((row) => row.scope === scope).slice(0, limit),
+    inboxChange: (changeId: string) => inboxRows.find((row) => row.changeId === changeId) ?? null,
+    inboxEntry: (scope: string, seq: number) => inboxRows.find((row) => row.scope === scope && row.seq === seq) ?? null,
     markInbox: () => undefined,
     progress: () => [],
   };
@@ -99,7 +103,8 @@ test('a second write waits while the same entry is still unconfirmed', async () 
   assert.equal(fake.rows.length, 1, 'the queued change must not be duplicated');
 });
 
-test('rule and archive drafts carry their scope and payload', () => {  const rule = { entryId: randomUUID(), body: '准则正文', scope: 'project' as const, projectId: 'alpha', enabled: false, version: 2, withdrawnAt: null };
+test('rule and archive drafts carry their scope and payload', () => {
+  const rule = { entryId: randomUUID(), body: '准则正文', scope: 'project' as const, projectId: 'alpha', enabled: false, version: 2, withdrawnAt: null };
   assert.equal(ruleScope(rule), 'project:alpha');
   const ruleEntry = ruleDraft(rule);
   assert.equal(ruleEntry.kind, 'runtime');
@@ -130,4 +135,45 @@ test('an edit becomes a formal change that supersedes its previous version', () 
   assert.deepEqual((second.entry.payload as { relations: unknown[] }).relations, [
     { type: 'supersedes', from: { entryId, version: 3 }, to: { entryId, version: 4 } },
   ]);
+});
+
+/**
+ * Confirmed history and outstanding work share one table. Reading it through the default
+ * page (oldest 100 rows, confirmed included) hid the row being written once enough history
+ * existed: the write reported INTERNAL although the remote had confirmed it, and the
+ * duplicate check stopped noticing an entry that already had work in flight.
+ */
+test('a write is still resolved once confirmed history fills the default page', async () => {
+  const fake = ledger('confirmed');
+  const history = Array.from({ length: 150 }, () => 'confirmed' as const);
+  for (const state of history) {
+    const historical = draft();
+    await submitLocalChange({ scope: 'global', operation: 'create', entry: historical, baseVersion: 0 }, { ledger: fake, flush: flushTo(fake), now: () => NOW });
+    assert.equal(fake.rows.at(-1)?.state, state);
+  }
+
+  const entry = draft();
+  const result = await submitLocalChange({ scope: 'global', operation: 'create', entry, baseVersion: 0 }, { ledger: fake, flush: flushTo(fake), now: () => NOW });
+  assert.equal(result.state, 'confirmed', 'a confirmed write past the first page must not report INTERNAL');
+  assert.deepEqual(result.accepted, { version: 1, seq: 1 });
+  assert.equal(fake.rows.length, 151);
+});
+
+test('outstanding work past the default page still blocks a second write', async () => {
+  const fake = ledger('confirmed');
+  for (let index = 0; index < 150; index += 1) {
+    const historical = draft();
+    await submitLocalChange({ scope: 'global', operation: 'create', entry: historical, baseVersion: 0 }, { ledger: fake, flush: flushTo(fake), now: () => NOW });
+  }
+  // Park one entry with an unconfirmed change, then push it past the first page.
+  const entry = draft();
+  fake.nextState = 'pending';
+  await submitLocalChange({ scope: 'global', operation: 'create', entry, baseVersion: 0 }, { ledger: fake, flush: flushTo(fake), now: () => NOW });
+  for (let index = 0; index < 150; index += 1) {
+    await submitLocalChange({ scope: 'global', operation: 'create', entry: draft(), baseVersion: 0 }, { ledger: fake, flush: flushTo(fake), now: () => NOW });
+  }
+  await assert.rejects(
+    submitLocalChange({ scope: 'global', operation: 'update', entry, baseVersion: 0 }, { ledger: fake, flush: () => flushTo(fake)(), now: () => NOW }),
+    (error: unknown) => error instanceof MnemoWeaveError && error.code === 'SYNC_QUEUED',
+  );
 });

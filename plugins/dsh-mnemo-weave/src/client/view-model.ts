@@ -1,4 +1,4 @@
-import type { AvailabilityStatus, UiConfigView, UiInjection, UiMemoryDetail, UiMemoryList, UiStatus } from '../shared/contract.ts';
+import type { AvailabilityStatus, UiConfigView, UiGraphEdge, UiInjection, UiMemoryConflict, UiMemoryDetail, UiMemoryList, UiMemoryRevision, UiStatus } from '../shared/contract.ts';
 import { translate, type Language, type MessageKey } from './i18n.ts';
 
 export type Tone = 'ok' | 'warn' | 'bad' | 'muted';
@@ -119,13 +119,226 @@ export function listSummary(list: UiMemoryList | null, language: Language): stri
   return translate(language, 'list.count', { count: list.returned });
 }
 
+/**
+ * Meta chips for the detail panel.
+ *
+ * "Revision" describes the version being viewed, not the live one: the page can show a
+ * historical revision, and labelling it with the current number would misreport what the user
+ * is reading. A separate chip states whether the viewed revision is still the current one.
+ */
 export function detailMeta(detail: UiMemoryDetail, language: Language): Array<{ key: string; label: string; value: string }> {
+  const viewed = detail.revisions.find(revision => revision.revisionId === detail.revisionId);
   const current = detail.revisions.find(revision => revision.current);
   return [
     { key: 'state', label: translate(language, 'detail.state'), value: stateText(detail.state, language) },
-    { key: 'revision', label: translate(language, 'detail.revision'), value: current === undefined ? '—' : `#${current.number}` },
+    { key: 'revision', label: translate(language, 'detail.revision'), value: viewed === undefined ? '—' : `#${viewed.number}` },
+    {
+      key: 'currentness',
+      label: translate(language, 'detail.viewing'),
+      value: detail.isCurrent
+        ? translate(language, 'detail.viewingCurrent')
+        : translate(language, 'detail.viewingHistory', { number: current === undefined ? '—' : `#${current.number}` }),
+    },
     { key: 'scope', label: translate(language, 'detail.project'), value: detail.scope === 'global' ? translate(language, 'detail.global') : detail.projectId ?? '—' },
     { key: 'applicability', label: translate(language, 'detail.applicability'), value: detail.applicability },
     { key: 'published', label: translate(language, 'detail.published'), value: formatDateTime(detail.publishedAt) },
   ];
+}
+
+/** UTF-8 byte length, matching the Server's own limit rather than the string length. */
+export function utf8Bytes(text: string): number {
+  return new TextEncoder().encode(text).length;
+}
+
+export const EDIT_LIMIT_BYTES = 8_000;
+
+/**
+ * Whether the edit form may be submitted, and why not. Checked before the request so the user
+ * learns about an empty, oversized or unchanged body without a round trip.
+ */
+export function editBlocker(draft: string, original: string): 'empty' | 'tooLong' | 'unchanged' | null {
+  if (draft.trim() === '') return 'empty';
+  if (utf8Bytes(draft) > EDIT_LIMIT_BYTES) return 'tooLong';
+  if (draft === original) return 'unchanged';
+  return null;
+}
+
+/** Scope options for the filter, derived from what the Server reports as browsable. */
+export function scopeOptions(projects: Array<{ projectId: string; count: number }> | undefined): Array<{ value: string; projectId?: string }> {
+  const options: Array<{ value: string; projectId?: string }> = [{ value: 'all' }, { value: 'global' }];
+  for (const project of projects ?? []) options.push({ value: `project:${project.projectId}`, projectId: project.projectId });
+  return options;
+}
+
+/** Parse a filter value back into the request parameters the API expects. */
+export function scopeParams(value: string): { scope: 'all' | 'global' | 'project'; projectId?: string } {
+  if (value === 'global') return { scope: 'global' };
+  if (value.startsWith('project:')) return { scope: 'project', projectId: value.slice('project:'.length) };
+  return { scope: 'all' };
+}
+
+/**
+ * Relations as the detail view shows them: which side this memory is on, which memory to open,
+ * and whether the edge exists in the Provider too. A relation stored only in the catalog is not
+ * yet projected natively, and saying so avoids implying the Provider agrees.
+ */
+export interface RelationRow {
+  relationId: string;
+  kind: 'Supersedes' | 'RelatedTo';
+  /** `out` means this memory is the source and points at the other one. */
+  direction: 'out' | 'in';
+  otherMemoryId: string;
+  otherRevisionId: string;
+  reason: string;
+  evidence: string[];
+  nativeProjected: boolean;
+  effectiveAt: string;
+}
+
+export function relationRows(detail: UiMemoryDetail): RelationRow[] {
+  return detail.relations.map(relation => {
+    const source = relation.sourceMemoryId === detail.memoryId;
+    return {
+      relationId: relation.relationId,
+      kind: relation.kind,
+      direction: source ? 'out' : 'in',
+      otherMemoryId: source ? relation.targetMemoryId : relation.sourceMemoryId,
+      otherRevisionId: source ? relation.targetRevisionId : relation.sourceRevisionId,
+      reason: relation.reason,
+      evidence: relation.evidence,
+      nativeProjected: relation.nativeProjected,
+      effectiveAt: relation.effectiveAt,
+    };
+  });
+}
+
+/**
+ * Walk the relation graph outward from one memory.
+ *
+ * Breadth-first up to `depth` hops, and each discovered memory is reported once at the **shortest**
+ * hop it was reached at: showing the same memory twice at different distances would suggest two
+ * relationships where the data has one. A node reached by several paths keeps the first edge that
+ * found it, which is why the walk records the edge rather than only the id.
+ */
+export function neighbourhood(
+  graph: { nodes: Array<{ memoryId: string }>; edges: UiGraphEdge[] },
+  memoryId: string,
+  depth = 2,
+): Array<{ memoryId: string; hop: number; kind: 'Supersedes' | 'RelatedTo' | 'Conflicts'; direction: 'out' | 'in'; reason: string }> {
+  const found = new Map<string, { hop: number; kind: 'Supersedes' | 'RelatedTo' | 'Conflicts'; direction: 'out' | 'in'; reason: string }>();
+  if (!graph.nodes.some(node => node.memoryId === memoryId)) return [];
+  let frontier = [memoryId];
+  for (let hop = 1; hop <= depth; hop += 1) {
+    const next: string[] = [];
+    for (const current of frontier) {
+      for (const edge of graph.edges) {
+        // An edge can be walked in either direction: the graph is undirected for reading, even
+        // though a supersedes edge has a direction that matters when it is displayed.
+        const outward = edge.sourceMemoryId === current ? edge.targetMemoryId : edge.targetMemoryId === current ? edge.sourceMemoryId : null;
+        if (outward === null || outward === memoryId || found.has(outward)) continue;
+        found.set(outward, {
+          hop,
+          kind: edge.kind,
+          direction: edge.sourceMemoryId === current ? 'out' : 'in',
+          reason: edge.reason,
+        });
+        next.push(outward);
+      }
+    }
+    if (next.length === 0) break;
+    frontier = next;
+  }
+  return [...found].map(([id, value]) => ({ memoryId: id, ...value })).sort((left, right) => left.hop - right.hop || left.memoryId.localeCompare(right.memoryId));
+}
+
+/**
+ * Filter the entity index by a typed name.
+ *
+ * Matching is a case-insensitive substring, the same rule the Server uses when applying an entity
+ * filter, so what the page offers and what the list returns cannot disagree about "same entity".
+ * An empty query keeps everything rather than nothing.
+ */
+export function filterEntities(
+  entities: Array<{ value: string; count: number }>,
+  query: string,
+): Array<{ value: string; count: number }> {
+  const needle = query.trim().toLowerCase();
+  if (needle === '') return entities;
+  return entities.filter(item => item.value.toLowerCase().includes(needle));
+}
+
+/**
+ * Classification chips for the revision being viewed.
+ *
+ * A local Remember records a `knowledgeType`; a synced entry records `category`, `importance`,
+ * tags and entities. The two dimensions are shown separately and only when present, so "never
+ * recorded" never looks like "recorded as empty".
+ */
+export function classificationMeta(detail: UiMemoryDetail, language: Language): Array<{ key: string; label: string; value: string }> {
+  const revision = detail.revisions.find(item => item.revisionId === detail.revisionId);
+  if (revision === undefined) return [];
+  const rows: Array<{ key: string; label: string; value: string }> = [];
+  if (revision.knowledgeType !== undefined) {
+    rows.push({ key: 'knowledgeType', label: translate(language, 'detail.knowledgeType'), value: revision.knowledgeType });
+  }
+  if (revision.category !== undefined) {
+    rows.push({ key: 'category', label: translate(language, 'detail.category'), value: translate(language, `category.${revision.category}` as MessageKey) });
+  }
+  if (revision.importance !== undefined) {
+    rows.push({ key: 'importance', label: translate(language, 'detail.importance'), value: `${revision.importance}/5` });
+  }
+  return rows;
+}
+
+/** Tags and entities are lists, so they get their own row rather than a comma-joined chip. */
+export function classificationLists(detail: UiMemoryDetail): { tags: string[]; entities: string[] } {
+  const revision = detail.revisions.find(item => item.revisionId === detail.revisionId);
+  return { tags: revision?.tags ?? [], entities: revision?.entities ?? [] };
+}
+
+/**
+ * The revision chain of a memory in publication order, oldest first. `parentId` comes from the
+ * catalog, so a gap in the chain (a revision whose parent is missing) is visible rather than
+ * silently smoothed over.
+ */
+export function revisionTimeline(detail: UiMemoryDetail): Array<UiMemoryRevision & { chained: boolean }> {
+  const byId = new Map(detail.revisions.map(revision => [revision.revisionId, revision]));
+  return [...detail.revisions]
+    .sort((left, right) => left.number - right.number)
+    .map(revision => ({
+      ...revision,
+      // The first revision has no parent; every later one must name a parent we can see.
+      chained: revision.number === 1 || (revision.parentId !== null && byId.has(revision.parentId)),
+    }));
+}
+
+/** Open conflicts only: a resolved case is history, not something needing attention. */
+export function openConflicts(detail: UiMemoryDetail): UiMemoryConflict[] {
+  return detail.conflicts.filter(conflict => conflict.state !== 'resolved');
+}
+
+/**
+ * A line-level comparison of two bodies, for the conflict and history views.
+ *
+ * Deliberately simple: it marks whole lines as added or removed. The point is to show what the
+ * draft changes, not to be a merge engine.
+ */
+export interface DiffLine { kind: 'same' | 'added' | 'removed'; text: string }
+
+export function diffLines(before: string, after: string): DiffLine[] {
+  const left = before.split('\n');
+  const right = after.split('\n');
+  const rows: DiffLine[] = [];
+  const length = Math.max(left.length, right.length);
+  for (let index = 0; index < length; index += 1) {
+    const beforeLine = left[index];
+    const afterLine = right[index];
+    if (beforeLine === afterLine) {
+      if (beforeLine !== undefined) rows.push({ kind: 'same', text: beforeLine });
+      continue;
+    }
+    if (beforeLine !== undefined) rows.push({ kind: 'removed', text: beforeLine });
+    if (afterLine !== undefined) rows.push({ kind: 'added', text: afterLine });
+  }
+  return rows;
 }

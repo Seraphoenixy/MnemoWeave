@@ -2,23 +2,32 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { normalizeLanguage, translate } from '../../plugins/dsh-mnemo-weave/src/client/i18n.ts';
 import {
-  availabilityText, codeText, detailMeta, formatDateTime, injectionChip, listSummary, relativeTime,
-  stateText, statusChips, type Chip,
+  availabilityText, codeText, detailMeta, editBlocker, filterEntities, formatDateTime, injectionChip, listSummary,
+  neighbourhood, relativeTime, scopeOptions, scopeParams, stateText, statusChips, utf8Bytes, type Chip,
 } from '../../plugins/dsh-mnemo-weave/src/client/view-model.ts';
-import type { UiConfigView, UiInjection, UiMemoryDetail, UiMemoryList, UiStatus } from '../../plugins/dsh-mnemo-weave/src/shared/contract.ts';
+import type { UiConfigView, UiInjection, UiMemoryDetail, UiMemoryList, UiMemoryRevision, UiStatus } from '../../plugins/dsh-mnemo-weave/src/shared/contract.ts';
 
 const NOW = Date.parse('2026-11-09T03:00:00.000Z');
 
 const status = (overrides: Partial<UiStatus> = {}): UiStatus => ({
   status: 'ok', serverUrl: 'http://127.0.0.1:4317', hostId: 'dsh',
-  checkedAt: '2026-11-09T02:59:30.000Z', version: '0.2.13', ...overrides,
+  checkedAt: '2026-11-09T02:59:30.000Z', version: '0.2.13',
+  server: { phase: 'connected', taskRun: false }, ...overrides,
 });
 
 const config: UiConfigView = { serverUrl: 'http://127.0.0.1:4317', hostId: 'dsh', hasToken: true };
 
+/** One revision row with the metadata the detail view renders. */
+const rev = (revisionId: string, number: number, publishedAt: string, flags: Partial<UiMemoryRevision> = {}): UiMemoryRevision => ({
+  revisionId, number, parentId: null, contentHash: 'a'.repeat(64), candidateId: '44444444-4444-4444-8444-444444444444',
+  publishedAt, effectiveAt: publishedAt, current: false, selected: false, ...flags,
+});
+
 const detail = (overrides: Partial<UiMemoryDetail> = {}): UiMemoryDetail => ({
   memoryId: '11111111-1111-4111-8111-111111111111',
   revisionId: '22222222-2222-4222-8222-222222222222',
+  currentRevisionId: '22222222-2222-4222-8222-222222222222',
+  isCurrent: true,
   providerMemoryId: 'provider-1',
   scope: 'project',
   projectId: 'proj-a',
@@ -27,15 +36,11 @@ const detail = (overrides: Partial<UiMemoryDetail> = {}): UiMemoryDetail => ({
   content: 'x',
   publishedAt: '2026-11-09T02:00:00.000Z',
   entryVersion: 0,
+  relations: [],
+  conflicts: [],
   revisions: [
-    {
-      revisionId: '22222222-2222-4222-8222-222222222222', number: 2,
-      publishedAt: '2026-11-09T02:00:00.000Z', effectiveAt: '2026-11-09T02:00:00.000Z', current: true,
-    },
-    {
-      revisionId: '33333333-3333-4333-8333-333333333333', number: 1,
-      publishedAt: '2026-11-08T02:00:00.000Z', effectiveAt: '2026-11-08T02:00:00.000Z', current: false,
-    },
+    rev('22222222-2222-4222-8222-222222222222', 2, '2026-11-09T02:00:00.000Z', { current: true, selected: true, parentId: '33333333-3333-4333-8333-333333333333' }),
+    rev('33333333-3333-4333-8333-333333333333', 1, '2026-11-08T02:00:00.000Z'),
   ],
   ...overrides,
 });
@@ -79,6 +84,7 @@ test('status chips name availability, endpoint, host and token state without the
   const withoutVersion: UiStatus = {
     status: 'unavailable', reason: 'PROVIDER_UNAVAILABLE', serverUrl: 'http://127.0.0.1:4317',
     hostId: 'dsh', checkedAt: '2026-11-09T02:59:30.000Z',
+    server: { phase: 'starting', detail: 'the Server is up and its memory provider is still starting', taskRun: false },
   };
   const unavailable = statusChips(withoutVersion, { ...config, hasToken: false }, 'zh', NOW);
   assert.deepEqual(unavailable.map(chip => chip.key), ['availability', 'server', 'host', 'token', 'checked']);
@@ -105,16 +111,52 @@ test('the list summary counts what the Server returned', () => {
   assert.equal(listSummary(null, 'en'), '');
 });
 
-test('detail metadata names state, current revision, scope, applicability and publication time', () => {
+test('detail metadata names the viewed revision, not the live one', () => {
   const meta = detailMeta(detail(), 'en');
-  assert.deepEqual(meta.map(item => item.key), ['state', 'revision', 'scope', 'applicability', 'published']);
-  assert.deepEqual(meta.slice(0, 4).map(item => item.value), ['Active', '#2', 'proj-a', 'release']);
-  assert.equal(meta[4]?.value, formatDateTime('2026-11-09T02:00:00.000Z'));
+  assert.deepEqual(meta.map(item => item.key), ['state', 'revision', 'currentness', 'scope', 'applicability', 'published']);
+  assert.deepEqual(meta.slice(0, 4).map(item => item.value), ['Active', '#2', 'Current revision', 'proj-a']);
+  assert.equal(meta[5]?.value, formatDateTime('2026-11-09T02:00:00.000Z'));
 
   const { projectId: _project, ...globalFields } = detail({ scope: 'global' });
-  assert.equal(detailMeta(globalFields as UiMemoryDetail, 'zh')[2]?.value, '全局');
+  assert.equal(detailMeta(globalFields as UiMemoryDetail, 'zh')[3]?.value, '全局');
   assert.equal(detailMeta(detail({ state: 'superseded' }), 'zh')[0]?.value, '已被取代');
   assert.equal(detailMeta(detail({ revisions: [] }), 'en')[1]?.value, '—');
+
+  // Viewing history reports the historical number and names the current one separately; using
+  // the current number here used to misreport which version the user was reading.
+  const historical = detail({
+    revisionId: '33333333-3333-4333-8333-333333333333',
+    isCurrent: false,
+    publishedAt: '2026-11-08T02:00:00.000Z',
+    revisions: [
+      rev('22222222-2222-4222-8222-222222222222', 2, '2026-11-09T02:00:00.000Z', { current: true }),
+      rev('33333333-3333-4333-8333-333333333333', 1, '2026-11-08T02:00:00.000Z', { selected: true }),
+    ],
+  });
+  const history = detailMeta(historical, 'en');
+  assert.equal(history[1]?.value, '#1', 'the viewed revision is #1');
+  assert.equal(history[2]?.value, 'Historical revision (current is #2)');
+});
+
+test('the edit form blocks empty, oversized and unchanged bodies before any request', () => {
+  assert.equal(editBlocker('', 'a'), 'empty');
+  assert.equal(editBlocker('   ', 'a'), 'empty');
+  assert.equal(editBlocker('a'.repeat(8_001), 'a'), 'tooLong');
+  // Chinese text: the limit is bytes, not characters, so 3000 characters is already over.
+  assert.equal(editBlocker('中'.repeat(3_000), 'a'), 'tooLong');
+  assert.equal(editBlocker('a', 'a'), 'unchanged');
+  assert.equal(editBlocker('b', 'a'), null);
+  assert.equal(utf8Bytes('中'), 3);
+});
+
+test('scope options come from the browsable set and parse back into request parameters', () => {
+  const options = scopeOptions([{ projectId: 'alpha', count: 2 }, { projectId: 'beta', count: 1 }]);
+  assert.deepEqual(options.map(option => option.value), ['all', 'global', 'project:alpha', 'project:beta']);
+  assert.deepEqual(scopeParams('all'), { scope: 'all' });
+  assert.deepEqual(scopeParams('global'), { scope: 'global' });
+  assert.deepEqual(scopeParams('project:alpha'), { scope: 'project', projectId: 'alpha' });
+  // A project that only appears on a later page is still offered: the index covers the whole set.
+  assert.equal(scopeOptions([{ projectId: 'late-project', count: 1 }]).length, 3);
 });
 
 test('the injection chip names the last View and flags a budget omission', () => {
@@ -136,4 +178,63 @@ test('the injection chip names the last View and flags a budget omission', () =>
   const none = injectionChip(null, 'zh');
   assert.equal(none.tone, 'muted');
   assert.equal(none.value, '尚无注入记录');
+});
+
+/**
+ * The entity index is filtered in the page, but the rule has to match the Server's: a substring
+ * match that ignores case. If the two disagreed, the page could offer an entity the list then
+ * refuses to return.
+ */
+test('the entity filter ignores case and keeps everything when empty', () => {
+  const index = [
+    { value: 'MnemoWeave', count: 3 },
+    { value: 'DSH', count: 2 },
+    { value: 'ChatGPT 桌面', count: 1 },
+  ];
+  assert.deepEqual(filterEntities(index, ''), index, 'an empty query keeps the whole index');
+  assert.deepEqual(filterEntities(index, '   '), index, 'whitespace is not a filter');
+  assert.deepEqual(filterEntities(index, 'dsh'), [{ value: 'DSH', count: 2 }], 'matching ignores case');
+  assert.deepEqual(filterEntities(index, 'weave'), [{ value: 'MnemoWeave', count: 3 }], 'matching is a substring');
+  assert.deepEqual(filterEntities(index, 'gpt'), [{ value: 'ChatGPT 桌面', count: 1 }], 'non-ASCII values match too');
+  assert.deepEqual(filterEntities(index, 'nobody'), []);
+});
+
+/**
+ * The neighbourhood walk answers "what is near this memory".
+ *
+ * Each memory is reported once at the shortest hop that reached it: listing it twice would
+ * suggest two relationships where the data has one.
+ */
+test('the neighbourhood walk stops at the requested depth and reports each memory once', () => {
+  const edge = (id: string, source: string, target: string, kind: 'Supersedes' | 'RelatedTo' = 'RelatedTo') => ({
+    relationId: id, kind, sourceMemoryId: source, targetMemoryId: target, reason: `why ${id}`, effectiveAt: '2026-11-10T00:00:00.000Z',
+  });
+  const graph = {
+    nodes: ['a', 'b', 'c', 'd', 'far'].map(memoryId => ({ memoryId })),
+    edges: [edge('ab', 'a', 'b'), edge('bc', 'b', 'c'), edge('cd', 'c', 'd'), edge('dfar', 'd', 'far')],
+  };
+
+  const one = neighbourhood(graph, 'a', 1);
+  assert.deepEqual(one.map(item => item.memoryId), ['b'], 'one hop stops at the direct neighbour');
+  assert.equal(one[0]?.hop, 1);
+  assert.equal(one[0]?.direction, 'out');
+
+  const two = neighbourhood(graph, 'a', 2);
+  assert.deepEqual(two.map(item => item.memoryId), ['b', 'c'], 'two hops reaches the next ring');
+  assert.deepEqual(two.map(item => item.hop), [1, 2]);
+
+  // A cycle back to the origin does not make the origin its own neighbour, and an incoming edge
+  // still counts as a neighbour: `c → a` puts `c` one hop away from `a`.
+  const cycle = { nodes: ['a', 'b', 'c'].map(memoryId => ({ memoryId })), edges: [edge('ab', 'a', 'b'), edge('bc', 'b', 'c'), edge('ca', 'c', 'a')] };
+  const reached = neighbourhood(cycle, 'a', 3);
+  assert.deepEqual(reached.map(item => item.memoryId), ['b', 'c'], 'the origin is never its own neighbour');
+  assert.deepEqual(reached.map(item => item.hop), [1, 1], 'both are direct neighbours of the origin');
+
+  // An incoming edge is walked too, but keeps its direction for display.
+  const inbound = { nodes: ['a', 'b'].map(memoryId => ({ memoryId })), edges: [edge('ba', 'b', 'a', 'Supersedes')] };
+  const fromOutside = neighbourhood(inbound, 'a', 1);
+  assert.deepEqual(fromOutside, [{ memoryId: 'b', hop: 1, kind: 'Supersedes', direction: 'in', reason: 'why ba' }]);
+
+  // A memory that is not in the graph has no neighbourhood rather than a confusing one.
+  assert.deepEqual(neighbourhood(graph, 'missing', 2), []);
 });

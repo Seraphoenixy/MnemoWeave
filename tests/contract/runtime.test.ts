@@ -85,11 +85,13 @@ test('Permission filtering precedes model rerank and applies to direct and pinne
     const allowed = f.publish('Allowed project content');
     const denied = f.publish('Private project B secret', 'project-b');
     const global = f.publish('Global secret', '', 'global');
-    const inputs: string[] = [];
-    const assembler = new ViewAssembler(f.app, { reranker: { rerank: async (_component, _query, memories, generation) => { inputs.push(...memories.map(memory => memory.content)); return { generation, order: memories.map(memory => memory.id) }; } } });
+    // No model route exists any more, so the guard under test is the authorization filter
+    // itself: unauthorized content must not reach the delivered View at all.
+    const assembler = new ViewAssembler(f.app);
     const view = await assembler.assemble({ grant: f.grant, query: 'project', rerank: true, pinned: [{ memoryId: denied.memoryId, tier: 'critical' }] });
     assert.ok(view.memories.every(memory => memory.memoryId === allowed.memoryId));
-    assert.equal(inputs.some(text => text.includes('secret')), false);
+    assert.equal(view.memories.some(memory => memory.content.includes('secret')), false);
+    assert.equal(view.rerank.status, 'not_requested', 'the Server never calls a model for ordering');
     const recall = await f.app.recall({ query: 'project' }, f.grant);
     assert.equal(recall.memories.length, 1);
     await assert.rejects(f.app.readMemory(denied, f.grant), /UNAUTHORIZED/);

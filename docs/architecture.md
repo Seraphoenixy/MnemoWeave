@@ -38,7 +38,7 @@ workspace 包（跨包引用使用相对源码路径 + `.ts`；各 `package.json
 | `packages/core/contracts` | `@mnemoweave/contracts` | zod 契约：Recall/Remember/Candidate、HostEvent、View、记忆列表与编辑、STORAGE、错误码、OpenAPI |
 | `packages/core/application` | `@mnemoweave/application` | `MemoryApplication`、端口定义、`ViewAssembler`、`MemoryRuntime`、`MemoryWorkflow`、`VersionWorkflow`、`SourceRegistry`/`CompositionPipeline` |
 | `packages/infrastructure/governance` | `@mnemoweave/governance` | 治理库（`node:sqlite`）：候选/审核/任务/Outbox/回执、记忆目录与 Revision、冲突、会话事件、运行时状态 |
-| `packages/infrastructure/model-gateway` | `@mnemoweave/model-gateway` | `ChatModelGateway`、路由、并发上限 2、用量落盘 |
+| ~~`packages/infrastructure/model-gateway`~~ | ~~`@mnemoweave/model-gateway`~~ | **已移除（2026-11-10）**：Server 不再调用外部模型，见「模型归属」决策 |
 | `packages/protocols/http` | `@mnemoweave/protocols-http` | HTTP 服务器、路由表、`ClientHttpEndpoints` | 
 | `packages/protocols/mcp` | `@mnemoweave/protocols-mcp` | stdio MCP 服务器与工具注册 |
 | `packages/providers/mnemon` | `@mnemoweave/providers-mnemon` | 官方 Mnemon CLI 适配（固定版本、串行调用、输出校验） |
@@ -92,6 +92,29 @@ flowchart LR
 
 部署约定：本机 Server 与宿主必须同机（客户端的 `baseUrl` 只接受 loopback）；远端同步 Server 独立部署，不与任何开发机共用磁盘。Worker 暂留本机 Server 进程内；不使用 Docker，不修改系统 PATH。本机 Server 首版不做 Windows 服务包装，计划任务绑定用户会话，注销即停止。
 
+### 4.1 宿主先启动时的连接约定（2026-11-10）
+
+三个宿主都可能先于 Server 启动。连接顺序固定为**探测 → 按需唤醒 → 直连**，插件不托管、不代理 Server 进程：
+
+| 探测结果 | 插件行为 |
+|---|---|
+| 存活端点返回本服务标识，`/health/ready` 通过 | 直接使用 |
+| 连接被拒绝（唯一可证明「没有在监听」的结果） | 请求运行固定名称的 `MnemoWeave Local Server` 计划任务，然后轮询原地址直到就绪或超时 |
+| 本服务已响应但 Provider 未就绪 | 报告「正在启动」，继续轮询 |
+| `401` 且响应体带本服务标识 | 报告「服务令牌不匹配」，保留现有 Server |
+| 其他服务占用端口，或连接后无响应 | 报告「地址被占用」或「本机服务无响应」，停止本轮尝试 |
+
+判定与实现要点：
+
+- `/health/live` 返回 `{live, service:'mnemoweave', protocol}`；`401` 的错误体同样带 `service` 与 `protocol`，否则无法把「令牌不匹配」与「别的程序恰好返回 401」区分开。
+- **只有 `ECONNREFUSED` 进入唤醒分支**；超时、401、响应不匹配都不触发启动，避免在已被占用的端口上再起一个进程。
+- 任务由**安装步骤**注册（`scripts/install-local-server-task.ps1`，需管理员权限窗口），插件只按名称运行，不持有 Server 配置。任务设为 `IgnoreNew`，三个插件同时唤醒也只运行一个实例；触发成功只表示请求已受理，连接仍以健康探测为准。
+- 任务用 **Task Scheduler COM API** 注册，不用 `schtasks /tr`：动作里已含多层带引号路径，再经 `schtasks` 转发需要三级转义，实测在含空格的路径上被解析成 `'Files\nodejs\node.exe'` 而失败。COM 下命令行是属性，不经 shell 重新分词。
+- `scripts/run-local-server.ps1` 从 `.env.local-server` 载入非凭据配置（Mnemon 路径与 store、状态目录、端口）。**凭据不进任何文件**：`MNEMOWEAVE_TOKEN` 与 `MNEMOWEAVE_OPERATOR_TOKEN` 只存在于登录用户的环境变量，Server、启动包装与三个宿主插件都从这一处读取。登录触发的计划任务会继承用户环境（本机实测确认）。手工启动等绕过任务的路径由 `apps/server/src/main.ts` 的实例保护兜底：端口上已有本服务则安静退出（0），被其他程序占用则报 `port_not_ours`（1）。
+- 单一来源的代价是**改令牌后需要让各进程重新读取**：Server 需重跑任务（或重新登录），DSH、ZCode、ChatGPT 桌面需重启，因为进程只在启动时读环境变量。这一点写进文档，不用「自动同步」掩盖。
+- 宿主无需重新提交已发出的写请求：重连只影响后续请求，结果未知的写入保留原错误由调用方处理。
+- 不改变既有边界：插件仍不持有同步凭据，`baseUrl` 仍只接受 loopback，唤醒能力只作用于固定任务名。
+
 ## 5. 数据所有权
 
 | 数据 | 权威 |
@@ -113,8 +136,8 @@ flowchart LR
 
 - Server 只绑定 `127.0.0.1`，除 `/health/live` 外都要求 `Authorization: Bearer <MNEMOWEAVE_TOKEN>`；拒绝带 `Origin` 的请求。
 - 宿主与 Server 之间只有一种身份：**服务令牌 + `x-mnemoweave-host` 头**。不再签发逐 Host 凭据，也不做配对与撤权代数。
-- 人工例外处理走独立 `MNEMOWEAVE_OPERATOR_TOKEN`，只在 HTTP 边界校验；MCP 不暴露 review/retry 工具，operator token 不得进入 Host 环境。
-- 用户编辑正式记忆走 `PATCH /v1/memories/{id}`，写入被记录为 `local-user` 的审核决定；模型没有这个入口。
+- 人工例外处理走独立 `MNEMOWEAVE_OPERATOR_TOKEN`，只在 HTTP 边界校验；MCP 不暴露 review/retry 工具，operator token 不得进入 Host 环境（Host 半已不读取它，编辑、撤回与新增也不需要它）。
+- 用户新增与编辑正式记忆分别走 `POST /v1/memories` 与 `PATCH /v1/memories/{id}`，写入都记录为 `local-user` 的审核决定；模型没有这个入口。**新增、编辑与撤回只要求服务令牌 + `x-mnemoweave-host` 头，不再要求第二把凭据**（2026-11-11，经用户确认：个人项目，多一把令牌只是同一秘密的副本）。代价是写操作只能归因到「发起请求的宿主」，不构成「有人当场操作」的密码学证明；这是单用户机器上明确接受的取舍。新增直接发布意味着**不经过候选审核**：用户自己的输入被视为已确认的事实，而模型输出仍然只能成为候选。
 - 本机 Server 到远端使用**逐设备令牌**，设备可单独撤销；九个宿主实例不持有同步凭据。远端拒绝带 `Origin` 的请求，TLS 由部署层终止。
 - 远端是否可读正文**待确认**；无论结论如何，它的校验、去重与快照只依赖 `contentHash` 与 `byteLength`，不解析正文语义。正文封装保留 `enc-v1`；只封装正文时，标题、证据、实体、关系仍是明文。
 - 授权分层：本机决定「发起者能否做这个动作」，远端只决定「设备能否读写这个范围」。宿主没有写准则、写档案或发布正式记忆的入口。
@@ -130,7 +153,15 @@ flowchart LR
 | Mnemon 由环境提供：`MNEMON_BINARY` 可省略，默认 PATH 上的 `mnemon` | `apps/server/src/config.ts`、`createRunner` |
 | 只接受已验收版本 0.2.13，其余明确拒绝 | 版本字面量校验 → `UNSUPPORTED_VERSION` |
 | 模型输出只能成为候选，不能直接写正式记忆 | `MemoryWorkflow` 审核分支；`REVIEW_REQUIRED` |
+| **模型归属：Server 不调用任何外部模型**；候选审核与提炼的语义判断由宿主会话内的模型完成（2026-11-10，经用户确认） | `CAPTURE_GUIDANCE`（`packages/core/application/src/runtime.ts`）承载判断标准；`MemoryWorkflow.review` 只做确定性规则，其余转人工；`ViewAssembler` 不重排；`MNEMOWEAVE_MODEL_*` 已移除 |
 | 用户可直接编辑正式记忆，编辑追加不可变 Revision 并记录审核决定 | `catalog.publishDirectEdit` + `PATCH /v1/memories/{id}` |
+| **界面可直接新增正式记忆（不经候选审核）**（2026-11-11，经用户确认：个人项目，按 B 方案） | `POST /v1/memories` → 提交候选并立即以 `local-user` 批准 → 既有发布流水线写入 Provider 并建档；模型仍无此入口，模型输出仍只能成为候选 |
+| **编辑与撤回不要求第二把凭据**（2026-11-11，经用户确认：个人项目）；只要求服务令牌 + `x-mnemoweave-host`，并记录为 `local-user` 审核决定。**局限**：归因到宿主，不证明人在场 | `apps/server`/`packages/protocols/http` 的 PATCH/withdraw 只做 `requireHost()`；Host 半不再读取或持有 operator 令牌 |
+| 撤回是新增撤回版本，历史保持可读；不得物理删除 Provider 记录 | `SyncApply` 撤回分支只 `retireSynced`，不调 `forget`；`POST /v1/memories/{id}/withdraw` |
+| 用户动作边界：写请求必须指明来源宿主 | `requireHost()` 强制 `x-mnemoweave-host`；一次性确认机制已移除（申请方与使用方是同一个，不构成证明），改用上面的身份模型 |
+| 同一记忆的编辑与撤回串行执行，基准版本在锁内校验 | `withEditLock`（`apps/server/src/config.ts`） |
+| 发布与共享入队同事务，崩溃后可补偿 | `share_outbox`（schema v13）、`pendingShares`/`settleShare` |
+| 端口探测先于打开治理库 | `apps/server/src/main.ts` 在 `configure()` 之前 `inspectPort` |
 | 跨 Provider 写入用 Outbox + 稳定 writeKey + 独立 Run/Receipt，超时只对账不重试 | `governance_tasks`/`governance_outbox`/`governance_execution_receipts`/`catalog_operations` |
 | Revision 不可变，更新用 CAS + 业务占用 + 前向恢复 | `catalog_revisions` 不可变触发器、`catalog_reservations` |
 | 注入预算 4096 token、2 秒截止，超时不重复召回 | `DEFAULT_INJECTION_BUDGET_TOKENS`、客户端 `INJECTION_TIMEOUT_MS` |

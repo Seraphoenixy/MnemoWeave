@@ -28,7 +28,8 @@ test('Real Mnemon: Remember, deduplicate, HTTP + stdio MCP Recall', { timeout: 6
     const address = server.address();
     assert.ok(address && typeof address === 'object');
     const base = `http://127.0.0.1:${address.port}`;
-    const headers = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+    // Every host read is attributed: recall included, since it reads the Provider.
+    const headers = { authorization: `Bearer ${token}`, 'x-mnemoweave-host': 'acceptance', 'content-type': 'application/json' };
     assert.equal((await fetch(`${base}/health/live`)).status, 401);
     assert.equal((await fetch(`${base}/health/ready`, { headers })).status, 200);
     assert.equal((await fetch(`${base}/v1/recall`, { method: 'POST', headers, body: '{"query":""}' })).status, 400);
@@ -54,5 +55,5 @@ test('Real Mnemon: Remember, deduplicate, HTTP + stdio MCP Recall', { timeout: 6
       assert.ok(mcp.memories.some(memory => memory.id === first.id));
       await writeFile(join(dataDir, 'acceptance-result.json'), JSON.stringify({ first, duplicate, http, mcp }, null, 2));
     } finally { await client.close(); }
-  } finally { await new Promise<void>((done, fail) => server.close(error => error ? fail(error) : done())); }
+  } finally { await new Promise<void>((done, fail) => { server.closeAllConnections(); server.close(error => error ? fail(error) : done()); }); }
 });

@@ -3,7 +3,6 @@ import { randomUUID } from 'node:crypto';
 import { MnemoWeaveError, ReadGrant, RerankOutput, View } from '../../contracts/src/index.ts';
 import type { ReadGrantRecord, ViewRecord, ViewRuleRecord } from '../../contracts/src/index.ts';
 import type { MemoryCatalogReader } from './catalog-ports.ts';
-import type { RerankGateway } from './workflow-ports.ts';
 
 /**
  * Minimal read surface needed for View assembly. The Server uses the Application Core;
@@ -54,14 +53,13 @@ export function deepFreezeView<T>(view: T): T {
  */
 export class ViewAssembler {
   private readonly app: ViewSource;
-  private readonly reranker: RerankGateway | undefined;
   private readonly revocations: GrantRevocationSource | undefined;
   private readonly budgetTokens: number;
   private readonly rules: ((input: { projectId?: string }) => ViewRuleRecord[]) | undefined;
   private generation: number;
-  constructor(app: ViewSource, options: { reranker?: RerankGateway; revocations?: GrantRevocationSource; budgetTokens?: number; generation?: number; rules?: (input: { projectId?: string }) => ViewRuleRecord[] } = {}) {
+  constructor(app: ViewSource, options: { revocations?: GrantRevocationSource; budgetTokens?: number; generation?: number; rules?: (input: { projectId?: string }) => ViewRuleRecord[] } = {}) {
     if (!app.catalogReader) throw new Error('View assembly requires the publication catalog');
-    this.app = app; this.reranker = options.reranker; this.revocations = options.revocations;
+    this.app = app; this.revocations = options.revocations;
     this.budgetTokens = options.budgetTokens ?? DEFAULT_INJECTION_BUDGET_TOKENS;
     this.rules = options.rules;
     this.generation = options.generation ?? 0;
@@ -103,29 +101,10 @@ export class ViewAssembler {
       const read = await this.app.readMemory({ memoryId: id, revisionId: descriptor.currentRevisionId });
       return { ...memory, content: read.content };
     }));
-    const rerankStatus: ViewRecord['rerank'] = { status: 'not_requested', reason: 'Deterministic ordering' };
-    const shouldRerank = input.rerank === true || this.ambiguous(dynamic as ReadonlyArray<{ score?: number }>);
-    if (shouldRerank && dynamic.length >= 2) {
-      if (!this.reranker) rerankStatus.status = 'unavailable', rerankStatus.reason = 'No rerank-capable model route configured';
-      else {
-        try {
-          const result = await this.reranker.rerank('recall-rerank', query ?? '', dynamic.map(({ id, content }) => ({ id, content })), generation);
-          if (result.generation !== generation) {
-            rerankStatus.status = 'failed', rerankStatus.reason = 'Rerank result was computed for another request generation';
-          } else {
-            RerankOutput.parse(result);
-            // RECALL-02: the output may only reorder the input set — unknown, duplicate or missing ids fail.
-            const inputIds = new Set(dynamic.map(memory => memory.id));
-            if (result.order.length !== dynamic.length || new Set(result.order).size !== result.order.length || result.order.some(id => !inputIds.has(id))) throw new Error('Rerank output is not a permutation of the filtered candidate set');
-            const byId = new Map(dynamic.map(memory => [memory.id, memory] as const));
-            dynamic = result.order.map(id => byId.get(id)!);
-            rerankStatus.status = 'applied', rerankStatus.reason = 'Model rerank applied within the filtered candidate set';
-          }
-        } catch (error) {
-          rerankStatus.status = 'failed', rerankStatus.reason = error instanceof Error ? `Rerank failed: ${error.message.slice(0, 200)}` : 'Rerank failed';
-        }
-      }
-    }
+    // Ordering is deterministic and model-free. Reranking used to call out to a model route;
+    // the decision is that the Server never calls an external model, so the recall order the
+    // Provider returned (already scored) is delivered as-is.
+    const rerankStatus: ViewRecord['rerank'] = { status: 'not_requested', reason: 'Deterministic ordering; the Server never calls a model' };
     // Pinned tiers: critical stays complete, normal becomes a traceable excerpt.
     const pinned: ViewRecord['memories'] = [];
     const seenPinned = new Set<string>();

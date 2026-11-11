@@ -11,7 +11,7 @@ TypeScript Workspace Monorepo，模块化单体，原生部署（不使用 Docke
 | 文档 | 内容 |
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | 系统组成、包边界、数据所有权、部署、安全、已固定的设计决策 |
-| [docs/implementation.md](docs/implementation.md) | HTTP/MCP/Provider 契约、治理库 schema v10、状态机、配置项 |
+| [docs/implementation.md](docs/implementation.md) | HTTP/MCP/Provider 契约、治理库 schema v14、状态机、配置项 |
 | [docs/sync.md](docs/sync.md) | 三机同步：条目模型、版本与变更规则、端点、故障恢复（已实现；未完成项见 `docs/status.md`） |
 | [docs/dsh-ui.md](docs/dsh-ui.md) | DSH 记忆界面（可查看与编辑） |
 | [docs/host-acceptance.md](docs/host-acceptance.md) | ZCode / ChatGPT / DSH 接入与验收 |
@@ -27,7 +27,7 @@ pnpm.cmd install --frozen-lockfile   # 依赖装在项目内 work/pnpm-store（�
 node node_modules/typescript/bin/tsc --noEmit
 node node_modules/typescript/bin/tsc
 node --test tests/unit/*.test.ts tests/contract/*.test.ts
-node --test tests/e2e/*.test.ts      # 需要可用的 Mnemon CLI
+node --test --test-concurrency=1 tests/e2e/*.test.ts   # 需要可用的 Mnemon CLI；必须串行
 
 $env:MNEMON_DATA_DIR='D:/project/MnemoWeave/work/dev-memory'
 $env:MNEMON_STORE='development'
@@ -75,7 +75,7 @@ await client.editMemory(memoryId, { content: '修正后的正文', reason: '用�
 - 自动审核以规则为主、模型为辅；未配置模型、模型失败、证据未验证、重要架构知识、Global 晋升、带变更意图或存在冲突时一律转人工。不能用 `approved` 字段绕过。
 - 后台 Worker 默认随 Server 进程启动；多进程共享同一治理库时靠 SQLite 租约串行调度。`MNEMOWEAVE_WORKER=off` 仅用于诊断。
 - 模型由 Model Gateway 显式配置（`MNEMOWEAVE_MODEL_URL` / `_MODEL` / `_MODEL_KEY`），非本地端点必须 HTTPS；`MNEMOWEAVE_BACKUP_MODEL_*` 仅在 temporary/unavailable/timeout 时最多切换一次。
-- 人工入口只走 HTTP，使用独立 `MNEMOWEAVE_OPERATOR_TOKEN`，不得与普通令牌相同，也不得进入 Host 环境。
+- 人工管理入口（审核、准则、档案、同步诊断）只走 HTTP，使用独立 `MNEMOWEAVE_OPERATOR_TOKEN`，不得与普通令牌相同，也不得进入 Host 环境。**记忆的编辑与撤回不在此列**：个人项目，只要求服务令牌 + `x-mnemoweave-host`，并记录为 `local-user` 审核决定（可归因到宿主，不证明人在场）。
 - 只有 `persisted` 且有正式成功回执才表示 Provider 写入已核对；`approved` 只表示排队。写入前可确定的故障最多三次退避重试（指数增长，封顶 15 分钟）；已发起写入后结果未知时只对账，不盲目重发。
 - 写入进程固定 `MNEMON_MAX_INSIGHTS=0` 关闭 Mnemon 自动容量清理；请使用本项目专用 Store，外部原生客户端仍可能改动同一 Store。
 
@@ -83,7 +83,7 @@ await client.editMemory(memoryId, { content: '修正后的正文', reason: '用�
 
 ## 治理库升级与恢复
 
-治理库当前 schema v10，启动时按顺序迁移（v1→v10）；每步迁移前用 `VACUUM INTO` 生成 `<governance.db>.pre-vN.<uuid>.db` 一致快照（含 WAL 中已提交数据），迁移本身在事务内提交。未识别的既有库拒绝初始化。
+治理库当前 schema **v14**，启动时按顺序迁移（v1→v14）；每步迁移前用 `VACUUM INTO` 生成 `<governance.db>.pre-vN.<uuid>.db` 一致快照（含 WAL 中已提交数据），迁移本身在事务内提交。未识别的既有库拒绝初始化。
 
 回退方式：停止全部 Server/MCP/Worker → 保留原库 → 将选定快照复制到**新的**状态目录并命名 `governance.db` → 把 `MNEMOWEAVE_STATE_DIR` 指向新目录。快照只恢复治理数据，不能当作 Provider 回滚或通用备份。升级前应先在隔离状态目录演练。
 

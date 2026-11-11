@@ -17,7 +17,7 @@
 - 同步以「范围」为单位：`global` 或 `project:<projectId>`。序号、游标、快照、设备授权都按范围，禁止用全局游标跨项目推进，也禁止用按项目快照的 `nextSince` 推进全局游标。
 - 编辑请求必须携带读取接口返回的 `entryVersion` 作为基准，服务端不得补全为本机最新版本；否则会静默覆盖他机修改。
 - 准则按完整条目注入，超出预算拒绝启用，**不得按正文截断**准则。
-- 授权分层：本机决定「发起者能否做这个动作」，远端只决定「设备能否读写这个范围」。宿主没有写准则、写档案或发布正式记忆的入口。
+- 授权分层：本机决定「发起者能否做这个动作」，远端只决定「设备能否读写这个范围」。宿主没有写准则、写档案的入口；**正式记忆的新增与编辑由记忆界面直接发布**（2026-11-11 经用户确认：个人项目，界面新增即为正式记忆，不经候选审核）。模型没有发布入口，模型输出仍只能成为候选。
 - 远端同步 Server 部署目标为 Linux systemd；本机 Server 在 Windows 开发机由登录时启动的计划任务托管，不做 Windows 服务包装；Worker 暂留本机 Server 进程内。
 - `packages/domain`、`packages/shared` 只有 README、没有源码，不得当作已实现模块。
 
@@ -29,7 +29,7 @@
 - 当前仅验收 Mnemon 0.2.13；升级需更新能力证据和契约测试。重复 Remember 的 `skipped` 结果必须用 `replaced_id` 定位已有记忆。
 - 正式记忆正文与原生关系由 Mnemon 权威保存；MnemoWeave 只保存映射、哈希、当前指针与审核素材。宿主与 Server 之间只有一种身份：服务令牌 + Host 头，不做逐 Host 凭据签发；逐设备令牌只用于本机 Server 到远端同步 Server。
 - `remember` 没有指定 ID 的参数，跨机重建必须建立逐机映射并用 `--no-diff`，否则会被去重返回 `skipped`。撤回用 `forget`，关系用 `related --edge`。
-- 用户可在界面直接编辑正式记忆（追加 Revision、supersedes 旧记忆、记录为 operator 审核决定）；模型没有这个入口，模型输出仍只能成为候选。
+- 用户可在界面直接新增与编辑正式记忆（新增直接发布；编辑追加 Revision、supersedes 旧记忆；两者都记录为 `local-user` 审核决定）；模型没有这个入口，模型输出仍只能成为候选。
 - Remember 与后台整理必须遵守候选审核边界；不得将模型输出直接写入正式记忆。`acceptanceRemember` 仅用于隔离验收。
 - 跨 Provider 操作不假定共同事务；使用 Outbox、稳定幂等键、Receipt 与结果核对。超时写入不得盲目重试。
 - 模型调用统一经过 Gateway/Routing；仅 declared 组件可调用模型，Provider 不得自行寻找模型。
@@ -43,5 +43,5 @@
 - 测试使用项目 `work/` 下隔离目录和专用 store，禁止使用用户默认记忆目录。
 - Provider 主要通过真实 CLI 进程验证输入、JSON 输出和副作用；上游 Go 测试不是本项目验收前提。只有修改或排查 Mnemon 内部源码时再考虑。
 - 按改动范围验证，不为简单可逆变更添加镜像实现的测试。不能把未执行或失败的检查写成通过。
-- 治理库当前 schema v12（`entry_versions` 记录已确认版本；v11 的同步与三类记忆八表已建）；迁移每步先 `VACUUM INTO` 快照；升级仍需先在隔离状态目录演练，不直接对真实库升级。Host 真实会话验收（ZCode、ChatGPT 桌面、DSH）仍属未完成项，见 `docs/host-acceptance.md` 与 `docs/status.md`。
+- 治理库当前 schema v14（v11 同步与三类记忆八表、v12 `entry_versions`、v13 `share_outbox`、v14 修订分类五列）；迁移每步先 `VACUUM INTO` 快照；升级仍需先在隔离状态目录演练，不直接对真实库升级。Host 真实会话验收（ZCode、ChatGPT 桌面、DSH）仍属未完成项，见 `docs/host-acceptance.md` 与 `docs/status.md`。
 - 向用户说明实际改动路径、执行命令、测试结果、未决事项和下一步；区分已实现、预留和待验证能力。

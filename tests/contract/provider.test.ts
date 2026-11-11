@@ -11,6 +11,8 @@ test('CLI argument boundary protects flag-like content and passes explicit store
     return args[0] === '--version' ? 'mnemon version 0.2.13\n' : '{"results":[]}';
   } });
   await provider.recall({ query: '--data-dir evil & echo bad', limit: 3 });
+  // The user's text stays one positional argument after `--`; `--readonly` marks this as an
+  // immutable snapshot read, and still precedes the subcommand.
   assert.deepEqual(calls[1], ['--data-dir', resolve('work/test-contract'), '--store', 'acceptance', 'recall', '--limit', '3', '--', '--data-dir evil & echo bad']);
 });
 test('Unknown versions and malformed Provider payloads fail explicitly', async () => {
@@ -67,9 +69,14 @@ test('Forget and related read back native state without inventing edges', async 
     return args.includes('forget') ? '{"id":"native-1","status":"deleted"}' : JSON.stringify([{ id: 'native-old', content: '旧版本', depth: 1, via_edge_type: 'supersedes' }]);
   } });
   assert.deepEqual(await provider.forget('native-1'), { id: 'native-1', status: 'deleted' });
-  assert.deepEqual(calls[1], ['--data-dir', resolve('work/test-contract'), '--store', 'acceptance', 'forget', 'native-1']);
+  // Located by content, not by index: the version check is cached after the first command, so the
+  // call numbering is no longer one-version-check-per-command.
+  const forgetCall = calls.find(args => args.includes('forget'));
+  assert.deepEqual(forgetCall, ['--data-dir', resolve('work/test-contract'), '--store', 'acceptance', 'forget', 'native-1']);
   assert.deepEqual(await provider.related('native-1', 'supersedes', 1), [{ id: 'native-old', content: '旧版本', depth: 1, viaEdgeType: 'supersedes' }]);
-  assert.deepEqual(calls[3], ['--data-dir', resolve('work/test-contract'), '--store', 'acceptance', 'related', 'native-1', '--edge', 'supersedes', '--depth', '1']);
+  const relatedCall = calls.find(args => args.includes('related'));
+  // Reads open an immutable snapshot: no WAL files, and writes are rejected by the CLI itself.
+  assert.deepEqual(relatedCall, ['--data-dir', resolve('work/test-contract'), '--store', 'acceptance', '--readonly', 'related', 'native-1', '--edge', 'supersedes', '--depth', '1']);
   await assert.rejects(provider.related('native-1', 'unknown' as never), (error: unknown) => error instanceof MnemoWeaveError && error.code === 'INVALID_INPUT');
   await assert.rejects(provider.related('native-1', 'semantic', 6), (error: unknown) => error instanceof MnemoWeaveError && error.code === 'INVALID_INPUT');
 });

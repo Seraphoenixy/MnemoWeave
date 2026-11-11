@@ -35,6 +35,8 @@ before(async () => {
 });
 
 after(() => {
+  // Keep-alive sockets from earlier requests would otherwise hold the server open.
+  server.closeAllConnections();
   server.close();
   store.close();
 });

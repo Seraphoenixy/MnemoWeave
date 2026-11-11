@@ -46,11 +46,12 @@ export class MemoryClient {
   }
 
   private async call<T>(method: 'GET' | 'POST' | 'PATCH', path: string, body?: unknown, timeoutMs = this.timeoutMs): Promise<ClientResponse<T>> {
+    const bearer = this.token;
     try {
       const response = await fetch(`${this.baseUrl}${path}`, {
         method,
         headers: {
-          authorization: `Bearer ${this.token}`,
+          authorization: `Bearer ${bearer}`,
           'x-mnemoweave-host': this.hostId,
           ...(this.projectId === undefined ? {} : { 'x-mnemoweave-project': this.projectId }),
           ...(body === undefined ? {} : { 'content-type': 'application/json' }),
@@ -102,10 +103,31 @@ export class MemoryClient {
     return this.call('POST', '/v1/session/close', { sessionId });
   }
 
-  listMemories(query: { query?: string; limit?: number } = {}): Promise<ClientResponse<{ items: MemoryListItem[] }>> {
+  /**
+   * Browse published memories. `scope`/`projectId` narrow the candidate set before matching,
+   * and `cursor` continues a previous page. Omit `cursor` to start over.
+   */
+  listMemories(query: {
+    query?: string; limit?: number; scope?: 'all' | 'global' | 'project'; projectId?: string; cursor?: string;
+    category?: string; knowledgeType?: string; entity?: string; sort?: 'newest' | 'oldest' | 'importance';
+  } = {}): Promise<ClientResponse<{
+    items: MemoryListItem[];
+    nextCursor?: string;
+    projects?: { projectId: string; count: number }[];
+    categories?: { value: string; count: number }[];
+    knowledgeTypes?: { value: string; count: number }[];
+    entities?: { value: string; count: number }[];
+  }>> {
     const params = new URLSearchParams();
     if (query.query !== undefined) params.set('query', query.query);
     if (query.limit !== undefined) params.set('limit', String(query.limit));
+    if (query.scope !== undefined) params.set('scope', query.scope);
+    if (query.projectId !== undefined) params.set('projectId', query.projectId);
+    if (query.cursor !== undefined) params.set('cursor', query.cursor);
+    if (query.category !== undefined) params.set('category', query.category);
+    if (query.knowledgeType !== undefined) params.set('knowledgeType', query.knowledgeType);
+    if (query.entity !== undefined) params.set('entity', query.entity);
+    if (query.sort !== undefined) params.set('sort', query.sort);
     const suffix = params.toString() === '' ? '' : `?${params.toString()}`;
     return this.call('GET', `/v1/memories${suffix}`);
   }
@@ -115,8 +137,59 @@ export class MemoryClient {
     return this.call('GET', `/v1/memories/${encodeURIComponent(memoryId)}${suffix}`);
   }
 
-  editMemory(memoryId: string, input: { content: string; reason?: string; entryVersion: number }): Promise<ClientResponse<{ memoryId: string; revisionId: string; providerMemoryId: string; contentHash: string; entryVersion: number }>> {
+  /**
+   * Provider-ranked semantic search, mapped by the Server to memories this machine knows.
+   * Distinct from `listMemories`, which matches body text over a stable scan.
+   */
+  explore(query: string, limit = 20, minScore = 0): Promise<ClientResponse<{
+    query: string;
+    hits: Array<Record<string, unknown>>;
+    unregistered: number;
+    truncated: boolean;
+  }>> {
+    return this.call('POST', '/v1/memories/explore', { query, limit, minScore });
+  }
+
+  /** Relation graph over the visible catalog: structure only, no bodies. */
+  graph(query: { scope?: 'all' | 'global' | 'project'; projectId?: string; limit?: number } = {}): Promise<ClientResponse<{
+    nodes: Array<Record<string, unknown>>;
+    edges: Array<Record<string, unknown>>;
+    truncated: boolean;
+  }>> {
+    const params = new URLSearchParams();
+    if (query.scope !== undefined) params.set('scope', query.scope);
+    if (query.projectId !== undefined) params.set('projectId', query.projectId);
+    if (query.limit !== undefined) params.set('limit', String(query.limit));
+    const suffix = params.toString() === '' ? '' : `?${params.toString()}`;
+    return this.call('GET', `/v1/memories/graph${suffix}`);
+  }
+
+  /** Create a formal memory directly; the Server publishes it without a review round. */
+  createMemory(input: {
+    content: string; knowledgeType: string;
+    category?: string; importance?: number; tags?: string[]; entities?: string[];
+    scope?: 'global' | 'project'; projectId?: string; reason?: string;
+  }): Promise<ClientResponse<{ memoryId: string; revisionId: string; providerMemoryId: string; contentHash: string; entryVersion: number }>> {
+    return this.call('POST', '/v1/memories', input);
+  }
+
+  /**
+   * Edit a formal memory.
+   *
+   * This records a `local-user` decision, which claims a person made the change, so the Server
+   * requires the operator token. The client sends it when configured; without it the call is
+   * refused rather than downgraded to an unattributable host write.
+   */
+  editMemory(memoryId: string, input: {
+    content: string; reason?: string; entryVersion: number;
+    category?: string; knowledgeType?: string; importance?: number; tags?: string[];
+  }): Promise<ClientResponse<{ memoryId: string; revisionId: string; providerMemoryId: string; contentHash: string; entryVersion: number }>> {
     return this.call('PATCH', `/v1/memories/${encodeURIComponent(memoryId)}`, input);
+  }
+
+  /** Withdraw a memory: it leaves recall, its history stays readable. */
+  withdrawMemory(memoryId: string, input: { reason: string; entryVersion: number }): Promise<ClientResponse<{ memoryId: string; revisionId: string; entryVersion: number; withdrawnAt: string }>> {
+    return this.call('POST', `/v1/memories/${encodeURIComponent(memoryId)}/withdraw`, input);
   }
 
   health(): Promise<ClientResponse<{ ready: true; version: string }>> {
@@ -191,11 +264,20 @@ export interface SyncStatus {
 }
 
 export * from './render.ts';
+export * from './ensure-server.ts';
 
 export interface MemoryListItem {
   memoryId: string; revisionId: string; providerMemoryId: string;
   scope: 'project' | 'global'; projectId?: string;
   applicability: string; publishedAt: string; content: string;
+  /** Base version for an edit; 0 until the memory has been edited. */
+  entryVersion: number;
+  /** Classification of the current revision; absent means it was never recorded. */
+  knowledgeType?: string;
+  category?: string;
+  importance?: number;
+  tags?: string[];
+  entities?: string[];
 }
 
 /** What one View injection delivered; the host reads only its own rows. */

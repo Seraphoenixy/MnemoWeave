@@ -53,7 +53,11 @@ test('the DSH Host half lists, reads, edits and reports injections through a rea
   const server: Server = createHttpServer(app.app, TOKEN, OPERATOR, app.client, app.storage);
   await new Promise<void>((done) => server.listen(0, '127.0.0.1', () => done()));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  const client = new MemoryClient({ baseUrl: base, token: TOKEN, hostId: HOST, projectId: 'alpha' });
+  // Editing claims a person made the change, so the Host half carries the operator credential;
+  // the service token alone is refused by the Server.
+  // A single-user deployment: the service token plus the Host header is the whole identity, so a
+  // second credential for editing would only duplicate the same secret.
+  const client = new MemoryClient({ baseUrl: base, token: TOKEN, hostId: HOST, projectId: 'alpha', timeoutMs: 30_000 });
   const source = new MemorySource({ client, serverUrl: base, hasToken: true });
   const rpc = createRpcHandler(source);
   try {
@@ -77,9 +81,122 @@ test('the DSH Host half lists, reads, edits and reports injections through a rea
     assert.equal(edited.ok, true);
     if (edited.ok) assert.equal((edited.value as { entryVersion: number }).entryVersion, 1);
 
+    // Editing classification is part of editing the memory: a category and tags can be set on the
+    // new revision, and fields left out keep what the previous revision recorded.
+    const classified = await rpc('edit', {
+      memoryId, content: '带分类的正文。', entryVersion: 1,
+      category: 'decision', importance: 4, tags: ['发布', '回滚'],
+    });
+    assert.equal(classified.ok, true);
+    if (classified.ok) assert.equal((classified.value as { entryVersion: number }).entryVersion, 2);
+    const withClass = await rpc('memory', { memoryId });
+    assert.equal(withClass.ok, true);
+    if (withClass.ok) {
+      const record = withClass.value as { revisions: Array<{ category?: string; importance?: number; tags?: string[]; knowledgeType?: string }> };
+      const latest = record.revisions[record.revisions.length - 1]!;
+      assert.equal(latest.category, 'decision');
+      assert.equal(latest.importance, 4);
+      assert.deepEqual(latest.tags, ['发布', '回滚']);
+
+      // A body-only edit must inherit rather than clear the classification.
+      const bodyOnly = await rpc('edit', { memoryId, content: '只改正文。', entryVersion: 2 });
+      assert.equal(bodyOnly.ok, true);
+      const after = await rpc('memory', { memoryId });
+      if (after.ok) {
+        const rows = (after.value as { revisions: Array<{ category?: string; tags?: string[] }> }).revisions;
+        const newest = rows[rows.length - 1]!;
+        assert.equal(newest.category, 'decision', 'an omitted category is inherited, not cleared');
+        assert.deepEqual(newest.tags, ['发布', '回滚'], 'omitted tags are inherited');
+      }
+    }
+
     const stale = await rpc('edit', { memoryId, content: '过期基准。', entryVersion: 0 });
     assert.equal(stale.ok, false);
     if (!stale.ok) assert.equal(stale.error.code, 'VERSION_CONFLICT');
+
+    // Semantic explore ranks by the Provider's own similarity and maps each hit back to a memory
+    // this machine published, so every result can be opened. Checked while the memory is live.
+    const explored = await rpc('explore', { query: '插件编辑后的正文', limit: 10 });
+    assert.equal(explored.ok, true);
+    if (explored.ok) {
+      const found = explored.value as { query: string; hits: Array<{ memoryId: string; score: number; state: string }>; unregistered: number };
+      assert.equal(found.query, '插件编辑后的正文');
+      assert.ok(found.hits.length >= 1, 'the live memory is found');
+      assert.ok(found.hits.some(hit => hit.memoryId === memoryId), 'the hit maps back to the catalog memory');
+      assert.ok(found.hits.every(hit => Number.isFinite(hit.score)));
+      assert.equal(typeof found.unregistered, 'number');
+    }
+
+    // The graph is structure only, and the page parses it without a body to rely on.
+    const graphed = await rpc('graph', { limit: 50 });
+    assert.equal(graphed.ok, true);
+    if (graphed.ok) {
+      const found = graphed.value as { nodes: Array<{ memoryId: string }>; edges: unknown[]; truncated: boolean };
+      assert.ok(found.nodes.some(node => node.memoryId === memoryId), 'the live memory is a node');
+      assert.equal(found.truncated, false);
+      // A node carries no content: the graph must not smuggle bodies in.
+      assert.ok(found.nodes.every(node => (node as { content?: unknown }).content === undefined));
+    }
+
+    // The sync tab must resolve to a clear state on a machine with no remote configured, not to a
+    // broken pane: either "not configured" or an explicit refusal, never an empty success.
+    const sync = await rpc('sync', {});
+    if (sync.ok) {
+      const status = sync.value as { enabled: boolean; scopes: unknown[] };
+      assert.equal(status.enabled, false, 'a host with no remote reports sync as disabled');
+      assert.deepEqual(status.scopes, []);
+    } else {
+      assert.equal(sync.error!.code, 'REVIEW_REQUIRED', 'or refuses explicitly rather than pretending');
+    }
+
+    // Blank queries are refused in the Host rather than sent on.
+    const blank = await rpc('explore', { query: '   ' });
+    assert.equal(blank.ok, false);
+    if (!blank.ok) assert.equal(blank.error.code, 'INVALID_INPUT');
+
+    // A score floor drops weak matches, and an impossible floor empties the list without failing.
+    const strict = await rpc('explore', { query: '插件编辑后的正文', limit: 10, minScore: 0.99 });
+    assert.equal(strict.ok, true);
+    if (strict.ok) {
+      const found = strict.value as { hits: Array<{ score: number }>; truncated: boolean; minScore: number };
+      assert.ok(found.hits.every(hit => hit.score >= 0.99), 'a floor is a floor');
+      assert.equal(found.minScore, 0.99, 'the applied floor is echoed back');
+      assert.equal(found.truncated, false, 'an emptied list is not truncated');
+    }
+
+    for (const bad of [-0.1, 1.5, Number.NaN]) {
+      const rejected = await rpc('explore', { query: 'x', minScore: bad });
+      assert.equal(rejected.ok, false, `minScore ${bad} must be rejected`);
+    }
+
+    // Withdrawal goes through the same Host channel and needs the operator credential this client
+    // carries. The memory leaves recall and keeps every earlier revision readable.
+    const withdrawn = await rpc('withdraw', { memoryId, reason: '端到端验收：不再适用', entryVersion: 3 });
+    assert.equal(withdrawn.ok, true);
+    if (withdrawn.ok) {
+      const value = withdrawn.value as { entryVersion: number; withdrawnAt: string };
+      assert.equal(value.entryVersion, 4, 'a withdrawal is a new version');
+      assert.ok(value.withdrawnAt.length > 0);
+    }
+    const afterWithdraw = await rpc('memory', { memoryId });
+    assert.equal(afterWithdraw.ok, true);
+    if (afterWithdraw.ok) {
+      const record = afterWithdraw.value as { state: string; revisions: unknown[]; content: string };
+      assert.equal(record.state, 'superseded', 'recall and injection stop serving it');
+      // Seeded revision plus three edits; the withdrawal retires the memory without adding one.
+      assert.equal(record.revisions.length, 4, 'the earlier revisions are still there');
+      assert.equal(record.content, '只改正文。', 'the last body is still readable');
+    }
+    const repeated = await rpc('withdraw', { memoryId, reason: '重复撤回', entryVersion: 4 });
+    assert.equal(repeated.ok, false, 'a withdrawn memory cannot be withdrawn again');
+
+    // A withdrawn memory is no longer served, so explore must stop offering it.
+    const afterWithdrawal = await rpc('explore', { query: '插件编辑后的正文', limit: 10 });
+    assert.equal(afterWithdrawal.ok, true);
+    if (afterWithdrawal.ok) {
+      const found = afterWithdrawal.value as { hits: Array<{ memoryId: string }> };
+      assert.equal(found.hits.some(hit => hit.memoryId === memoryId), false, 'withdrawn memories are not surfaced');
+    }
 
     // No View yet: the host has never injected, which is a normal first run.
     assert.equal(await source.injection(), null);
@@ -101,7 +218,7 @@ test('the DSH Host half lists, reads, edits and reports injections through a rea
     assert.equal(typeof report.memoriesInjected, 'number');
     assert.equal(report.sessionId.length > 0, true);
   } finally {
-    await new Promise<void>((done) => server.close(() => done()));
+    await new Promise<void>((done) => { server.closeAllConnections(); server.close(() => done()); });
     await app.close();
   }
 });

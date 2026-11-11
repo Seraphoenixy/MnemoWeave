@@ -224,7 +224,12 @@ test('the sidebar label never throws when the locale service cannot be read', as
   }
 });
 
-interface SourceCalls { edit?: { memoryId: string; content: string; reason?: string } }
+interface SourceCalls {
+  memories?: unknown;
+  graph?: unknown;
+  edit?: { memoryId: string; content: string; reason?: string };
+  withdraw?: { memoryId: string; reason: string; entryVersion: number };
+}
 
 function stubSource(calls: SourceCalls, failure?: { code: string }): MemorySource {
   return {
@@ -232,14 +237,25 @@ function stubSource(calls: SourceCalls, failure?: { code: string }): MemorySourc
     status: async () => ({
       status: 'ok', serverUrl: 'http://127.0.0.1:4317', hostId: 'dsh', checkedAt: '2026-11-09T03:00:00.000Z',
     }),
-    memories: async (input: { query?: string; limit: number }) => ({
-      query: input.query ?? null, limit: input.limit, returned: 0, items: [],
-    }),
+    memories: async (input: Record<string, unknown>) => {
+      calls.memories = input;
+      return { query: (input['query'] as string | undefined) ?? null, limit: Number(input['limit']), returned: 0, items: [] };
+    },
     memory: async () => { throw new Error('unexpected memory read'); },
     edit: async (input: { memoryId: string; content: string; reason?: string }) => {
       calls.edit = input;
       if (failure !== undefined) throw Object.assign(new Error('server said no'), { code: failure.code });
       return { memoryId: input.memoryId, revisionId: 'r', providerMemoryId: 'p', contentHash: 'h' };
+    },
+    withdraw: async (input: { memoryId: string; reason: string; entryVersion: number }) => {
+      calls.withdraw = input;
+      if (failure !== undefined) throw Object.assign(new Error('server said no'), { code: failure.code });
+      return { memoryId: input.memoryId, revisionId: 'r2', entryVersion: input.entryVersion + 1, withdrawnAt: '2026-11-11T00:00:00.000Z' };
+    },
+    graph: async (input: { scope?: string; projectId?: string; limit?: number }) => {
+      calls.graph = input;
+      if (failure !== undefined) throw Object.assign(new Error('server said no'), { code: failure.code });
+      return { nodes: [], edges: [], truncated: false };
     },
   } as unknown as MemorySource;
 }
@@ -273,6 +289,7 @@ test('the Host RPC validates requests before the Server call and passes Server c
   assert.equal(badLimit.ok, false);
   if (badLimit.ok) throw new Error('expected a failure');
   assert.equal(badLimit.error.code, 'INVALID_INPUT');
+
 
   const unknown = await handler('revision', {});
   assert.equal(unknown.ok, false);
@@ -328,4 +345,149 @@ test('the Host RPC exposes the host-scoped injection report', async () => {
   assert.equal(result.ok, true);
   if (!result.ok) return;
   assert.equal((result.value as { rulesInjected: number }).rulesInjected, 1);
+});
+
+/**
+ * Withdrawal is a write, so it is validated like an edit: an unusable payload must fail in the
+ * Host instead of reaching the Server. The reason is required because the history keeps it.
+ */
+test('withdrawal requires a reason and a base version before reaching the Server', async () => {
+  const calls: SourceCalls = {};
+  const handler = createRpcHandler(stubSource(calls));
+  const memoryId = '11111111-1111-4111-8111-111111111111';
+
+  for (const payload of [
+    { memoryId: 'memory-1', reason: 'x', entryVersion: 0 },
+    { memoryId, reason: '   ', entryVersion: 0 },
+    { memoryId, entryVersion: 0 },
+    { memoryId, reason: 'x' },
+    { memoryId, reason: 'x', entryVersion: -1 },
+  ]) {
+    const result = await handler('withdraw', payload);
+    assert.equal(result.ok, false, `expected rejection for ${JSON.stringify(payload)}`);
+    if (result.ok) continue;
+    assert.equal(result.error.code, 'INVALID_INPUT');
+  }
+  assert.equal(calls.withdraw, undefined, 'invalid payloads must not reach the Server');
+
+  const accepted = await handler('withdraw', { memoryId, reason: '不再适用', entryVersion: 3 });
+  assert.equal(accepted.ok, true);
+  if (!accepted.ok) throw new Error('expected success');
+  assert.deepEqual(calls.withdraw, { memoryId, reason: '不再适用', entryVersion: 3 });
+  assert.equal((accepted.value as { entryVersion: number }).entryVersion, 4);
+});
+
+test('a withdrawal the Server refuses keeps the Server code', async () => {
+  const rejected = createRpcHandler(stubSource({}, { code: 'VERSION_CONFLICT' }));
+  const result = await rejected('withdraw', { memoryId: '11111111-1111-4111-8111-111111111111', reason: 'x', entryVersion: 0 });
+  assert.equal(result.ok, false);
+  if (result.ok) throw new Error('expected a failure');
+  assert.equal(result.error.code, 'VERSION_CONFLICT');
+});
+
+/**
+ * Classification is editable, and optional on the wire: an omitted field is inherited by the new
+ * revision, so an invalid value must be refused rather than silently dropped.
+ */
+test('classification on an edit is validated before the Server call', async () => {
+  const calls: SourceCalls = {};
+  const handler = createRpcHandler(stubSource(calls));
+  const memoryId = '11111111-1111-4111-8111-111111111111';
+
+  for (const payload of [
+    { memoryId, content: 'x', entryVersion: 0, category: 'nonsense' },
+    { memoryId, content: 'x', entryVersion: 0, knowledgeType: 'Nope' },
+    { memoryId, content: 'x', entryVersion: 0, importance: 0 },
+    { memoryId, content: 'x', entryVersion: 0, importance: 6 },
+    { memoryId, content: 'x', entryVersion: 0, tags: ['ok', '   '] },
+    { memoryId, content: 'x', entryVersion: 0, tags: Array.from({ length: 21 }, (_, index) => `t${index}`) },
+  ]) {
+    const result = await handler('edit', payload);
+    assert.equal(result.ok, false, `expected rejection for ${JSON.stringify(payload).slice(0, 120)}`);
+    if (result.ok) continue;
+    assert.equal(result.error.code, 'INVALID_INPUT');
+  }
+  assert.equal(calls.edit, undefined, 'invalid classification must not reach the Server');
+
+  const accepted = await handler('edit', {
+    memoryId, content: '带分类的正文', entryVersion: 0,
+    category: 'decision', importance: 4, tags: [' 发布 ', '回滚'],
+  });
+  assert.equal(accepted.ok, true);
+  assert.deepEqual(calls.edit, {
+    memoryId, content: '带分类的正文', entryVersion: 0,
+    category: 'decision', importance: 4, tags: ['发布', '回滚'],
+  }, 'tags are trimmed and the classification travels on');
+
+  // Omitting the fields must leave them out entirely, which is what makes them inherited.
+  const plain = await handler('edit', { memoryId, content: '只改正文', entryVersion: 1 });
+  assert.equal(plain.ok, true);
+  assert.deepEqual(calls.edit, { memoryId, content: '只改正文', entryVersion: 1 });
+});
+
+/**
+ * The graph request is validated in the Host before any call.
+ *
+ * Its bounds mirror the Server's, and a scope of `project` without a project is refused rather
+ * than silently treating it as `all` — which would show every project's memories under a project
+ * heading.
+ */
+test('the graph request is validated before it reaches the Server', async () => {
+  const calls: SourceCalls = {};
+  const handler = createRpcHandler(stubSource(calls));
+
+  const defaults = await handler('graph', {});
+  assert.equal(defaults.ok, true);
+  assert.deepEqual(calls.graph, {}, 'no bounds means the Server defaults apply');
+
+  const scoped = await handler('graph', { scope: 'project', projectId: '  alpha  ', limit: 50 });
+  assert.equal(scoped.ok, true);
+  assert.deepEqual(calls.graph, { scope: 'project', projectId: 'alpha', limit: 50 }, 'the project is trimmed');
+
+  for (const payload of [
+    { scope: 'everything' },
+    { scope: 'project' },
+    { scope: 'project', projectId: '   ' },
+    { projectId: 42 },
+    { limit: 0 },
+    { limit: 501 },
+    { limit: 1.5 },
+  ]) {
+    const result = await handler('graph', payload);
+    assert.equal(result.ok, false, `expected rejection for ${JSON.stringify(payload)}`);
+    if (result.ok) continue;
+    assert.equal(result.error.code, 'INVALID_INPUT');
+  }
+  assert.deepEqual(calls.graph, { scope: 'project', projectId: 'alpha', limit: 50 }, 'a rejected request never reaches the Server');
+});
+
+/**
+ * Every validated filter must reach the source.
+ *
+ * A handler that validates a field but forgets to forward it is worse than one that rejects it:
+ * the request succeeds and returns unfiltered data, so the control silently matches everything.
+ * That is exactly what happened to the category, entity and sort controls.
+ */
+test('every list filter the Host validates is forwarded to the source', async () => {
+  const calls: SourceCalls = {};
+  const handler = createRpcHandler(stubSource(calls));
+
+  const result = await handler('memories', {
+    limit: 20, scope: 'project', projectId: 'alpha',
+    category: 'decision', knowledgeType: 'Practice', entity: 'MnemoWeave', sort: 'importance',
+    query: '关键词', cursor: 'abc',
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(calls.memories, {
+    limit: 20, scope: 'project', projectId: 'alpha',
+    category: 'decision', knowledgeType: 'Practice', entity: 'MnemoWeave', sort: 'importance',
+    query: '关键词', cursor: 'abc',
+  }, 'no validated field is dropped on the way to the source');
+
+  // And the defaults stay defaults: nothing is invented when the caller asks for nothing.
+  const plain = await handler('memories', {});
+  assert.equal(plain.ok, true);
+  const untouched = calls.memories as Record<string, unknown>;
+  assert.deepEqual(Object.keys(untouched), ['limit'], 'only the page size is supplied');
+  assert.equal(typeof untouched['limit'], 'number');
 });

@@ -96,7 +96,16 @@ export class SqliteRuntime implements RuntimeRepository {
     // No per-host grants any more: the only scope rule left is an explicitly registered project.
     if (projectId !== undefined && !this.registered(projectId)) throw new MnemoWeaveError('UNAUTHORIZED');
   }
-  /** Persistent capture task, independent Run and Receipt; unknown model outcomes are safe to retry. */
+  /**
+   * Runs retention housekeeping for runtime capture.
+   *
+   * The Server no longer extracts candidates from session events: extraction was a model call,
+   * and the decision is that semantic judgement belongs to the host's own session model, which
+   * proposes candidates through `remember` while the conversation runs. A queued capture task
+   * is therefore reported as `awaiting_model` — meaning the host's model, not a Server-side one.
+   * The gateway parameter stays so a caller cannot silently start extraction again by wiring a
+   * route; it is always passed `undefined` from composition.
+   */
   async tick(gateway: CaptureGateway | undefined): Promise<void> {
     const now = Date.now();
     this.transaction(() => {

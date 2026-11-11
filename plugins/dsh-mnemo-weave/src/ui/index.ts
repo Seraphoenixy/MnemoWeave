@@ -9,12 +9,18 @@
  */
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { MemoryClient } from '../../../../packages/client/src/index.ts';
+import { MemoryClient, ensureServer, prewarmBudgetMs } from '../../../../packages/client/src/index.ts';
 import { createRpcHandler } from './rpc.ts';
+import { SettingsService } from './settings.ts';
 import { MemorySource } from './memory-source.ts';
 import { BUNDLE_NAME, isHostArtifact, reloadBundle, shouldWatch, watchLib } from './hot-reload.ts';
 import type { PluginManagerLike } from './hot-reload.ts';
 import { isRecord, RPC_CHANNEL } from '../shared/contract.ts';
+import {
+  DEFAULT_HOST_ID, DEFAULT_SERVER_URL, MIN_TOKEN_LENGTH, describeHostConfig, readPreferences,
+  resolveHostConfig, writePreferences,
+} from '../shared/host-config.js';
+import type { HostConfigDescription } from '../shared/host-config.js';
 import type { HostContext } from './types.ts';
 
 export const name = 'dsh-mnemo-weave/ui';
@@ -23,39 +29,41 @@ export const name = 'dsh-mnemo-weave/ui';
 // `cannot get property "webServer" without inject` and the entry fails.
 export const inject = ['connection', 'webServer'] as const;
 
-export const DEFAULT_SERVER_URL = 'http://127.0.0.1:4317';
-export const MIN_TOKEN_LENGTH = 24;
-/** The Server scopes reads and events by this header; DSH is the identity when none is configured. */
-export const DEFAULT_HOST_ID = 'dsh';
-const LOOPBACK = /^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d{1,5})?\/?$/i;
+export { DEFAULT_HOST_ID, DEFAULT_SERVER_URL, MIN_TOKEN_LENGTH };
 
 export interface Config {
   serverUrl?: string;
   token?: string;
   hostId?: string;
+  projectId?: string;
+  timeoutMs?: number;
 }
 
 export interface ResolvedConfig {
   serverUrl: string;
   token: string | undefined;
+  /** Credential for actions that claim a person performed them; absent means they are refused. */
   hostId: string;
+  projectId: string | undefined;
+  injectTimeoutMs: number;
+  autoStart: boolean;
+  description: HostConfigDescription;
 }
 
-function pickString(value: unknown): string | undefined {
-  return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined;
-}
-
-/** Entry config first, environment second: a profile can keep the token out of its patch file. */
+/**
+ * Entry config, stored preferences and environment, resolved by the shared module so the page and
+ * the injection hook always read the same values.
+ */
 export function resolveConfig(config: unknown, env: NodeJS.ProcessEnv = process.env): ResolvedConfig {
-  const record = isRecord(config) ? config : {};
-  const serverUrl = (pickString(record['serverUrl']) ?? DEFAULT_SERVER_URL).replace(/\/$/, '');
-  if (!LOOPBACK.test(serverUrl)) {
-    throw new Error('dsh-mnemo-weave serverUrl must be a loopback http(s) URL');
-  }
+  const resolved = resolveHostConfig(config, env, readPreferences(env));
   return {
-    serverUrl,
-    token: pickString(record['token']) ?? pickString(env.MNEMOWEAVE_TOKEN),
-    hostId: pickString(record['hostId']) ?? pickString(env.MNEMOWEAVE_HOST_ID) ?? DEFAULT_HOST_ID,
+    serverUrl: resolved.serverUrl,
+    token: resolved.token,
+    hostId: resolved.hostId,
+    projectId: resolved.projectId,
+    injectTimeoutMs: resolved.injectTimeoutMs,
+    autoStart: resolved.autoStart,
+    description: describeHostConfig(resolved),
   };
 }
 
@@ -120,12 +128,49 @@ export function apply(ctx: HostContext, config?: unknown): void {
   }
   let client: MemoryClient;
   try {
-    client = new MemoryClient({ baseUrl: resolved.serverUrl, token: resolved.token, hostId: resolved.hostId });
+    client = new MemoryClient({
+      baseUrl: resolved.serverUrl, token: resolved.token, hostId: resolved.hostId,
+    });
   } catch (error) {
     warn(`configuration rejected: ${String((error as Error).message).slice(0, 200)}`);
     return;
   }
-  const source = new MemorySource({ client, serverUrl: resolved.serverUrl, hasToken: true });
+  // One configuration service for the page; it also owns the switch to a newly saved connection.
+  const settings = new SettingsService({
+    entryConfig: config,
+    onConnection: snapshot => {
+      // Adopt the client only after a save that already tested it, so the read path and the
+      // settings page never point at different Servers.
+      source.useConnection({
+        client: snapshot.client, serverUrl: snapshot.serverUrl, hostId: snapshot.hostId, hasToken: true,
+        sources: { ...settings.describe().sources },
+      });
+    },
+  });
+  // The local Server is hosted by the "MnemoWeave Local Server" scheduled task, so DSH may be
+  // opened before it. Prewarm in the background: a refused connection wakes the task once, and
+  // the memory page shows the phase while it comes up. Failures never abort the DSH boot.
+  const ensure = (budgetMs: number) => {
+    const live = settings.snapshot;
+    return ensureServer({
+      baseUrl: live.serverUrl,
+      token: live.token!,
+      hostId: live.hostId,
+      probeTimeoutMs: 1_000,
+      waitMs: budgetMs,
+    });
+  };
+  void ensure(prewarmBudgetMs())
+    .then(probe => {
+      if (probe.state === 'ready') info('本机 Server 已连接');
+      else if (probe.state === 'starting') info(`本机 Server 正在启动：${probe.detail}`);
+      else warn(`本机 Server 不可用：${probe.reason}（${probe.detail}）`);
+    })
+    .catch(error => warn(`本机 Server 探测异常：${error instanceof Error ? error.message : String(error)}`));
+  const source = new MemorySource({
+    client, serverUrl: resolved.serverUrl, hasToken: true, ensureServer: ensure,
+    sources: { ...resolved.description.sources },
+  });
   ctx.effect(() => {
     const connection = ctx.connection;
     const webServer = ctx.get('webServer');
@@ -135,7 +180,7 @@ export function apply(ctx: HostContext, config?: unknown): void {
     const owner = ctx.extend === undefined ? ctx : ctx.extend({ webServer });
     const target = owner.connection;
     if (target === undefined) return;
-    const dispose = target.rpc.handle(RPC_CHANNEL, createRpcHandler(source));
+    const dispose = target.rpc.handle(RPC_CHANNEL, createRpcHandler(source, settings));
     return () => { if (typeof dispose === 'function') (dispose as () => void)(); };
   }, 'dsh-mnemo-weave: memory channel');
 }

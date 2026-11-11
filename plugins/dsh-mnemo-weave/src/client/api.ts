@@ -1,5 +1,5 @@
 import type {
-  RpcResult, UiArchive, UiConfigView, UiEditInput, UiEditResult, UiInjection, UiMemoryDetail, UiMemoryList, UiRule, UiStatus, UiSyncPass, UiSyncStatus,
+  MemoriesRequest, RpcResult, UiArchive, UiCreateInput, UiCreateResult, UiConfigView, UiConnectionTest, UiEditInput, UiEditResult, UiExplore, UiGraph, UiInjection, UiMemoryDetail, UiMemoryList, UiRule, UiSettings, UiStatus, UiSyncPass, UiSyncStatus, UiWakeTest, UiWithdrawInput, UiWithdrawResult,
 } from '../shared/contract.ts';
 import { RPC_CHANNEL } from '../shared/contract.ts';
 import type { ClientConnection } from './dsh-types.ts';
@@ -29,14 +29,27 @@ export function createApi(connection: ClientConnection) {
   return {
     status: (signal?: AbortSignal): Promise<UiStatus> => call<UiStatus>('status', {}, signal),
     config: (signal?: AbortSignal): Promise<UiConfigView> => call<UiConfigView>('config', {}, signal),
-    memories: (input: { query?: string; limit: number }, signal?: AbortSignal): Promise<UiMemoryList> => call<UiMemoryList>('memories', input, signal),
-    memory: (memoryId: string, signal?: AbortSignal): Promise<UiMemoryDetail> => call<UiMemoryDetail>('memory', { memoryId }, signal),
+    memories: (input: MemoriesRequest, signal?: AbortSignal): Promise<UiMemoryList> => call<UiMemoryList>('memories', input, signal),
+    /** Omit `revisionId` for the current revision; supply one to read a historical version. */
+    memory: (memoryId: string, revisionId?: string, signal?: AbortSignal): Promise<UiMemoryDetail> => call<UiMemoryDetail>('memory', { memoryId, ...(revisionId === undefined ? {} : { revisionId }) }, signal),
+    create: (input: UiCreateInput, signal?: AbortSignal): Promise<UiCreateResult> => call<UiCreateResult>('create', input, signal),
     edit: (input: UiEditInput, signal?: AbortSignal): Promise<UiEditResult> => call<UiEditResult>('edit', input, signal),
+    withdraw: (input: UiWithdrawInput, signal?: AbortSignal): Promise<UiWithdrawResult> => call<UiWithdrawResult>('withdraw', input, signal),
+    explore: (input: { query: string; limit?: number; minScore?: number }, signal?: AbortSignal): Promise<UiExplore> => call<UiExplore>('explore', input, signal),
+    graph: (input: { scope?: 'all' | 'global' | 'project'; projectId?: string; limit?: number }, signal?: AbortSignal): Promise<UiGraph> => call<UiGraph>('graph', input, signal),
     injection: (signal?: AbortSignal): Promise<UiInjection | null> => call<UiInjection | null>('injection', {}, signal),
     rules: (signal?: AbortSignal): Promise<UiRule[]> => call<UiRule[]>('rules', {}, signal),
     archives: (signal?: AbortSignal): Promise<UiArchive[]> => call<UiArchive[]>('archives', {}, signal),
     sync: (signal?: AbortSignal): Promise<UiSyncStatus> => call<UiSyncStatus>('sync', {}, signal),
     syncRefresh: (signal?: AbortSignal): Promise<UiSyncPass> => call<UiSyncPass>('syncRefresh', {}, signal),
+    /** Grouped settings with the source of each value; never carries the token. */
+    settings: (signal?: AbortSignal): Promise<UiSettings> => call<UiSettings>('settings', {}, signal),
+    saveInterface: (patch: { defaultTab?: string; defaultScope?: string; pageSize?: number }, signal?: AbortSignal): Promise<UiSettings> => call<UiSettings>('saveInterface', patch, signal),
+    saveConnection: (input: { serverUrl?: string; hostId?: string }, signal?: AbortSignal): Promise<UiSettings> => call<UiSettings>('saveConnection', input, signal),
+    saveInjection: (input: { projectId?: string | null; injectTimeoutMs?: number }, signal?: AbortSignal): Promise<UiSettings> => call<UiSettings>('saveInjection', input, signal),
+    saveAutoStart: (enabled: boolean, signal?: AbortSignal): Promise<UiSettings> => call<UiSettings>('saveAutoStart', { enabled }, signal),
+    testConnection: (input: { serverUrl?: string }, signal?: AbortSignal): Promise<UiConnectionTest> => call<UiConnectionTest>('testConnection', input, signal),
+    testWake: (input: { serverUrl?: string }, signal?: AbortSignal): Promise<UiWakeTest> => call<UiWakeTest>('testWake', input, signal),
   };
 }
 

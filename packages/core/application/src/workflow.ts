@@ -1,13 +1,12 @@
 import { randomUUID } from 'node:crypto';
-import { MnemoWeaveError, SemanticAssessment, publicError } from '../../contracts/src/index.ts';
-import type { ModelGateway, WorkflowRepository, WriteProvider, Job } from './workflow-ports.ts';
+import { MnemoWeaveError, publicError } from '../../contracts/src/index.ts';
+import type { WorkflowRepository, WriteProvider, Job } from './workflow-ports.ts';
 import type { VersionExecutor } from './version-ports.ts';
 
-/** Background coordinator. Model calls are restricted to the declared candidate-review component. */
+/** Background coordinator. It never calls a model: semantic judgement belongs to the host's own session. */
 export class MemoryWorkflow {
   private readonly repository: WorkflowRepository;
   private readonly provider: WriteProvider;
-  private readonly gateway: ModelGateway | undefined;
   private readonly leaseMs: number;
   private readonly versions: VersionExecutor | undefined;
   private readonly reviewConcurrency: number;
@@ -18,9 +17,9 @@ export class MemoryWorkflow {
   private timer: ReturnType<typeof setInterval> | undefined;
   private active: Promise<void> | undefined;
   private readonly background: (() => Promise<void>) | undefined;
-  constructor(repository: WorkflowRepository, provider: WriteProvider, gateway?: ModelGateway, leaseMs = 90000, versions?: VersionExecutor, reviewConcurrency = 2, admit?: () => boolean, retentionIntervalMs = 3_600_000, background?: () => Promise<void>) {
+  constructor(repository: WorkflowRepository, provider: WriteProvider, leaseMs = 90000, versions?: VersionExecutor, reviewConcurrency = 2, admit?: () => boolean, retentionIntervalMs = 3_600_000, background?: () => Promise<void>) {
     this.background = background;
-    this.repository = repository; this.provider = provider; this.gateway = gateway; this.leaseMs = leaseMs; this.versions = versions; this.reviewConcurrency = Math.max(1, reviewConcurrency); this.admit = admit; this.retentionIntervalMs = Math.max(0, retentionIntervalMs);
+    this.repository = repository; this.provider = provider; this.leaseMs = leaseMs; this.versions = versions; this.reviewConcurrency = Math.max(1, reviewConcurrency); this.admit = admit; this.retentionIntervalMs = Math.max(0, retentionIntervalMs);
   }
   start(intervalMs = 500): void {
     if (this.timer) return;
@@ -80,10 +79,16 @@ export class MemoryWorkflow {
     this.lastRetentionSweepMs = now;
     try { sweep(new Date(now)); } catch { process.stderr.write(JSON.stringify({ event: 'retention_sweep_failed' }) + String.fromCharCode(10)); }
   }
+  /**
+   * Candidate review is deterministic. The Server never calls an external model: semantic
+   * judgement belongs to the host's own session model, which decides what to submit through
+   * the injection guidance and the `remember` tool. What remains here is exactly what a
+   * machine can prove without a model — identical bodies, truncated lookups, explicit
+   * operator intent — and everything else is parked for a human.
+   */
   private async review(id: string, owner: string): Promise<void> {
     const candidate = this.repository.get(id);
     if (candidate.request.change) { this.repository.review(id,'human','rules','Version/replacement/conflict intent requires explicit operator review.',null,owner); return; }
-    let assessment = null;
     try {
       const exact = await this.provider.inspectExact(candidate.request.content);
       if (!exact.complete) { this.repository.review(id, 'human', 'rules', 'Duplicate lookup truncated; cannot decide.', null, owner); return; }
@@ -91,25 +96,11 @@ export class MemoryWorkflow {
         const duplicate = this.repository.isKnownDuplicate(id, exact.matches.map(memory => memory.id));
         this.repository.review(id, duplicate ? 'reject' : 'human', 'rules', duplicate ? 'Identical memory with the same known applicability already exists.' : 'Identical content exists, but applicability/evidence differs or is unknown; preserve both for review.', null, owner); return;
       }
-      const related = await this.provider.recall({ query: candidate.request.content.slice(0, 2000), limit: 20 });
-      if (!this.gateway) { this.repository.review(id, 'human', 'rules', 'Semantic Model Gateway is not configured.', null, owner); return; }
-      assessment = SemanticAssessment.parse(await this.gateway.assess('candidate-review', candidate, related.memories));
-      const values = Object.values(assessment.checks);
-      const important = candidate.request.knowledgeType === 'Architecture' || candidate.request.scope === 'global';
-      const uncertain = values.some(check => check.result === 'uncertain');
-      const unverified = candidate.request.provenance.verificationStatus !== 'verified' || !candidate.request.provenance.lastVerified;
-      if (important || unverified || uncertain || assessment.requiresHuman || assessment.conflict !== 'none') {
-        this.repository.review(id, 'human', 'auto-review', assessment.summary, assessment, owner);
-      } else if (assessment.checks.reuse.result === 'fail') {
-        this.repository.review(id, 'reject', 'auto-review', assessment.summary, assessment, owner);
-      } else if (values.every(check => check.result === 'pass')) {
-        this.repository.review(id, 'approve', 'auto-review', assessment.summary, assessment, owner);
-      } else {
-        this.repository.review(id, 'human', 'auto-review', assessment.summary, assessment, owner);
-      }
+      // No duplicate found, and there is no model here to judge anything further.
+      this.repository.review(id, 'human', 'rules', 'No automatic semantic review: the Server does not call a model. A person must approve or reject this candidate.', null, owner);
     } catch {
-      // A model/refusal/Provider failure never becomes implicit approval.
-      this.repository.review(id, 'human', 'auto-review', 'Checks unavailable, invalid or inconclusive; manual review required.', assessment, owner);
+      // A Provider failure never becomes implicit approval.
+      this.repository.review(id, 'human', 'auto-review', 'Checks unavailable or inconclusive; manual review required.', null, owner);
     }
   }
   private async write(job: Job): Promise<void> {

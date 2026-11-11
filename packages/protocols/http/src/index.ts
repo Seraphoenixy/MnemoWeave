@@ -1,10 +1,14 @@
 import { PinInput, RuntimeContextInput, RuleCreate, RuleEdit } from '../../../core/contracts/src/index.ts';
-import type { MemoryListRecord, MemoryEditRecord, RuntimeContext, PinRecord } from '../../../core/contracts/src/index.ts';
+import type { MemoryCreateRecord, MemoryGraphRecord, MemoryListRecord, MemoryEditRecord, RuntimeContext, PinRecord } from '../../../core/contracts/src/index.ts';
 import { createServer } from 'node:http';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import type { MemoryApplication } from '../../../core/application/src/index.ts';
-import { MnemoWeaveError, openapi, publicError, statusForCode } from '../../../core/contracts/src/index.ts';
+import { ExploreInput, MnemoWeaveError, openapi, publicError, statusForCode } from '../../../core/contracts/src/index.ts';
 import type { ArchiveCreateInput, ArchiveListRecord, ArchiveRecordValue, InjectionReportRecord, RuleCreateInput, RuleEditInput, RuleListRecord, RuleRecordValue, StorageStatusRecord, SyncRefreshValue, SyncStatusValue, ViewRecord } from '../../../core/contracts/src/index.ts';
+
+/** Liveness identity: hosts require these fields before trusting the address as MnemoWeave. */
+export const LIVE_SERVICE = 'mnemoweave';
+export const LIVE_PROTOCOL = 1;
 
 /** A host may declare its project once per request; the body may repeat it but not contradict it. */
 const PROJECT_HEADER = 'x-mnemoweave-project';
@@ -32,7 +36,10 @@ export const httpRoutes: ReadonlyArray<{ method: 'GET' | 'POST' | 'PATCH'; path:
   { method: 'GET', path: '/v1/reviews/due' },
   { method: 'GET', path: '/v1/candidates/{candidateId}' },
   { method: 'GET', path: '/v1/memories' },
+  { method: 'POST', path: '/v1/memories' },
   { method: 'GET', path: '/v1/memories/{memoryId}' },
+  { method: 'GET', path: '/v1/memories/graph' },
+  { method: 'POST', path: '/v1/memories/explore' },
   { method: 'GET', path: '/v1/conflicts/{caseId}' },
   { method: 'POST', path: '/v1/recall' },
   { method: 'POST', path: '/v1/view' },
@@ -46,6 +53,7 @@ export const httpRoutes: ReadonlyArray<{ method: 'GET' | 'POST' | 'PATCH'; path:
   { method: 'POST', path: '/v1/versions/cancel' },
   { method: 'POST', path: '/v1/reviews/complete' },
   { method: 'PATCH', path: '/v1/memories/{memoryId}' },
+  { method: 'POST', path: '/v1/memories/{memoryId}/withdraw' },
   { method: 'GET', path: '/v1/sync/status' },
   { method: 'POST', path: '/v1/sync/refresh' },
   { method: 'GET', path: '/v1/injections/latest' },
@@ -70,8 +78,26 @@ export interface ClientHttpEndpoints {
   register(projectId: string): void;
   closeSession(hostId: string, sessionId: string): void;
   events(hostId: string, input: unknown): { status: 'stored' | 'replayed' | 'skipped'; eventId: string };
-  memories(query: { query?: string; limit: number }): Promise<MemoryListRecord>;
+  memories(query: {
+    query?: string; limit: number; scope?: 'all' | 'global' | 'project'; projectId?: string; cursor?: string;
+    /** Keep only memories whose current revision carries this classification. */
+    category?: 'preference' | 'decision' | 'fact' | 'insight' | 'context' | 'general';
+    knowledgeType?: 'Concept' | 'Practice' | 'Architecture' | 'Troubleshooting' | 'Constraint' | 'Procedure' | 'Reference';
+    /** Case-insensitive match against an entity named by the current revision. */
+    entity?: string;
+    /** Scan order; a cursor only applies to the order it was issued for. */
+    sort?: 'newest' | 'oldest' | 'importance';
+  }): Promise<MemoryListRecord>;
+  /** Direct creation: publishes a formal memory without a review round. */
+  createMemory?(input: unknown): Promise<MemoryCreateRecord>;
+  /** Relation graph over the visible catalog: structure only, no bodies. */
+  graph?(hostId: string, query: { scope: 'all' | 'global' | 'project'; projectId?: string; limit: number }): Promise<MemoryGraphRecord>;
+  /** Provider-ranked search, mapped to memories this machine knows. */
+  recall?(hostId: string, input: unknown): Promise<{ memories: Array<{ id: string; content: string; score?: number | undefined; superseded?: boolean | undefined }> }>;
+  explore?(hostId: string, input: { query: string; limit: number; minScore?: number }): Promise<{ query: string; hits: Array<Record<string, unknown>>; unregistered: number; truncated: boolean }>;
   editMemory(memoryId: string, input: { content: string; reason?: string; entryVersion: number }): Promise<MemoryEditRecord>;
+  /** Withdraw a memory: it leaves recall and injection, its history stays readable. */
+  withdrawMemory?(memoryId: string, input: { reason: string; entryVersion: number }): Promise<{ memoryId: string; revisionId: string; entryVersion: number; withdrawnAt: string }>;
   /** Operator diagnostics; absent when sync is not configured. */
   syncStatus?(): Promise<SyncStatusValue>;
   syncRefresh?(): Promise<SyncRefreshValue>;
@@ -91,6 +117,13 @@ export function createHttpServer(app: MemoryApplication, token: string, operator
   if (operatorToken !== undefined && (operatorToken.length < 24 || operatorToken === token)) throw new Error('Independent operator token required');
   const expected = Buffer.from(`Bearer ${token}`);
   const operatorExpected = operatorToken ? Buffer.from(`Bearer ${operatorToken}`) : undefined;
+  /**
+   * User-facing writes are gated by the operator token, not by a confirmation value.
+   *
+   * A confirmation issued to the same caller that consumes it proves nothing: any holder of the
+   * service token could ask for one and use it, so the audit trail would still claim a person
+   * acted when only code did. The check lives on the routes themselves.
+   */
   return createServer(async (req, res) => {
     const traceId = randomUUID();
     const reply = (status: number, value: unknown) => {
@@ -108,7 +141,10 @@ export function createHttpServer(app: MemoryApplication, token: string, operator
         return host;
       };
 
-      if (req.method === 'GET' && req.url === '/health/live') return reply(200, { live: true });
+      // The identity fields let a host tell "our Server answered" apart from "some other
+      // program holds this port". A bare `{live:true}` cannot: any process that returns 200
+      // on the loopback port would pass, and the host would then send its token to it.
+      if (req.method === 'GET' && req.url === '/health/live') return reply(200, { live: true, service: LIVE_SERVICE, protocol: LIVE_PROTOCOL });
       if (req.method === 'GET' && req.url === '/health/ready') return reply(200, await app.health());
       if (req.method === 'GET' && req.url === '/openapi.json') return reply(200, openapi);
       if (req.method === 'GET' && req.url === '/v1/storage') {
@@ -179,26 +215,89 @@ export function createHttpServer(app: MemoryApplication, token: string, operator
       }
       const candidateMatch = /^\/v1\/candidates\/([a-f0-9-]+)$/.exec(req.url ?? '');
       if (req.method === 'GET' && candidateMatch) return reply(200, await app.candidateStatus({ candidateId: candidateMatch[1] }));
-      if (req.method === 'GET' && req.url !== undefined && req.url.startsWith('/v1/memories?')) {
+      if (req.method === 'GET' && req.url !== undefined && (req.url === '/v1/memories' || req.url.startsWith('/v1/memories?'))) {
         if (!client) throw new MnemoWeaveError('REVIEW_REQUIRED');
         const params = new URL(req.url, 'http://localhost').searchParams;
-        const query = params.get('query')?.trim();
+        const query = params.get('query')?.trim() || undefined;
         const rawLimit = params.get('limit');
         const limit = rawLimit === null ? 50 : Number(rawLimit);
-        if (!Number.isInteger(limit) || limit < 1 || limit > 200 || query !== undefined && query.length > 500) throw new MnemoWeaveError('INVALID_INPUT');
-        return reply(200, await client.memories({ ...(query ? { query } : {}), limit }));
-      }
-      if (req.method === 'GET' && req.url === '/v1/memories') {
-        if (!client) throw new MnemoWeaveError('REVIEW_REQUIRED');
-        return reply(200, await client.memories({ limit: 50 }));
+        if (!Number.isInteger(limit) || limit < 1 || limit > 200 || (query !== undefined && query.length > 500)) throw new MnemoWeaveError('INVALID_INPUT');
+        const rawScope = params.get('scope');
+        const scope = (rawScope === null ? 'all' : rawScope) as 'all' | 'global' | 'project';
+        if (scope !== 'all' && scope !== 'global' && scope !== 'project') throw new MnemoWeaveError('INVALID_INPUT');
+        const projectId = params.get('projectId')?.trim() || undefined;
+        if (projectId !== undefined && projectId.length > 200) throw new MnemoWeaveError('INVALID_INPUT');
+        // A project filter without a project would silently list everything, so reject it.
+        if (scope === 'project' && projectId === undefined) throw new MnemoWeaveError('INVALID_INPUT');
+        const cursor = params.get('cursor')?.trim() || undefined;
+        if (cursor !== undefined && cursor.length > 500) throw new MnemoWeaveError('INVALID_INPUT');
+        // Classification filters are validated here so an unknown value is a 400, not a silently
+        // empty list.
+        const CATEGORIES = ['preference', 'decision', 'fact', 'insight', 'context', 'general'] as const;
+        const KNOWLEDGE = ['Concept', 'Practice', 'Architecture', 'Troubleshooting', 'Constraint', 'Procedure', 'Reference'] as const;
+        const rawCategory = params.get('category')?.trim() || undefined;
+        if (rawCategory !== undefined && !(CATEGORIES as readonly string[]).includes(rawCategory)) throw new MnemoWeaveError('INVALID_INPUT');
+        const rawKnowledge = params.get('knowledgeType')?.trim() || undefined;
+        if (rawKnowledge !== undefined && !(KNOWLEDGE as readonly string[]).includes(rawKnowledge)) throw new MnemoWeaveError('INVALID_INPUT');
+        const rawEntity = params.get('entity')?.trim() || undefined;
+        if (rawEntity !== undefined && rawEntity.length > 200) throw new MnemoWeaveError('INVALID_INPUT');
+        const SORTS = ['newest', 'oldest', 'importance'] as const;
+        const rawSort = params.get('sort')?.trim() || undefined;
+        if (rawSort !== undefined && !(SORTS as readonly string[]).includes(rawSort)) throw new MnemoWeaveError('INVALID_INPUT');
+        return reply(200, await client.memories({
+          ...(query === undefined ? {} : { query }), limit, scope,
+          ...(projectId === undefined ? {} : { projectId }),
+          ...(cursor === undefined ? {} : { cursor }),
+          ...(rawCategory === undefined ? {} : { category: rawCategory as (typeof CATEGORIES)[number] }),
+          ...(rawKnowledge === undefined ? {} : { knowledgeType: rawKnowledge as (typeof KNOWLEDGE)[number] }),
+          ...(rawEntity === undefined ? {} : { entity: rawEntity }),
+          ...(rawSort === undefined ? {} : { sort: rawSort as (typeof SORTS)[number] }),
+        }));
       }
       const memoryMatch = /^\/v1\/memories\/([a-f0-9-]+)(?:\?revisionId=([a-f0-9-]+))?$/.exec(req.url ?? '');
       if (req.method === 'GET' && memoryMatch) return reply(200, await app.readMemory({ memoryId: memoryMatch[1], ...(memoryMatch[2] ? { revisionId: memoryMatch[2] } : {}) }));
+      if (req.method === 'GET' && (req.url ?? '').startsWith('/v1/memories/graph')) {
+        if (!client?.graph) throw new MnemoWeaveError('REVIEW_REQUIRED');
+        const params = new URL(req.url ?? '', 'http://127.0.0.1').searchParams;
+        const graphScope = params.get('scope') ?? 'all';
+        if (graphScope !== 'all' && graphScope !== 'global' && graphScope !== 'project') throw new MnemoWeaveError('INVALID_INPUT');
+        const graphProject = params.get('projectId')?.trim() || undefined;
+        if (graphScope === 'project' && graphProject === undefined) throw new MnemoWeaveError('INVALID_INPUT');
+        const rawGraphLimit = params.get('limit');
+        const graphLimit = rawGraphLimit === null ? 200 : Number(rawGraphLimit);
+        if (!Number.isInteger(graphLimit) || graphLimit < 1 || graphLimit > 500) throw new MnemoWeaveError('INVALID_INPUT');
+        return reply(200, await client.graph(requireHost(), {
+          scope: graphScope,
+          ...(graphProject === undefined ? {} : { projectId: graphProject }),
+          limit: graphLimit,
+        }));
+      }
+      if (req.method === 'POST' && req.url === '/v1/memories') {
+        if (!client?.createMemory) throw new MnemoWeaveError('REVIEW_REQUIRED');
+        // Creating a formal memory is a user write, like an edit: identity is required, a second
+        // credential is not.
+        requireHost();
+        return reply(200, await client.createMemory(await readJson(req)));
+      }
+      if (req.method === 'POST' && req.url === '/v1/memories/explore') {
+        if (!client?.explore) throw new MnemoWeaveError('REVIEW_REQUIRED');
+        return reply(200, await client.explore(requireHost(), ExploreInput.parse(await readJson(req))));
+      }
       const editMatch = /^\/v1\/memories\/([a-f0-9-]+)$/.exec(req.url ?? '');
       if (req.method === 'PATCH' && editMatch) {
         if (!client) throw new MnemoWeaveError('REVIEW_REQUIRED');
-        const body = await readJson(req);
-        return reply(200, await client.editMemory(editMatch[1]!, body as { content: string; reason?: string; entryVersion: number }));
+        // This is a single-user deployment: the service token and the Host header are the whole
+        // identity model, and a second credential for editing would only be a second copy of the
+        // same secret. The caller is still identified, so the change is attributable to a host.
+        requireHost();
+        return reply(200, await client.editMemory(editMatch[1]!, (await readJson(req)) as { content: string; reason?: string; entryVersion: number }));
+      }
+      const withdrawMatch = /^\/v1\/memories\/([a-f0-9-]+)\/withdraw$/.exec(req.url ?? '');
+      if (req.method === 'POST' && withdrawMatch) {
+        if (!client?.withdrawMemory) throw new MnemoWeaveError('REVIEW_REQUIRED');
+        // Same rule as an edit: a withdrawal is a memory write, attributed to the calling host.
+        requireHost();
+        return reply(200, await client.withdrawMemory(withdrawMatch[1]!, (await readJson(req)) as { reason: string; entryVersion: number }));
       }
       const conflictMatch = /^\/v1\/conflicts\/([a-f0-9-]+)$/.exec(req.url ?? '');
       if (req.method === 'GET' && conflictMatch) return reply(200, await app.readConflict({ caseId: conflictMatch[1] }));
@@ -240,12 +339,24 @@ export function createHttpServer(app: MemoryApplication, token: string, operator
         client.closeSession(requireHost(), sessionId);
         return reply(200, { closed: true });
       }
-      return req.url === '/v1/recall' ? reply(200, await app.recall(input)) : reply(202, await app.remember(input));
+      if (req.url === '/v1/recall') {
+        // Recall reads the Provider, so it must be attributed like every other read: the service
+        // token alone used to be enough here, which bypassed the visibility the View enforces.
+        const hostId = requireHost();
+        // With a catalog the read is scoped to what this host may see; without one there is no
+        // visibility set to filter by, but the caller is still identified.
+        if (client?.recall) return reply(200, await client.recall(hostId, input));
+        return reply(200, await app.recall(input));
+      }
+      return reply(202, await app.remember(input));
     } catch (error) {
       const result = publicError(error);
       const status = statusForCode(result.code);
       process.stderr.write(`${JSON.stringify({ traceId, operation: 'http', code: result.code })}\n`);
-      reply(status, { ...result, traceId });
+      // A rejected token must still say who rejected it. Without this a host cannot tell a
+      // token mismatch (keep the running Server, tell the user) from another program that
+      // happens to answer 401 on this port (report a port conflict).
+      reply(status, { ...result, ...(status === 401 ? { service: LIVE_SERVICE, protocol: LIVE_PROTOCOL } : {}), traceId });
     }
   });
 }

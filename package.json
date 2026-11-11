@@ -11,7 +11,7 @@
     "typecheck": "tsc --noEmit",
     "build": "tsc",
     "test": "node --test tests/unit/*.test.ts tests/contract/*.test.ts",
-    "test:e2e": "node --test tests/e2e/*.test.ts",
+    "test:e2e": "node --test --test-concurrency=1 tests/e2e/*.test.ts",
     "start": "node apps/server/src/main.ts",
     "start:mcp": "node apps/server/src/mcp-main.ts"
   },

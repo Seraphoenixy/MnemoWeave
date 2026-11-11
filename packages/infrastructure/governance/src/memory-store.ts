@@ -63,7 +63,15 @@ export class SqliteMemoryStore implements MemoryApplyStore {
         lastVerified: input.at,
       },
     });
-    this.catalog.publishSynced(input.entryId, request, input.providerId, input.contentHash, input.at, 'sync', `synced revision ${input.version}`);
+    // The classification comes from the entry payload, not from the synthetic request: a synced
+    // entry knows its category, importance and entities, and the `knowledgeType: 'Practice'` above
+    // is only a schema placeholder that must not become the recorded classification.
+    this.catalog.publishSynced(input.entryId, request, input.providerId, input.contentHash, input.at, 'sync', `synced revision ${input.version}`, {
+      category: input.category,
+      ...(input.importance === undefined ? {} : { importance: input.importance }),
+      tags: input.tags,
+      ...(input.entities === undefined ? {} : { entities: input.entities }),
+    });
   }
 
   retireSynced(memoryId: string): void {
@@ -132,6 +140,31 @@ export class SqliteMemoryStore implements MemoryApplyStore {
   }
 
   formalProviderId(entryId: string, version: number): string | null {    const row = this.db.prepare('SELECT provider_id FROM formal_map WHERE entry_id = ? AND version = ?').get(entryId, version) as { provider_id: string | null } | undefined;
+    return row?.provider_id ?? null;
+  }
+
+  /**
+   * The lowest mapped version above `baseVersion`, or null when this entry gained no mapping.
+   * A synced write is only successful once its revision has a local Provider mapping, so this
+   * is what an edit checks instead of trusting a possibly-dropped inbox row.
+   */
+  nextMappedVersion(entryId: string, baseVersion: number): number | null {
+    const row = this.db.prepare(
+      'SELECT MIN(version) AS version FROM formal_map WHERE entry_id = ? AND version > ? AND provider_id IS NOT NULL',
+    ).get(entryId, baseVersion) as { version: number | null } | undefined;
+    const version = row?.version ?? null;
+    return version === null ? null : Number(version);
+  }
+
+  /**
+   * Provider id already recorded for this exact body, under any version. The origin machine
+   * writes the Provider before the remote assigns a version, so the same publication can be
+   * filed under different version numbers on the way out and back.
+   */
+  formalProviderIdByHash(entryId: string, contentHash: string): string | null {
+    const row = this.db.prepare(
+      "SELECT provider_id FROM formal_map WHERE entry_id = ? AND content_hash = ? AND provider_id IS NOT NULL ORDER BY version DESC LIMIT 1",
+    ).get(entryId, contentHash) as { provider_id: string | null } | undefined;
     return row?.provider_id ?? null;
   }
 

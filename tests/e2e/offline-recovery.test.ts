@@ -121,7 +121,7 @@ test('an edit lost after a successful write becomes pending confirmation and sti
     const first = await app.client!.editMemory(memoryId, { content: '在线时写入的第一版。', entryVersion: 0 });
     assert.equal(first.entryVersion, 1);
 
-    await new Promise<void>((done) => server.close(() => done()));
+    await new Promise<void>((done) => { server.closeAllConnections(); server.close(() => done()); });
     let outageCode = '';
     await assert.rejects(
       app.client!.editMemory(memoryId, { content: '断网时尝试的第二版。', entryVersion: 1 }),
@@ -153,7 +153,7 @@ test('an edit lost after a successful write becomes pending confirmation and sti
     );
   } finally {
     await app.close();
-    await new Promise<void>((done) => server.close(() => done()));
+    await new Promise<void>((done) => { server.closeAllConnections(); server.close(() => done()); });
     remote.close();
   }
 });

@@ -34,7 +34,7 @@ $env:MNEMOWEAVE_OPERATOR_TOKEN=[Convert]::ToHexString([Security.Cryptography.Ran
 node dist/apps/server/src/main.js
 ```
 
-`MNEMON_BINARY` 可省略（默认用 PATH 上的 `mnemon`）；如需指定路径再设置。宿主用同一个 `MNEMOWEAVE_TOKEN` 直连，不需要签发凭据；`MNEMOWEAVE_OPERATOR_TOKEN` 只留给人工审核，不进入宿主环境。
+`MNEMON_BINARY` 可省略（默认用 PATH 上的 `mnemon`）；如需指定路径再设置。宿主用同一个 `MNEMOWEAVE_TOKEN` 直连，不需要签发凭据；编辑与撤回也不需要 operator 令牌（个人项目），`MNEMOWEAVE_OPERATOR_TOKEN` 只在调用管理端点时使用，不进入宿主环境。
 
 项目 ID 需显式登记（`POST /v1/runtime/projects`，operator），或直接不传 `projectId`（此时会话上下文不绑定项目）。
 
@@ -119,3 +119,27 @@ node dist/tests/support/zcode-acceptance-collect.js <MNEMOWEAVE_STATE_DIR 绝对
 ## 8. 验收记录要求
 
 每条记录需包含：产品与版本、平台、配置作用域、能力清单（状态 + 证据）、场景清单结果、阻塞项与解除条件。未验证的能力标 `unverified`，不得因"代码已实现"改标 `supported`。
+
+## 5.1 记忆页逐页签验收矩阵（2026-11-11）
+
+2026-11-10 的点击验收只覆盖了「列出 + 编辑」两条路径；此后页面增至九个页签，实体、探索、图谱、撤回、筛选、排序全部是新增能力，**尚未经过真实点击**。下表说明每一项当前的证据级别：`自动` 表示有可复跑的程序化断言，`人工` 表示只能由人在真实桌面确认。
+
+| 页签 / 能力 | 自动证据 | 仍需人工 |
+|---|---|---|
+| 概览（状态行、注入报告） | `tests/e2e/page-endpoint-smoke.test.ts`（`status`/`config`/`injection` 全通） | 状态行在窄屏下的换行 |
+| 运行时记忆（准则） | 同上（`rules` 读取） | — |
+| 项目档案 | 同上（`archives` 读取） | — |
+| 正式记忆：列表 / 搜索 / 分页 | `tests/contract/memory-browse.test.ts`、`tests/e2e/page-endpoint-smoke.test.ts` | 滚动到底自动加载的手感 |
+| 正式记忆：范围 / 分类 / 实体筛选 / 排序 | `memory-browse`（三种顺序翻完全部行、游标不可跨排序）、`http-query-forwarding`（九个参数全部送达）、`dsh-rpc-forwarding`（Host 不丢字段） | 下拉在窄屏下的可用性 |
+| 正式记忆：详情 / 修订链 / 历史版 | `page-endpoint-smoke`（含按 `revisionId` 读历史）、`tests/unit/dsh-memory-detail.test.ts` | 并排比较的排版 |
+| 新增（直接发布） | `tests/e2e/create-memory.test.ts`（分类与标签落库、可立即编辑、项目范围不外溢、非法输入不发布）、`page-endpoint-smoke`（经页面通道新建） | 表单在窄屏下的排版 |
+| 编辑（正文 + 分类 + 标签） | `tests/e2e/dsh-host-half.test.ts`、`edit-gates`、`concurrent-writes`、`restart-consistency` | 草稿离开时的确认弹窗 |
+| 撤回 | `dsh-host-half`、`restart-consistency`、`concurrent-writes` | 撤回确认区的文案与焦点 |
+| 关联网络（2 跳） | `tests/unit/dsh-ui-view-model.test.ts`（广度优先、最短跳、入边方向） | — |
+| 实体页 | `memory-browse`（索引与合并拼写）、`dsh-ui-view-model`（筛选规则）、`dsh-panels-render`（渲染与高亮） | 选中实体后跳到列表的过渡 |
+| 探索页 | `explore-ranking`（同一查询顺序稳定、大答案是小答案前缀）、`page-endpoint-smoke`（门槛生效）、`dsh-panels-render` | 门槛下拉的默认值是否符合直觉 |
+| 图谱页 | `memory-graph`、`review-publish-graph`（真实审核发布产生取代边）、`conflict-graph`（coexist 产生冲突边）、`graph-layout`（布局确定性）、`dsh-panels-render` | 画布滚动与缩放手感 |
+| 同步页 | `recall-authorization`（无 Host 头 401、载荷不含凭据）、`page-endpoint-smoke`（未配置时得到明确结果） | **配置真实远端后**的状态与手动刷新 |
+| 设置页 | `tests/contract/host-config.test.ts`（解析顺序、循环回环、令牌不外泄、偏好校验）、`page-endpoint-smoke`（读取 + 本地保存） | **保存连接、连接测试、唤醒测试**（需要真实第二台 Server 与计划任务） |
+
+**仍然只能人工的两类**：①连接相关的三个动作（保存连接、测试连接、唤醒）必须对着真实 Server 与真实计划任务执行，自动测试只能证明"解析与校验正确"；②视觉与手感（窄屏布局、滚动加载、画布缩放、焦点与文案）。这两类不做「已通过」的宣称。

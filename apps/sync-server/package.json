@@ -4,7 +4,6 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@mnemoweave/application": "workspace:*",
     "@mnemoweave/contracts": "workspace:*",
     "@mnemoweave/protocols-sync-http": "workspace:*",
     "@mnemoweave/sync-store": "workspace:*"

@@ -2,21 +2,16 @@
 // Cordis plugin shape: name/inject/apply. No runtime dependencies; the View is
 // fetched from the MnemoWeave Server with the service token.
 //
-// Configuration comes from the Cordis entry first (serverUrl / token / hostId / projectId)
-// and falls back to MNEMOWEAVE_SERVER / MNEMOWEAVE_TOKEN / MNEMOWEAVE_HOST_ID /
-// MNEMOWEAVE_PROJECT_ID, the same order the page half uses.
+// Configuration is not resolved here. `./host-config.js` is the single reader shared with the
+// page's Host half, so the endpoint, Host identity, project and injection budget the page shows
+// are the same values this hook uses. Stored preferences win over the Cordis entry, which wins
+// over the environment.
+import { ensureReachable, readPreferences, resolveHostConfig } from './host-config.js';
+
 export const name = 'dsh-mnemo-weave';
 export const inject = [];
 
 const injected = new Set();
-
-function pick(value) {
-  return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined;
-}
-
-function endpoint(config) {
-  return (pick(config?.serverUrl) ?? pick(process.env.MNEMOWEAVE_SERVER) ?? 'http://127.0.0.1:4317').replace(/\/$/, '');
-}
 
 /**
  * Injection order is fixed: rules, then working context, then formal memories. A rule block
@@ -40,26 +35,34 @@ export function render(view) {
   return blocks.join('\n\n');
 }
 
+/** Resolved once per turn, so a settings change is picked up without restarting DSH. */
+function currentConfig(config) {
+  return resolveHostConfig(config, process.env, readPreferences(process.env));
+}
+
 async function fetchInjection(sessionId, config) {
-  const token = pick(config?.token) ?? pick(process.env.MNEMOWEAVE_TOKEN);
+  const resolved = currentConfig(config);
+  const token = resolved.token;
   if (!token || token.length < 24) return undefined;
-  const hostId = pick(config?.hostId) ?? pick(process.env.MNEMOWEAVE_HOST_ID) ?? 'dsh';
-  const projectId = pick(config?.projectId) ?? pick(process.env.MNEMOWEAVE_PROJECT_ID);
-  const timeout = config?.timeoutMs ?? 1900;
-  const response = await fetch(`${endpoint(config)}/v1/inject`, {
+  // The whole turn may not exceed two seconds. The wake gets a slice of it and the injection
+  // request gets whatever is left, so a cold Server never pushes the turn past its deadline.
+  const startedAt = Date.now();
+  await ensureReachable({ serverUrl: resolved.serverUrl, token, hostId: resolved.hostId, autoStart: resolved.autoStart }).catch(() => undefined);
+  const remaining = Math.max(200, resolved.injectTimeoutMs - (Date.now() - startedAt));
+  const response = await fetch(`${resolved.serverUrl}/v1/inject`, {
     method: 'POST',
     headers: {
       authorization: `Bearer ${token}`,
       'content-type': 'application/json',
-      'x-mnemoweave-host': hostId,
-      ...(projectId === undefined ? {} : { 'x-mnemoweave-project': projectId }),
+      'x-mnemoweave-host': resolved.hostId,
+      ...(resolved.projectId === undefined ? {} : { 'x-mnemoweave-project': resolved.projectId }),
     },
     body: JSON.stringify({
       sessionId,
       ...(config?.pinned ? { pinned: config.pinned } : {}),
       ...(config?.query ? { query: config.query } : {}),
     }),
-    signal: AbortSignal.timeout(timeout),
+    signal: AbortSignal.timeout(remaining),
   });
   if (!response.ok) return undefined;
   const view = await response.json();

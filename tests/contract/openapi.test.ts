@@ -159,6 +159,6 @@ test('Every documented route is actually handled by the HTTP server', async () =
     const anonymousInjection = await fetch(`${base}/v1/injections/latest`, { headers: { authorization: `Bearer ${token}` } });
     assert.equal(anonymousInjection.status, 401, 'a host token without a host header must not read the report');
   } finally {
-    await new Promise<void>((done, fail) => server.close(error => error ? fail(error) : done()));
+    await new Promise<void>((done, fail) => { server.closeAllConnections(); server.close(error => error ? fail(error) : done()); });
   }
 });

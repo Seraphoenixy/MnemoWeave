@@ -20,6 +20,20 @@ import { mnemonBinary } from './mnemon-binary.ts';
 
 const scopes = [{ scope: 'project:alpha', canRead: true, canWrite: true }, { scope: 'global', canRead: true, canWrite: true }];
 
+/**
+ * An explicit refresh that overlaps the startup pass is answered with `skipped`, which is
+ * the documented behaviour for an already-running pass. Retry until one pass completes so
+ * the test waits for real work instead of a skipped no-op.
+ */
+async function untilRefreshed(refresh: () => Promise<{ skipped: boolean }>, timeoutMs = 30_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!(await refresh()).skipped) return;
+    await new Promise((done) => setTimeout(done, 100));
+  }
+  throw new Error('the sync pass kept reporting an overlap');
+}
+
 function machine(root: string, name: string, token: string, base: string) {
   const state = resolve(join(root, name, 'state'));
   const provider = resolve(join(root, name, 'provider'));
@@ -72,8 +86,8 @@ test('three machines converge on one revision chain and a stale base is rejected
     const v1 = await a.client!.editMemory(memoryId, { content: 'A 写入的第一版。', entryVersion: 0 });
     assert.equal(v1.entryVersion, 1);
 
-    await b.client!.syncRefresh!();
-    await c.client!.syncRefresh!();
+    await untilRefreshed(b.client!.syncRefresh!);
+    await untilRefreshed(c.client!.syncRefresh!);
     assert.equal((await b.client!.memories({ query: 'A 写入', limit: 5 })).items[0]?.entryVersion, 1);
     assert.equal((await c.client!.memories({ query: 'A 写入', limit: 5 })).items[0]?.entryVersion, 1);
 
@@ -86,14 +100,14 @@ test('three machines converge on one revision chain and a stale base is rejected
     );
 
     // C re-reads, then writes version 3.
-    await c.client!.syncRefresh!();
+    await untilRefreshed(c.client!.syncRefresh!);
     assert.equal((await c.client!.memories({ query: 'B 写入', limit: 5 })).items[0]?.entryVersion, 2);
     const cWins = await c.client!.editMemory(memoryId, { content: 'C 写入的第三版。', entryVersion: 2 });
     assert.equal(cWins.entryVersion, 3);
 
     // A and B converge on version 3.
-    await a.client!.syncRefresh!();
-    await b.client!.syncRefresh!();
+    await untilRefreshed(a.client!.syncRefresh!);
+    await untilRefreshed(b.client!.syncRefresh!);
     for (const app of [a, b, c]) {
       const item = (await app.client!.memories({ query: '第三版', limit: 5 })).items[0];
       assert.equal(item?.memoryId, memoryId);
@@ -121,7 +135,7 @@ test('three machines converge on one revision chain and a stale base is rejected
     await a.close();
     await b.close();
     await c.close();
-    await new Promise<void>((done) => server.close(() => done()));
+    await new Promise<void>((done) => { server.closeAllConnections(); server.close(() => done()); });
     remote.close();
   }
 });

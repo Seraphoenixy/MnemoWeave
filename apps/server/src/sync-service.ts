@@ -54,6 +54,8 @@ export class SyncService {
   private readonly scopes = new Set<string>();
   private timer: ReturnType<typeof setInterval> | undefined;
   private running = false;
+  /** The pass in flight, so `stop()` can wait for it instead of closing the ledger underneath it. */
+  private inFlight: Promise<SyncPassResult> | undefined;
 
   constructor(options: SyncServiceOptions) {
     this.remote = options.remote;
@@ -67,7 +69,9 @@ export class SyncService {
   get enabled(): boolean { return true; }
 
   start(): void {
-    this.stop();
+    if (this.timer) clearInterval(this.timer);
+    this.timer = undefined;
+    // Not `stop()`: that waits for the in-flight pass, and startup must not block on it.
     void this.refresh().catch(() => undefined);
     if (this.intervalMs > 0) {
       this.timer = setInterval(() => { void this.refresh().catch(() => undefined); }, this.intervalMs);
@@ -75,13 +79,23 @@ export class SyncService {
     }
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
+    // A pass touching the ledger must finish before the caller closes the database;
+    // otherwise the last apply fails with "database is not open" and the cursor stays behind.
+    await this.inFlight?.catch(() => undefined);
+    this.inFlight = undefined;
   }
 
-  async refresh(): Promise<SyncPassResult> {
-    if (this.running) return { scopes: [...this.scopes], pulled: 0, applied: 0, errors: [], skipped: true };
+  refresh(): Promise<SyncPassResult> {
+    if (this.running) return Promise.resolve({ scopes: [...this.scopes], pulled: 0, applied: 0, errors: [], skipped: true });
+    const pass = this.runPass();
+    this.inFlight = pass;
+    return pass;
+  }
+
+  private async runPass(): Promise<SyncPassResult> {
     this.running = true;
     try {
       const grants = await this.remote.scopes();

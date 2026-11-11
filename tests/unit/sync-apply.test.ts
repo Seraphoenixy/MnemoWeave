@@ -29,12 +29,14 @@ class FakeStore implements MemoryApplyStore {
 class FakeProvider implements FormalProviderPort {
   calls: string[] = [];
   contents = new Map<string, string>();
+  sources = new Map<string, string>();
   links: { source: string; target: string }[] = [];
   private counter = 0;
-  async remember(content: string): Promise<{ id: string }> {
+  async remember(content: string, source: string): Promise<{ id: string }> {
     this.calls.push('remember');
     const id = `p-${++this.counter}`;
     this.contents.set(id, content);
+    this.sources.set(source, id);
     return { id };
   }
   async show(id: string): Promise<{ id: string; content: string }> {
@@ -49,6 +51,11 @@ class FakeProvider implements FormalProviderPort {
   async forget(): Promise<unknown> {
     this.calls.push('forget');
     return { status: 'deleted' };
+  }
+  async findBySource(source: string): Promise<{ id: string; content: string } | null> {
+    this.calls.push(`find:${source}`);
+    const id = this.sources.get(source);
+    return id ? { id, content: this.contents.get(id) ?? '' } : null;
   }
 }
 
@@ -122,11 +129,43 @@ test('an archive change keeps project, verification and evidence', async () => {
 test('a formal change is written, read back and only then mapped', async () => {
   const p = ports();
   const payload = { category: 'fact' as const, importance: 3, tags: [], entities: [], relations: [] };
-  assert.deepEqual(await applyInboxEntry(inbox({ entry: entry({ kind: 'formal', payload }) }), p), { status: 'applied' });
-  assert.deepEqual(p.provider.calls, ['remember', 'show']);
+  const record = inbox({ entry: entry({ kind: 'formal', payload }) });
+  assert.deepEqual(await applyInboxEntry(record, p), { status: 'applied' });
+  assert.deepEqual(p.provider.calls, [`find:mnemoweave:${record.changeId}:1`, 'remember', 'show'], 'a missing local row is looked up by source first');
   const map = p.store.maps.get(`${ENTRY}:1`);
   assert.equal(map?.state, 'applied');
   assert.equal(map?.providerId, 'p-1');
+});
+
+/**
+ * The mapping is written after the Provider call. If the process dies in between, a plain
+ * replay would `remember` the same body again (`--no-diff` does not deduplicate). The
+ * stable source has to be consulted first.
+ */
+test('a replay after an interrupted write reuses the memory already written', async () => {
+  const p = ports();
+  const payload = { category: 'fact' as const, importance: 3, tags: [], entities: [], relations: [] };
+  const record = inbox({ entry: entry({ kind: 'formal', payload }) });
+  const source = `mnemoweave:${record.changeId}:1`;
+  // Simulate the earlier attempt: written to the Provider, mapping never recorded.
+  p.provider.sources.set(source, 'p-existing');
+  p.provider.contents.set('p-existing', '提交前必须运行类型检查。');
+  p.store.maps.clear();
+
+  assert.deepEqual(await applyInboxEntry(record, p), { status: 'applied' });
+  assert.equal(p.provider.calls.filter((call) => call === 'remember').length, 0, 'the body must not be written twice');
+  assert.equal(p.store.formalProviderId(ENTRY, 1), 'p-existing');
+});
+
+test('a recovered write whose body disagrees asks for review instead of accepting it', async () => {
+  const p = ports();
+  const payload = { category: 'fact' as const, importance: 3, tags: [], entities: [], relations: [] };
+  const record = inbox({ entry: entry({ kind: 'formal', payload }) });
+  p.provider.sources.set(`mnemoweave:${record.changeId}:1`, 'p-existing');
+  p.provider.contents.set('p-existing', '被别的写入占用了同一个 source。');
+
+  assert.deepEqual(await applyInboxEntry(record, p), { status: 'needs_review', error: 'PROVIDER_INTEGRITY' });
+  assert.equal(p.store.maps.size, 0, 'a mismatched recovery must not move the mapping');
 });
 
 test('a later formal revision links to the previous local revision', async () => {
@@ -147,14 +186,16 @@ test('a mismatched read-back stops before the mapping moves', async () => {
   assert.equal(p.store.maps.size, 0);
 });
 
-test('a withdrawn formal memory is forgotten and stays readable as a tombstone', async () => {
+test('a withdrawn formal memory keeps its Provider body and is only retired from recall', async () => {
   const p = ports();
   p.store.upsertFormalMap({ entryId: ENTRY, version: 1, providerId: 'p-old', contentHash: 'x'.repeat(64), state: 'applied', appliedAt: NOW });
   const payload = { category: 'fact' as const, importance: 3, tags: [], entities: [], relations: [] };
   const record = inbox({ seq: 2, version: 2, operation: 'delete', entry: entry({ kind: 'formal', version: 2, payload, withdrawnAt: NOW }) });
   assert.deepEqual(await applyInboxEntry(record, p), { status: 'applied' });
-  assert.deepEqual(p.provider.calls, ['forget']);
-  assert.equal(p.store.maps.get(`${ENTRY}:2`)?.providerId, null);
+  // Withdrawal is a new version, not physical deletion: `forget` would erase the row, break
+  // `show` and drop edges pointing at it, contradicting the protocol's readable history.
+  assert.equal(p.provider.calls.includes('forget'), false, 'the Provider body must be preserved');
+  assert.equal(p.store.formalProviderId(ENTRY, 2), 'p-old', 'the readable body stays mapped');
 });
 
 test('encrypted or unverifiable bodies never reach the store', async () => {

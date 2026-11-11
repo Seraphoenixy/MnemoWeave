@@ -37,32 +37,17 @@ importers:
         specifier: 7.0.2
         version: 7.0.2
 
-  apps/bridge:
-    dependencies:
-      '@mnemoweave/adapters-shared-sdk':
-        specifier: workspace:*
-        version: link:../../packages/adapters/shared-sdk
-      '@mnemoweave/bridge':
-        specifier: workspace:*
-        version: link:../../packages/bridge
-      '@mnemoweave/contracts':
-        specifier: workspace:*
-        version: link:../../packages/core/contracts
-      zod:
-        specifier: 4.6.7
-        version: 4.6.7
-
   apps/server:
     dependencies:
       '@mnemoweave/application':
         specifier: workspace:*
         version: link:../../packages/core/application
+      '@mnemoweave/contracts':
+        specifier: workspace:*
+        version: link:../../packages/core/contracts
       '@mnemoweave/governance':
         specifier: workspace:*
         version: link:../../packages/infrastructure/governance
-      '@mnemoweave/model-gateway':
-        specifier: workspace:*
-        version: link:../../packages/infrastructure/model-gateway
       '@mnemoweave/protocols-http':
         specifier: workspace:*
         version: link:../../packages/protocols/http
@@ -72,6 +57,9 @@ importers:
       '@mnemoweave/providers-mnemon':
         specifier: workspace:*
         version: link:../../packages/providers/mnemon
+      '@mnemoweave/sync-client':
+        specifier: workspace:*
+        version: link:../../packages/infrastructure/sync-client
       '@modelcontextprotocol/sdk':
         specifier: 1.32.2
         version: 1.32.2(zod@4.6.7)
@@ -79,14 +67,26 @@ importers:
         specifier: 4.6.7
         version: 4.6.7
 
+  apps/sync-server:
+    dependencies:
+      '@mnemoweave/contracts':
+        specifier: workspace:*
+        version: link:../../packages/core/contracts
+      '@mnemoweave/protocols-sync-http':
+        specifier: workspace:*
+        version: link:../../packages/protocols/sync-http
+      '@mnemoweave/sync-store':
+        specifier: workspace:*
+        version: link:../../packages/infrastructure/sync-store
+
   packages/adapters/chatgpt:
     dependencies:
       '@mnemoweave/adapters-shared-sdk':
         specifier: workspace:*
         version: link:../shared-sdk
-      '@mnemoweave/bridge':
+      '@mnemoweave/client':
         specifier: workspace:*
-        version: link:../../bridge
+        version: link:../../client
       '@mnemoweave/contracts':
         specifier: workspace:*
         version: link:../../core/contracts
@@ -107,9 +107,9 @@ importers:
       '@mnemoweave/adapters-shared-sdk':
         specifier: workspace:*
         version: link:../shared-sdk
-      '@mnemoweave/bridge':
+      '@mnemoweave/client':
         specifier: workspace:*
-        version: link:../../bridge
+        version: link:../../client
       '@mnemoweave/contracts':
         specifier: workspace:*
         version: link:../../core/contracts
@@ -117,20 +117,7 @@ importers:
         specifier: 4.6.7
         version: 4.6.7
 
-  packages/bridge:
-    dependencies:
-      '@mnemoweave/adapters-shared-sdk':
-        specifier: workspace:*
-        version: link:../adapters/shared-sdk
-      '@mnemoweave/application':
-        specifier: workspace:*
-        version: link:../core/application
-      '@mnemoweave/contracts':
-        specifier: workspace:*
-        version: link:../core/contracts
-      '@mnemoweave/governance':
-        specifier: workspace:*
-        version: link:../infrastructure/governance
+  packages/client: {}
 
   packages/core/application:
     dependencies:
@@ -153,7 +140,16 @@ importers:
         specifier: workspace:*
         version: link:../../core/contracts
 
-  packages/infrastructure/model-gateway:
+  packages/infrastructure/sync-client:
+    dependencies:
+      '@mnemoweave/application':
+        specifier: workspace:*
+        version: link:../../core/application
+      '@mnemoweave/contracts':
+        specifier: workspace:*
+        version: link:../../core/contracts
+
+  packages/infrastructure/sync-store:
     dependencies:
       '@mnemoweave/application':
         specifier: workspace:*
@@ -170,9 +166,6 @@ importers:
       '@mnemoweave/contracts':
         specifier: workspace:*
         version: link:../../core/contracts
-      '@mnemoweave/governance':
-        specifier: workspace:*
-        version: link:../../infrastructure/governance
 
   packages/protocols/mcp:
     dependencies:
@@ -185,6 +178,15 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: 1.32.2
         version: 1.32.2(zod@4.6.7)
+
+  packages/protocols/sync-http:
+    dependencies:
+      '@mnemoweave/application':
+        specifier: workspace:*
+        version: link:../../core/application
+      '@mnemoweave/contracts':
+        specifier: workspace:*
+        version: link:../../core/contracts
 
   packages/providers/mnemon:
     dependencies:

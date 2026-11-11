@@ -8,7 +8,7 @@ import { SqliteCandidates } from '../../packages/infrastructure/governance/src/i
 import { MemoryWorkflow } from '../../packages/core/application/src/workflow.ts';
 import { MemoryApplication } from '../../packages/core/application/src/index.ts';
 import { RememberInput, SemanticAssessment } from '../../packages/core/contracts/src/index.ts';
-import type { WriteProvider, ModelGateway, WorkflowRepository } from '../../packages/core/application/src/workflow-ports.ts';
+import type { WriteProvider, WorkflowRepository } from '../../packages/core/application/src/workflow-ports.ts';
 
 const checks = Object.fromEntries(['source', 'accuracy', 'reuse', 'scope', 'duplication', 'consistency'].map(key => [key, { result: 'pass', reason: 'Test fixture assessment' }]));
 const assessment = () => SemanticAssessment.parse({ checks, requiresHuman: false, conflict: 'none', summary: 'Test only; not real technical validation.' });
@@ -30,19 +30,29 @@ async function setup() {
     async verifyContent(id, content) { return memories.get(id) === content; },
     async persistReviewed(content) { const id = `memory-${++writes}`; memories.set(id, content); return { id, action: 'added' }; },
   };
-  const gateway: ModelGateway = { async assess() { return assessment(); } };
-  return { root, path, repo, provider, gateway, memories, writes: () => writes };
+  return { root, path, repo, provider, memories, writes: () => writes };
 }
 
-test('Auto review enqueues approved task atomically and persists a verified execution receipt', async () => {
+/**
+ * Candidate review is deterministic; there is no model on the Server. A non-duplicate
+ * candidate therefore always parks for a human, and only an operator approval enqueues the
+ * write. This covers that path end to end, including the receipt and outbox journal.
+ */
+test('a cleared candidate waits for a human, and approval enqueues the write atomically', async () => {
   const t = await setup();
   try {
     const candidate = t.repo.submit(request());
-    await new MemoryWorkflow(t.repo, t.provider, t.gateway).tick();
+    await new MemoryWorkflow(t.repo, t.provider).tick();
+    const parked = t.repo.get(candidate.id);
+    assert.equal(parked.status, 'needs_review');
+    assert.equal(t.writes(), 0, 'nothing is written before a person approves');
+    assert.match(parked.reviews[0]?.reason ?? '', /does not call a model/);
+
+    t.repo.review(candidate.id, 'approve', 'operator', 'Reviewed by a person', null);
+    await new MemoryWorkflow(t.repo, t.provider).tick();
     const result = t.repo.get(candidate.id);
     assert.equal(result.status, 'persisted');
     assert.equal(t.writes(), 1);
-    assert.equal(result.reviews.length, 1);
     assert.equal((result.executionReceipts[0] as { status: string }).status, 'persisted');
     const inspect = new DatabaseSync(t.path);
     try {
@@ -55,8 +65,8 @@ test('Auto review enqueues approved task atomically and persists a verified exec
   } finally { t.repo.close(); }
 });
 
-test('Missing/malformed/uncertain model, important/global knowledge and conflicts never auto approve', async () => {
-  for (const kind of ['missing', 'invalid', 'uncertain', 'architecture', 'global', 'conflict', 'unverified']) {
+test('no candidate is ever approved automatically, whatever its scope or verification state', async () => {
+  for (const kind of ['plain', 'architecture', 'global', 'unverified']) {
     const t = await setup();
     try {
       const input = request();
@@ -64,48 +74,36 @@ test('Missing/malformed/uncertain model, important/global knowledge and conflict
       if (kind === 'global') input.scope = 'global';
       if (kind === 'unverified') input.provenance.verificationStatus = 'unverified';
       const candidate = t.repo.submit(input);
-      const gateway: ModelGateway | undefined = kind === 'missing' ? undefined : { async assess() {
-        if (kind === 'invalid') throw new Error('bad model');
-        const output = assessment();
-        if (kind === 'uncertain') output.checks.accuracy.result = 'uncertain';
-        if (kind === 'conflict') output.conflict = 'factual';
-        return output;
-      } };
-      await new MemoryWorkflow(t.repo, t.provider, gateway).tick();
-      assert.equal(t.repo.get(candidate.id).status, 'needs_review', kind);
+      await new MemoryWorkflow(t.repo, t.provider).tick();
+      assert.equal(t.repo.get(candidate.id).status, 'needs_review', `${kind} must not be auto-approved`);
       assert.equal(t.writes(), 0, kind);
-      if (kind === 'conflict') {
-        const app = new MemoryApplication({ ...t.provider, async health() { return { ready: true, version: '0.2.13', capabilities: ['health'] }; } }, t.repo, t.repo);
-        await assert.rejects(app.humanReview({ candidateId: candidate.id, decision: 'approve', reason: 'cannot bypass conflict resolution' }, 'operator'));
-        const inspect = new DatabaseSync(t.path);
-        try { assert.equal(inspect.prepare('SELECT kind FROM governance_review_tasks').get()!['kind'], 'conflict'); } finally { inspect.close(); }
-      }
     } finally { t.repo.close(); }
   }
 });
 
-test('Exact duplicates and clear lack of reuse are rejected without writes', async () => {
-  for (const kind of ['duplicate', 'reuse']) {
-    const t = await setup();
-    try {
-      const candidate = t.repo.submit(request());
-      if (kind === 'duplicate') {
-        await new MemoryWorkflow(t.repo, t.provider, t.gateway).tick();
-        const duplicate = t.repo.submit({ ...candidate.request, idempotencyKey: 'workflow-known-duplicate' });
-        await new MemoryWorkflow(t.repo, t.provider, t.gateway).tick();
-        assert.equal(t.repo.get(duplicate.id).status, 'rejected'); assert.equal(t.writes(), 1); continue;
-      }
-      const gateway: ModelGateway = { async assess() { const result = assessment(); result.checks.reuse.result = 'fail'; return result; } };
-      await new MemoryWorkflow(t.repo, t.provider, gateway).tick();
-      assert.equal(t.repo.get(candidate.id).status, 'rejected'); assert.equal(t.writes(), 0);
-    } finally { t.repo.close(); }
-  }
+test('Exact duplicates are rejected without a second write', async () => {
+  const t = await setup();
+  try {
+    const candidate = t.repo.submit(request());
+    await new MemoryWorkflow(t.repo, t.provider).tick();
+    assert.equal(t.repo.get(candidate.id).status, 'needs_review');
+    // Approve the first so its body exists in the Provider.
+    t.repo.review(candidate.id, 'approve', 'operator', 'first copy', null);
+    await new MemoryWorkflow(t.repo, t.provider).tick();
+    assert.equal(t.writes(), 1);
+
+    const duplicate = t.repo.submit({ ...candidate.request, idempotencyKey: 'workflow-known-duplicate' });
+    await new MemoryWorkflow(t.repo, t.provider).tick();
+    assert.equal(t.repo.get(duplicate.id).status, 'rejected', 'an identical known body is rejected by rule, not by a model');
+    assert.equal(t.writes(), 1);
+  } finally { t.repo.close(); }
 });
+
 test('Identical content with unknown or different applicability is not silently rejected as duplicate', async () => {
   const t = await setup();
   try {
     const candidate = t.repo.submit(request()); t.memories.set('external-unknown', candidate.request.content);
-    await new MemoryWorkflow(t.repo, t.provider, t.gateway).tick();
+    await new MemoryWorkflow(t.repo, t.provider).tick();
     assert.equal(t.repo.get(candidate.id).status, 'needs_review'); assert.equal(t.writes(), 0);
   } finally { t.repo.close(); }
 });
@@ -136,7 +134,7 @@ test('Interrupted write checkpoint reconciles a commit after repository restart 
   const inject = new DatabaseSync(t.path); inject.exec('UPDATE governance_workflow_lock SET until_ms=0'); inject.close();
   const reopened = new SqliteCandidates(t.path);
   try {
-    await new MemoryWorkflow(reopened, t.provider, t.gateway).tick();
+    await new MemoryWorkflow(reopened, t.provider).tick();
     const result = reopened.get(candidate.id);
     assert.equal(result.status, 'persisted'); assert.equal(t.writes(), 1);
     assert.equal((result.executionReceipts[0] as { providerMemoryId: string }).providerMemoryId, actual.id);
@@ -252,22 +250,25 @@ test('Non-model recoverable failures keep retrying with capped backoff and alert
   } finally { t.repo.close(); }
 });
 
-test('Background model reviews run concurrently with at most two in-flight assessments', async () => {
+test('several candidates are reviewed in one tick without calling a model', async () => {
   const t = await setup();
   try {
     const first = t.repo.submit(request('workflow-parallel-001'));
     const second = t.repo.submit(request('workflow-parallel-002'));
-    let inFlight = 0; let peak = 0;
-    const gateway: ModelGateway = { async assess() { inFlight++; peak = Math.max(peak, inFlight); await new Promise(resolve => setTimeout(resolve, 30)); inFlight--; return assessment(); } };
-    const workflow = new MemoryWorkflow(t.repo, t.provider, gateway);
+    const workflow = new MemoryWorkflow(t.repo, t.provider);
     await workflow.tick();
-    assert.equal(peak, 2);
+    // Both are parked for a human: the review step is rule-based, so it completes immediately
+    // and nothing is written.
+    assert.equal(t.repo.get(first.id).status, 'needs_review');
+    assert.equal(t.repo.get(second.id).status, 'needs_review');
+    assert.equal(t.writes(), 0);
+
+    for (const id of [first.id, second.id]) t.repo.review(id, 'approve', 'operator', 'parallel fixture', null);
+    await workflow.tick();
+    await workflow.tick();
     assert.equal(t.repo.get(first.id).status, 'persisted');
-    assert.equal(t.repo.get(second.id).status, 'approved');
-    // Writes stay serialized behind the concurrent reviews: the next tick drains the second task.
-    await workflow.tick();
     assert.equal(t.repo.get(second.id).status, 'persisted');
-    assert.equal(t.writes(), 2);
+    assert.equal(t.writes(), 2, 'provider writes stay serialized');
   } finally { t.repo.close(); }
 });
 
@@ -295,7 +296,7 @@ test('Lease owner runs the retention sweep at most once per interval', async () 
     pending: () => undefined, claim: () => undefined,
     sweepRetention: () => { sweeps++; },
   } as unknown as WorkflowRepository;
-  const workflow = new MemoryWorkflow(repo, {} as WriteProvider, undefined, 90_000, undefined, 2, undefined, 60_000);
+  const workflow = new MemoryWorkflow(repo, {} as WriteProvider, 90_000, undefined, 2, undefined, 60_000);
   await workflow.tick();
   await workflow.tick();
   assert.equal(sweeps, 1);
@@ -307,26 +308,21 @@ test('Retention sweep failure is logged and does not fail the workflow tick', as
     pending: () => undefined, claim: () => undefined,
     sweepRetention: () => { throw new Error('sweep failed'); },
   } as unknown as WorkflowRepository;
-  const workflow = new MemoryWorkflow(repo, {} as WriteProvider, undefined, 90_000, undefined, 2, undefined, 0);
+  const workflow = new MemoryWorkflow(repo, {} as WriteProvider, 90_000, undefined, 2, undefined, 0);
   await assert.doesNotReject(workflow.tick());
 });
 
-test('Approved writes drain before a long background review completes', async () => {
+test('an approved write drains even while another candidate awaits review', async () => {
   const t = await setup();
   try {
     const ready = t.repo.submit(request('workflow-priority-ready'));
     t.repo.review(ready.id, 'approve', 'fixture-operator', 'fixture', null);
     const pending = t.repo.submit(request('workflow-priority-pending'));
-    let release!: () => void;
-    const gate = new Promise<void>(resolve => { release = resolve; });
-    const slowGateway: ModelGateway = { async assess() { await gate; return assessment(); } };
-    const workflow = new MemoryWorkflow(t.repo, t.provider, slowGateway);
-    const tick = workflow.tick();
-    await new Promise(resolve => setTimeout(resolve, 50));
+    const workflow = new MemoryWorkflow(t.repo, t.provider);
+    await workflow.tick();
+    // The approved task is written first; the unapproved one stays parked for a person.
     assert.equal(t.repo.get(ready.id).status, 'persisted');
-    assert.equal(t.repo.get(pending.id).status, 'pending_review');
-    release();
-    await tick;
-    assert.equal(t.repo.get(pending.id).status, 'persisted');
+    assert.equal(t.repo.get(pending.id).status, 'needs_review');
+    assert.equal(t.writes(), 1);
   } finally { t.repo.close(); }
 });

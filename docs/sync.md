@@ -351,7 +351,7 @@ Mnemon 是外部进程，与本机库没有共同事务。顺序固定为：
 | `packages/infrastructure/sync-client` | 新包：本机到远端的 HTTP 客户端、超时与失败分类（未发出 / 结果未知）、结果查询 | 已实现（P1） |
 | `packages/protocols/sync-http` | 新包：远端路由与设备鉴权 | 已实现（P1） |
 | `apps/sync-server` | 新应用：远端组合根、设备签发 `enroll` / `revoke` CLI、systemd 单元 | 已实现（P1） |
-| `packages/infrastructure/governance` | schema v12：v11 的同步与三类记忆八表，加 `entry_versions`（已确认版本） | 已实现；账本见 `SqliteSyncLedger`，写入应用见 `applyInboxEntry` |
+| `packages/infrastructure/governance` | schema v14：v11 的同步与三类记忆八表，v12 加 `entry_versions`（已确认版本），v13 加 `share_outbox`，v14 加修订分类五列 | 已实现；账本见 `SqliteSyncLedger`，写入应用见 `applyInboxEntry` |
 | `packages/providers/mnemon` | 新增 `forget`、`related`、`remember --no-diff`、按 source 定位 | 已实现（`tests/contract/provider.test.ts` 与真实 CLI 的 E2E 覆盖） |
 | `packages/client` / `packages/adapters/*` | `View` 增加准则段与降级标记；`x-mnemoweave-project` 头；编辑请求携带 `entryVersion` | 部分实现（准则段、注入报告、项目头与 `entryVersion` 已实现；客户端渲染未实现） |
 | `apps/server` | 同步服务（`sync-service.ts`：定时/手动一趟、按范围隔离失败、重叠跳过）与 `/v1/sync/status`、`/v1/sync/refresh`（operator 令牌）；启动时按 `MNEMOWEAVE_SYNC_*` 装配；准则、档案与编辑的写入端点都经 outbox | 已实现 |
