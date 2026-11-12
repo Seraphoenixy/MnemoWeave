@@ -91,21 +91,22 @@ function validateLimits(limits: RuleLimits): void {
 /**
  * Commit one write against the collection.
  *
- * The per-entry limit is checked first, then the collection limit. A write that leaves the
- * enabled set within capacity is accepted; one that exceeds it is refused with
- * `RULE_CAPACITY_EXCEEDED` and the caller keeps its draft. Placing an entry that is disabled or
- * withdrawn never changes the measured set, so it cannot exceed capacity.
+ * Capacity includes all non-withdrawn rules. An existing oversized collection may be
+ * reduced incrementally.
  */
 export function commitRuleWrite(
   pending: LocalRuleRow,
   rows: readonly LocalRuleRow[],
   limits: RuleLimits = DEFAULT_RULE_LIMITS,
+  previousBytes = 0,
 ): RuleWritePlan {
   validateLimits(limits);
-  if (Buffer.byteLength(pending.body, 'utf8') > limits.itemMaxBytes) throw new MnemoWeaveError('RULE_ITEM_TOO_LARGE');
+  if (pending.withdrawnAt === null && Buffer.byteLength(pending.body, 'utf8') > limits.itemMaxBytes) {
+    throw new MnemoWeaveError('RULE_ITEM_TOO_LARGE');
+  }
   const measured = measuredRules(rows);
   const usage = ruleUsage(measured, limits);
-  if (usage.exceeded) throw new MnemoWeaveError('RULE_CAPACITY_EXCEEDED');
+  if (usage.exceeded && usage.usedBytes >= previousBytes) throw new MnemoWeaveError('RULE_CAPACITY_EXCEEDED');
   // The plan still reports the injectable rows: that is what the host renders. `rows` already
   // contains `pending` for a create and the replaced row for an edit.
   const injectable = rows.some(row => row.entryId === pending.entryId)
@@ -114,13 +115,13 @@ export function commitRuleWrite(
   return { row: pending, active: activeRules(injectable), usage };
 }
 
-export function planRuleCreate(input: RuleCreateInput, existing: readonly LocalRuleRow[], limits: RuleLimits = DEFAULT_RULE_LIMITS): RuleWritePlan {
+export function planRuleCreate(input: Pick<RuleCreateInput, 'body' | 'enabled'>, existing: readonly LocalRuleRow[], limits: RuleLimits = DEFAULT_RULE_LIMITS): RuleWritePlan {
   const row: LocalRuleRow = {
     entryId: randomUUID(),
     body: input.body,
     enabled: input.enabled,
-    importance: input.importance ?? 'normal',
-    pinned: input.pinned === true,
+    importance: 'normal',
+    pinned: false,
     version: 1,
     withdrawnAt: null,
     createdAt: new Date().toISOString(),
@@ -133,13 +134,11 @@ export function planRuleEdit(current: LocalRuleRow, input: RuleEditInput, existi
     ...current,
     body: input.body ?? current.body,
     enabled: input.remove === true ? false : input.enabled ?? current.enabled,
-    importance: input.importance ?? current.importance,
-    pinned: input.pinned ?? current.pinned,
     version: current.version + 1,
     withdrawnAt: input.remove === true ? new Date().toISOString() : current.withdrawnAt,
   };
   const others = existing.filter(row => row.entryId !== current.entryId);
-  return commitRuleWrite(updated, [...others, updated], limits);
+  return commitRuleWrite(updated, [...others, updated], limits, ruleUsage(existing, limits).usedBytes);
 }
 
 /** The hard check on its own, for callers that only hold rows (sync apply, tests). */

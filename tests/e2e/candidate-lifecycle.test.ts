@@ -4,13 +4,14 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdir, mkdtemp } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { MnemonCliProvider } from '../../packages/providers/mnemon/src/index.ts';
 import type { CandidateRecord } from '../../packages/core/contracts/src/index.ts';
 import { mnemonBinary } from './mnemon-binary.ts';
+import { tempDir } from '../support/temp.ts';
 
 async function start(env: Record<string, string>): Promise<{ child: ChildProcess; url: string }> {
   const child = spawn(process.execPath, ['apps/server/src/main.ts'], { cwd: resolve('.'), windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, MNEMOWEAVE_OPERATOR_TOKEN: TEST_OPERATOR, ...env } });
@@ -37,7 +38,7 @@ async function stop(child: ChildProcess): Promise<void> {
 
 test('HTTP/MCP candidate submission survives actual Server restart and never writes formal memory', { timeout: 60000 }, async () => {
   await mkdir('work/e2e', { recursive: true });
-  const root = await mkdtemp(resolve('work/e2e/candidates-'));
+  const root = await tempDir('candidate-lifecycle', 'candidates');
   const binary = mnemonBinary();
   const env = {
     MNEMON_BINARY: binary, MNEMON_DATA_DIR: join(root, 'provider'), MNEMON_STORE: 'candidate_test',
@@ -45,7 +46,7 @@ test('HTTP/MCP candidate submission survives actual Server restart and never wri
     MNEMOWEAVE_WORKER: 'off',
   };
   const input = {
-    idempotencyKey: 'http-candidate-001', content: '自动整理写入的内容必须保留来源与证据。', knowledgeType: 'Constraint', tags: ['test'],
+    idempotencyKey: 'http-candidate-001', content: '自动整理写入的内容必须保留来源与证据。', tags: ['test'],
     provenance: { source: 'test', sourceReference: 'test:lifecycle', evidence: ['actual protocol test'], verificationStatus: 'unverified', confidence: 0.5, applicability: 'test only', limitations: 'not approved', lastVerified: null },
   };
   const headers = testHostHeaders(env.MNEMOWEAVE_TOKEN);

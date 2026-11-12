@@ -24,7 +24,7 @@ async function withServer(run: (app: ReturnType<typeof configure>, seeded: { mem
   const repo = new SqliteCandidates(resolve(join(root, 'state', 'governance.db')));
   const provider = new MnemonCliProvider({ binary: mnemonBinary(), dataDir: resolve(join(root, 'provider')), store: 'gates' });
   const request = RememberInput.parse({
-    idempotencyKey: 'gate-seed', content: '初始正文。', knowledgeType: 'Practice', tags: [],
+    idempotencyKey: 'gate-seed', content: '初始正文。', tags: [],
     provenance: {
       source: 'local-user', sourceReference: 'gate:1', evidence: ['gate'], verificationStatus: 'verified',
       confidence: 1, applicability: 'global', limitations: '无（验收固定值）', lastVerified: '2026-11-10T00:00:00.000Z',

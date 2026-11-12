@@ -17,9 +17,19 @@
 | 准则、档案 | `GET/POST /v1/rules`、`PATCH /v1/rules/{ruleId}`、`GET/POST /v1/archives`、`PATCH /v1/archives/{entryId}`、`POST /v1/archives/{entryId}/state`、`GET /v1/archives/{entryId}/history`、`GET /v1/archives/{entryId}/content`、`GET /v1/archives/search` |
 | 本机诊断 | `GET /v1/storage`、`/v1/injections/latest`、`/v1/sync/status`、`GET /v1/diagnostics/embeddings`、`POST /v1/diagnostics/embeddings/backfill`；`POST /v1/sync/refresh` |
 | 空闲复盘 | `POST/GET /v1/idle-review/runs`、`POST /v1/idle-review/runs/{runId}/items`、`POST /v1/idle-review/runs/{runId}/finish` |
-| 人工治理 | `/v1/review`、`/v1/retry`、`/v1/conflicts/resolve`、`/v1/versions/cancel`、`/v1/reviews/due`、`/v1/reviews/complete` |
+| 人工治理 | `/v1/review`、`/v1/retry`、`/v1/conflicts/resolve`、`/v1/versions/cancel` |
 
 本机 HTTP 端点统一校验 Bearer 令牌，包括存活探针和 OpenAPI。宿主操作携带 `x-mnemoweave-host`，管理入口使用 operator 令牌。注入报告对宿主按 Host 隔离，可进一步限定会话。无同步配置时，同步诊断返回明确的未启用结果。
+
+## 本机 Server 启动与注册
+
+本机 Server 由登录时启动的 Windows 计划任务托管，宿主进程只发现、唤醒并连接它，不托管 Server 进程。默认端口 4317，`MNEMOWEAVE_PORT` 可覆盖；`MNEMOWEAVE_PORT=0` 由操作系统分配端口，只用于隔离测试。
+
+- 装配前先探测声明端口，事件以单行 JSON 写入 stderr：本服务已在该端口服务时输出 `already_running` 并退出 0，由宿主连接已运行的实例；其他程序占用端口时输出 `port_not_ours` 并退出 1；无人监听才继续装配。探测使用 `GET /health/live`，在 `configure()` 之前执行，避免第二个进程先打开治理库、Worker 和同步循环。`MNEMOWEAVE_PORT=0` 时，解析出实际端口后再探测一次。
+- 计划任务名为 `MnemoWeave Local Server`，以 `IgnoreNew` 保证同时只有一个实例；安装脚本负责注册，宿主只按名字运行。非 Windows 平台的任务查询返回已注册，宿主不把缺少 Windows 任务当作自身故障。
+- 宿主连接前执行 `ensureServer` 探测：连接被拒绝是唯一触发唤醒计划任务的结果；本服务已应答但未就绪时继续轮询到等待预算用尽；连接超时、其他服务占用端口、本服务拒绝服务令牌都立即停止并分别报告，不再启动第二个进程。任务未注册时报告 `task_missing` 并给出安装命令；宿主连接路径从不发起提权。
+- 提权只发生在用户明确操作时：设置页按钮或安装步骤调用 `registerLocalServerTask`，经一次性计划任务在用户会话内运行 `request-registration-task.ps1`，再由 `request-registration.ps1` 请求提权；结果写入发布目录的 `.registration-result.json` 并回读。任务已注册时直接返回 `already_registered`；注册成功后立即运行一次任务，使界面下一次状态查询观察到 Server 启动。
+- 发布目录的解析顺序：先取 `MNEMOWEAVE_SERVER_DIR`（配套 `MNEMOWEAVE_ENV_FILE`、`MNEMOWEAVE_NODE_EXE`），否则读 `scripts/publish-server.mjs` 写入的 `%LOCALAPPDATA%\MnemoWeave\local-server.json` 指针。指针缺失或损坏视为未发布，不抛错。
 
 ## 宿主工具注册
 
@@ -76,6 +86,8 @@ DSH 使用宿主原生工具注册；ChatGPT 桌面和 ZCode 使用各自插件�
 
 DSH 插件的实际入口是 `plugins/dsh-mnemo-weave/lib/index.js`。ZCode、ChatGPT 桌面的事件入口分别是 `packages/adapters/zcode/src/hook-main.ts` 和 `packages/adapters/chatgpt/src/hook-main.ts`。两个桌面宿主的 Hook 每次触发独立运行。默认注入截止为 2 秒，探活、事件上报、准则请求和渲染共用这一预算。ChatGPT 桌面 Hook 的前台截止为 1,900 ms，给外层 2 秒 Hook 留出退出时间。
 
+注入区块是固定文本契约：首行为 `准则（用户确认，按此执行）：`，其后每条准则一行，形如 `- <正文>`，正文去除首尾空白；没有可注入的准则时输出空字符串，不输出只有标题的区块。集合不完整时同样输出空字符串并记录失败。宿主不得裁剪、重排或用旧轮内容补齐。DSH 的渲染位于手写的 `plugins/dsh-mnemo-weave/lib/index.js`（该入口不参与打包，保持自包含）；ZCode 与 ChatGPT 桌面共用 `packages/client` 的 `renderRules`。
+
 ## 工作区与会话绑定
 
 - 工作区登记记录含稳定的 `workspaceId`（UUID）和显示名称 `name`（去除首尾空白后 1–200 字符）。首台设备生成 ID，其他设备使用同一个 ID 登记。不同工作区可同名。本机根目录仅保存在本机；名称、绝对路径、仓库 URL、分支和会话 ID 都不用于派生工作区 ID。
@@ -85,6 +97,8 @@ DSH 插件的实际入口是 `plugins/dsh-mnemo-weave/lib/index.js`。ZCode、Ch
 - 工作区绑定用于授权访问档案。档案可引用来源会话，来源会话结束不会删除档案。
 
 ## 正式记忆召回
+
+管理端 `POST /v1/memories/explore` 和 DSH 整理记忆使用正式记忆召回候选。可选的 `minScore` 在候选返回后过滤结果，分数表达相关性。结果按分数降序、发布时间降序和逻辑 ID 升序排列。
 
 - 本机按正式记忆读取权限检查召回、列表、图谱、详情和历史。启用同步时，设备还需具备 `formal-memories` 读权限才能同步该集合。准则和工作区档案各自校验权限。正式记忆召回排除撤回、非当前修订及未登记的 Provider 记录。
 - `POST /v1/recall`和 `POST /v1/memories/explore`使用一个 `query` 字段。宿主使用当前工作区的显示名称，去除首尾空白，将非空名称作为单独一行附在原查询后。工作区未提供名称时原样查询。用户也可在检索框直接输入工作区名称。Source 使用收到的查询执行既有检索和结果限制。
@@ -212,9 +226,19 @@ DSH 原生 `mnemoweave_remember` 和 stdio MCP `remember` 的工具说明引用�
 
 ### 编辑和撤回
 
-正式记忆按逻辑 ID 串行。编辑与撤回必须提交读取时的 `entryVersion`。编辑追加不可变修订，对旧修订投影 `supersedes`。省略的分类字段从当前修订继承，发布与同步携带完整分类。撤回退出当前召回，保留可读历史。正文读取通过 Provider 并核对哈希。
+正式记忆按逻辑 ID 串行。编辑与撤回必须提交读取时的 `entryVersion`。编辑追加不可变修订，对旧修订投影 `supersedes`。共享分类使用 Mnemon 的六值 `category`（`preference`、`decision`、`fact`、`insight`、`context`、`general`），可用多值 `tags` 表达工程主题和场景。撤回退出当前召回，保留可读历史。正文读取通过 Provider 并核对哈希。
+
+仅修改分类、标签或实体也会追加修订。正文相同时，新旧修订共享同一个 Provider 正文，修订历史由目录维护。同步重放按逻辑 ID 和远端版本识别。
+
+候选证据可继续使用数字 `confidence`，既有记录可读。新宿主界面及其档案提炼流程使用六值分类。旧客户端的 `knowledgeType` 与按知识类型派生的复核排期一并移除：v23 迁移清除该列、`catalog_review_state`、`catalog_review_history` 及档案草稿上的同名列，`/v1/reviews/due`、`/v1/reviews/complete` 不再提供；`GET /v1/memories` 收到 `knowledgeType` 查询参数时返回 `INVALID_INPUT`，写入载荷带该字段按未知字段拒绝。新建或编辑时，用户直接确认写入不构成内容核实。旧数据中的验证标记须结合来源与证据解读。
 
 准则编辑和启停、工作区档案编辑和归档或恢复都必须提交读取时的 `baseVersion`。缺失返回 `INVALID_INPUT`，过期返回 `VERSION_CONFLICT`。
+
+准则写入只处理正文、启用状态和移除。旧请求与同步载荷中的 `importance`、`pinned` 仍能读取，单独修改这两个字段不构成有效编辑。移除不再创建额外的本机归档副本，既有副本仍可通过 `GET /v1/rules/archive` 读取。
+
+### 人工裁决与恢复
+
+operator 通过 `/v1/review` 审核候选，通过 `/v1/retry` 重试既有写入。通用 MCP 的 `read_conflict` 可读取冲突证据和裁决历史。operator 通过 `/v1/conflicts/resolve` 裁决处于待审状态的冲突。保留现有条目会拒绝原候选，标记未验证会继续待人工处理，选择共存时提交限定适用范围的替代候选重新审核。通过 `/v1/versions/cancel` 可取消符合状态要求的未发布修订，仍持有有效 Worker 租约的运行中任务不能取消。对结果不明的写入先核对原回执和 Provider 副作用。
 
 ## 空闲复盘
 
@@ -246,6 +270,8 @@ DSH 在轮次结束后启动空闲计时。连续空闲 30 秒且累计活动达
 
 工作上下文由宿主管理。发起写入、空闲复盘或技能总结时，MnemoWeave 通过宿主读取本次任务所需且获授权的会话片段。宿主无法提供时，依赖该片段的动作跳过并记录原因。本机治理库只记录操作所需的会话绑定、事件标识和证据，不维护可更新的任务状态或会话副本。工作上下文不经本机准则入口注入，也不参与同步。
 
+本机有三套留存时限。空闲复盘使用的用户轮次正文和轮次标记保留 7 天。另一个账本按事件类型选择保存会话边界元数据、部分工具事件及候选关联证据。入账事件从接收起 7 天进入归档状态，此时仍保留载荷，再过 90 天清除载荷。标记重要、显式受保护或仍被引用的事件延后清理。已拒绝或已持久化的候选正文从进入该状态起 30 天后可清除。活动任务、未结审核、冲突记录或受保护的证据引用会延后清除，候选元数据和回执仍保留。
+
 ## Mnemon
 `MNEMON_BINARY` 默认 `mnemon`，启动由 `execFile` 执行。Windows 应指定原生 `.exe`。固定接受 `mnemon version 0.2.13`，版本检查有短期缓存，子进程设置 `MNEMON_MAX_INSIGHTS=0`，使用专用 `--data-dir` 与 `--store`。只读命令在 Store 初始化后使用只读快照；不可变正文可按 Provider ID 缓存。
 
@@ -262,9 +288,11 @@ DSH 在轮次结束后启动空闲计时。连续空闲 30 秒且累计活动达
 
 嵌入诊断只转述 Provider 的官方报告，不额外探测服务：`GET /v1/diagnostics/embeddings` 返回协议、模型、服务与模型可用性、已嵌入/总数、覆盖率、推导出的召回模式（`semantic`/`keyword`/`unknown`）、是否降级、最近错误与检查时间。Provider 没有该接口或报告失败时返回 `unknown`，不猜测。`POST /v1/diagnostics/embeddings/backfill` 以 Host 身份启动一次 `embed --all`，同一类任务同时只允许一个；任务行持久化在治理库，重启时遗留的 running 标记为 interrupted。命令输出不是稳定契约，任务是否成功以退出状态和随后重新读取的覆盖率为准，结果记录在任务详情的 `embeddedBefore`/`embeddedAfter`/`error`。
 
+嵌入服务由 Mnemon 配置和使用。MnemoWeave 调用原生 `recall`，不要求部署嵌入服务。无可用查询向量时，Mnemon 继续使用关键词、实体和图谱信号。设置页打开时读取覆盖报告，其中的召回模式是根据模型可用性和覆盖率推导的预期模式，实际单次查询也可能因生成向量失败而继续使用其他信号。当前 DSH 界面只展示补建状态，补建由维护调用显式发起。
+
 ## 治理库与配置
 
-目标本机治理库使用 schema v22。每步升级前使用 `VACUUM INTO` 生成一致快照。恢复时停止相关进程，保留原库，把选定快照作为新状态目录的 `governance.db`。Provider Store 分开备份。升级差异和切换步骤见 [当前状态](status.md#旧版同步切换)。
+目标本机治理库使用 schema v23。每步升级前使用 `VACUUM INTO` 生成一致快照。恢复时停止相关进程，保留原库，把选定快照作为新状态目录的 `governance.db`。Provider Store 分开备份。升级差异和切换步骤见 [当前状态](status.md#旧版同步切换)。
 
 ## 容量与维护
 
@@ -276,7 +304,7 @@ DSH 在轮次结束后启动空闲计时。连续空闲 30 秒且累计活动达
 
 容量不足时保留待提交草稿，并列出活跃档案与可释放的正文容量，按远端确认的更新时间从旧到新排列，同时间按 ID 排列。用户选中档案后可发起评估：有可跨工作区复用的知识时生成 [正式记忆草稿](#从档案提炼正式记忆)，用户确认共享；仅具工作区价值时可选择直接归档。评估和草稿生成均不改变档案状态。
 
-选择「提炼后归档」时，宿主保存用户对共享草稿与来源归档的两项确认，分别关联正式记忆任务 ID 与归档变更 ID。正式记忆已发布或已核对为重复后，才提交归档动作。重开界面或重试沿用原标识及回执。待审、排队、结果未知或失败时不推进归档；查询原回执。归档仍提交来源的 `baseVersion`。若来源已更新，保留已发布记忆和最新档案，显示归档冲突。归档确认并应用后才释放活跃容量，原草稿由用户重试。空闲复盘遇到容量不足只记录跳过，不发起该维护流程。
+选择「提炼后归档」时，宿主保存用户对共享草稿与来源归档的两项确认，分别关联正式记忆任务 ID 与归档变更 ID。正式记忆已发布或已核对为重复后，才提交归档动作。重开界面或重试沿用原标识及回执。待审、排队、结果未知或失败时不推进归档；查询原回执。归档仍提交预览固定的来源 `baseVersion`。归档状态接口接受可选的 UUID `changeId`，宿主重试时沿用该标识及原请求。若来源已更新，保留已发布记忆和最新档案，显示归档冲突。归档确认并应用后才释放活跃容量，原草稿由用户重试。空闲复盘遇到容量不足只记录跳过，不发起该维护流程。
 
 
 管理列表按 `limit`/`cursor` 翻页，正文预算不计标题、ID 和版本等元数据。
@@ -292,6 +320,7 @@ DSH 在轮次结束后启动空闲计时。连续空闲 30 秒且累计活动达
 | `MNEMOWEAVE_RULE_CAPACITY_BYTES` | 准则总容量，默认 10,000 UTF-8 字节 |
 | `MNEMOWEAVE_ARCHIVE_ACTIVE_CAPACITY_BYTES` | 每个工作区作用域的活跃档案容量，默认 10 MiB |
 | `MNEMOWEAVE_MIN_FREE_BYTES`、`MNEMOWEAVE_QUOTA_SOFT_BYTES`、`MNEMOWEAVE_QUOTA_HARD_BYTES` | 容量地板与软硬配额 |
+| `MNEMOWEAVE_LEGACY_WORKSPACE_MAP` | 旧项目 ID 到工作区 UUID 和名称的 JSON 对照表路径 |
 | `MNEMOWEAVE_SYNC_*` | 同步配置，见 [同步协议](sync.md) |
 
 整理后保存和技能任务的界面行为见 [记忆界面设计](ui.md)。

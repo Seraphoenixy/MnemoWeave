@@ -10,7 +10,7 @@ import { SqliteCandidates } from '../../packages/infrastructure/governance/src/i
 import { MnemonCliProvider } from '../../packages/providers/mnemon/src/index.ts';
 import { SyncStore } from '../../packages/infrastructure/sync-store/src/index.ts';
 import { createSyncServer } from '../../packages/protocols/sync-http/src/index.ts';
-import { MnemoWeaveError, RememberInput } from '../../packages/core/contracts/src/index.ts';
+import { MnemoWeaveError, RememberInput, SyncFormalPayload } from '../../packages/core/contracts/src/index.ts';
 import { mnemonBinary } from './mnemon-binary.ts';
 
 /**
@@ -43,7 +43,7 @@ test('a user edit is confirmed remotely, applied locally and published once', as
   const seedRepo = new SqliteCandidates(resolve(join(dir, 'state', 'governance.db')));
   const seedProvider = new MnemonCliProvider({ binary: mnemonBinary(), dataDir: resolve(join(dir, 'provider')), store: 'edit_sync' });
   const request = RememberInput.parse({
-    idempotencyKey: `seed-${randomUUID()}`, content: '初始正文：发布路径写入。', knowledgeType: 'Practice', tags: [],
+    idempotencyKey: `seed-${randomUUID()}`, content: '初始正文：发布路径写入。', tags: [],
     provenance: {
       source: 'local-user', sourceReference: 'e2e:seed', evidence: ['seed'], verificationStatus: 'verified',
       confidence: 1, applicability: 'shared collection', limitations: '无（验收固定值）', lastVerified: '2026-11-10T07:00:00.000Z',
@@ -94,6 +94,23 @@ test('a user edit is confirmed remotely, applied locally and published once', as
     const listingAfter = await app.client!.memories({ query: '第二次编辑', limit: 10 });
     assert.equal(listingAfter.items[0]?.content, '第二次编辑后的正文。');
     assert.equal(listingAfter.items[0]?.entryVersion, 2);
+
+    const metadata = { content: '第二次编辑后的正文。', entities: ['服务 A'] };
+    const metadataEdit = await app.client!.editMemory(memoryId, { ...metadata, entryVersion: 2 });
+    assert.equal(metadataEdit.entryVersion, 3);
+    assert.equal(metadataEdit.providerMemoryId, second.providerMemoryId);
+    assert.notEqual(metadataEdit.revisionId, second.revisionId);
+    const repeated = await app.client!.editMemory(memoryId, { ...metadata, entryVersion: 3 });
+    assert.equal(repeated.duplicate, true);
+    assert.equal(repeated.revisionId, metadataEdit.revisionId);
+    const listingAfterMetadata = await app.client!.memories({ limit: 10 });
+    assert.deepEqual(listingAfterMetadata.items[0]?.tags, []);
+    assert.deepEqual(listingAfterMetadata.items[0]?.entities, metadata.entities);
+    const sharedMetadata = remote.pull(B_TOKEN, { stream: FORMAL_STREAM, since: 2, limit: 10 }).changes;
+    assert.equal(sharedMetadata.length, 1);
+    const sharedPayload = SyncFormalPayload.parse(sharedMetadata[0]?.entry.payload);
+    assert.deepEqual(sharedPayload.tags, []);
+    assert.deepEqual(sharedPayload.entities, metadata.entities);
     assert.ok(app.client?.createArchive && app.client.editArchive && app.client.workspaces);
     // An archive belongs to a registered workspace; registering is explicit and idempotent.
     await app.client!.registerWorkspace!({ workspaceId: WORKSPACE, name: 'e2e workspace' }, true);
@@ -110,13 +127,13 @@ test('a user edit is confirmed remotely, applied locally and published once', as
     // An archive travels on its own workspace stream, not on the formal-memory one.
     assert.deepEqual(remote.pull(DEVICE_TOKEN, { stream: ARCHIVE_STREAM, since: 0, limit: 10 }).changes
       .filter(change => change.entry.entryId === archive.entryId).map(change => [change.operation, change.version]), [['create', 1], ['update', 2]]);
-    // One edit is one local Revision: the initial publish plus two edits is three, not four.
-    // Appending from both the sync apply step and the direct-edit path doubled the history.
+    // Each confirmed edit adds one revision, even when two revisions share a Provider record.
     const inspect = new SqliteCandidates(resolve(join(dir, 'state', 'governance.db')));
     try {
       const detail = inspect.catalog.get(memoryId);
-      assert.equal(detail.revisions.length, 3, `expected 3 revisions (initial + 2 edits), got ${detail.revisions.length}`);
-      assert.deepEqual(detail.revisions.map(revision => revision.number), [1, 2, 3]);
+      assert.equal(detail.revisions.length, 4);
+      assert.deepEqual(detail.revisions.map(revision => revision.number), [1, 2, 3, 4]);
+      assert.equal(detail.revisions[3]?.parentId, detail.revisions[2]?.id);
       assert.equal(detail.revisions[2]?.parentId, detail.revisions[1]?.id);
       assert.equal(detail.revisions[1]?.parentId, detail.revisions[0]?.id);
     } finally { inspect.close(); }

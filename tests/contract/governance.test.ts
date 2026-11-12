@@ -1,18 +1,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { SqliteCandidates } from '../../packages/infrastructure/governance/src/index.ts';
 import { RememberInput, MnemoWeaveError } from '../../packages/core/contracts/src/index.ts';
+import { tempDir } from '../support/temp.ts';
 
 const fixture = (key = 'candidate-key-001') => RememberInput.parse({
-  idempotencyKey: key, content: 'Immutable candidate content, not yet approved.', knowledgeType: 'Practice',
+  idempotencyKey: key, content: 'Immutable candidate content, not yet approved.',
   provenance: { source: 'test', sourceReference: 'fixture:1', evidence: ['a deterministic test'], verificationStatus: 'unverified', confidence: 0.5, applicability: 'isolated fixture', limitations: 'not production knowledge', lastVerified: null },
 });
 test('Candidate and submission receipt persist atomically with stable idempotency', async () => {
   await mkdir('work/tests', { recursive: true });
-  const path = join(await mkdtemp(resolve('work/tests/governance-')), 'state.db');
+  const path = join(await tempDir('governance', 'governance'), 'state.db');
   const repo = new SqliteCandidates(path);
   const first = repo.submit(fixture());
   assert.equal(first.status, 'pending_review');
@@ -30,7 +32,7 @@ test('Candidate and submission receipt persist atomically with stable idempotenc
 });
 test('Failed receipt insertion rolls back candidate insertion', async () => {
   await mkdir('work/tests', { recursive: true });
-  const path = join(await mkdtemp(resolve('work/tests/rollback-')), 'state.db');
+  const path = join(await tempDir('governance', 'rollback'), 'state.db');
   const repo = new SqliteCandidates(path);
   const inject = new DatabaseSync(path);
   inject.exec('CREATE TRIGGER fail_receipt BEFORE INSERT ON governance_submission_receipts BEGIN SELECT RAISE(ABORT, \'injected receipt failure\'); END');
@@ -40,14 +42,14 @@ test('Failed receipt insertion rolls back candidate insertion', async () => {
   assert.equal(repo.submit(fixture()).status, 'pending_review');
   repo.close(); inject.close();
 });
-test('schema v22 is the workspace model: no owner on a memory, workspaces and streams on the rest', async () => {
+test('schema v23 is the workspace model: no owner on a memory, workspaces and streams on the rest', async () => {
   await mkdir('work/tests', { recursive: true });
-  const path = join(await mkdtemp(resolve('work/tests/schema22-')), 'governance.db');
+  const path = join(await tempDir('governance', 'schema22'), 'governance.db');
   const repo = new SqliteCandidates(path);
   repo.close();
   const inspect = new DatabaseSync(path);
   try {
-    assert.equal(Number(inspect.prepare('PRAGMA user_version').get()!['user_version']), 22);
+    assert.equal(Number(inspect.prepare('PRAGMA user_version').get()!['user_version']), 23);
     const tables = new Set((inspect.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map((row) => row.name));
     for (const name of [
       'entry_versions', 'share_outbox', 'sync_state', 'sync_outbox', 'sync_inbox', 'formal_map',
@@ -64,7 +66,9 @@ test('schema v22 is the workspace model: no owner on a memory, workspaces and st
     const ruleColumns = new Set((inspect.prepare("SELECT name FROM pragma_table_info('runtime_rules')").all() as { name: string }[]).map(row => row.name));
     for (const name of ['importance', 'pinned', 'created_at', 'archived_at']) assert.ok(ruleColumns.has(name), name);
     const revisionColumns = new Set((inspect.prepare("SELECT name FROM pragma_table_info('catalog_revisions')").all() as { name: string }[]).map(row => row.name));
-    for (const name of ['knowledge_type', 'category', 'importance', 'tags_json', 'entities_json']) assert.ok(revisionColumns.has(name), name);
+    for (const name of ['category', 'importance', 'tags_json', 'entities_json']) assert.ok(revisionColumns.has(name), name);
+    // v23 removed the knowledge-type column; the migration test proves it is gone.
+    assert.ok(!revisionColumns.has('knowledge_type'), 'the removed dimension has no column');
     // A memory has no owner: the shared collection is the whole store.
     const memoryColumns = new Set((inspect.prepare("SELECT name FROM pragma_table_info('catalog_memories')").all() as { name: string }[]).map(row => row.name));
     assert.equal(memoryColumns.has('project_id'), false, 'no owner column on a formal memory');
@@ -84,7 +88,7 @@ test('schema v22 is the workspace model: no owner on a memory, workspaces and st
 });
 test('a v21 store loses the memory owner column and keeps the attribution as a backup', async () => {
   await mkdir('work/tests', { recursive: true });
-  const path = join(await mkdtemp(resolve('work/tests/schema21-')), 'governance.db');
+  const path = join(await tempDir('governance', 'schema21'), 'governance.db');
   const created = new SqliteCandidates(path);
   created.close();
   // Rebuild the v21 shape: the owner column and its index existed, and a memory carried one.
@@ -99,7 +103,7 @@ test('a v21 store loses the memory owner column and keeps the attribution as a b
   migrated.close();
   const inspect = new DatabaseSync(path);
   try {
-    assert.equal(Number(inspect.prepare('PRAGMA user_version').get()!['user_version']), 22);
+    assert.equal(Number(inspect.prepare('PRAGMA user_version').get()!['user_version']), 23);
     const columns = new Set((inspect.prepare("SELECT name FROM pragma_table_info('catalog_memories')").all() as { name: string }[]).map(row => row.name));
     assert.equal(columns.has('project_id'), false, 'the owner column is dropped, not merely ignored');
     // The attribution survives in the backup table so an operator can still answer where a
@@ -110,9 +114,74 @@ test('a v21 store loses the memory owner column and keeps the attribution as a b
     inspect.close();
   }
 });
+test('v21 archive migration requires a project mapping and preserves the version history', async () => {
+  await mkdir('work/tests', { recursive: true });
+  const path = join(await tempDir('governance', 'schema21-archive'), 'governance.db');
+  const source = new SqliteCandidates(path);
+  const entryId = '22222222-2222-4222-8222-222222222222';
+  const at = '2026-11-10T00:00:00.000Z';
+  const archive = { entryId, workspaceId: 'alpha', title: 'archive', body: 'first', source: 'user' as const,
+    verification: 'open' as const, evidence: '', withdrawnAt: null, version: 1, updatedAt: at };
+  source.memory.upsertArchive(archive, at);
+  source.memory.upsertArchive({ ...archive, body: 'second', version: 2, state: 'archived', archivedAt: at }, at);
+  const request = fixture();
+  const candidate = source.submit(request);
+  const hash = createHash('sha256').update(request.content).digest('hex');
+  const memoryId = source.catalog.publishInitial(candidate.id, request, 'legacy-provider-id', hash, at).memoryId;
+  source.memory.upsertFormalMap({ entryId: memoryId, version: 1, providerId: 'legacy-provider-id',
+    contentHash: hash, state: 'applied', appliedAt: at }, at);
+  source.close();
+  const old = new DatabaseSync(path);
+  old.exec(`
+    ALTER TABLE project_archives RENAME COLUMN workspace_id TO project_id;
+    ALTER TABLE project_archive_revisions RENAME COLUMN workspace_id TO project_id;
+    ALTER TABLE sync_state RENAME COLUMN stream TO scope;
+    ALTER TABLE sync_outbox RENAME COLUMN stream TO scope;
+    ALTER TABLE sync_inbox RENAME COLUMN stream TO scope;
+    PRAGMA user_version=21;
+  `);
+  old.close();
+  assert.throws(() => new SqliteCandidates(path), /Missing workspace migration mapping/);
+  const workspaceId = '11111111-1111-4111-8111-111111111111';
+  const migrated = new SqliteCandidates(path, { legacyWorkspaces: { alpha: { workspaceId, name: 'Alpha' } } });
+  try {
+    assert.equal(migrated.memory.archive(entryId)?.workspaceId, workspaceId);
+    assert.equal(migrated.memory.archive(entryId)?.state, 'archived');
+    assert.deepEqual(migrated.memory.archiveHistory(entryId).map(row => [row.version, row.workspace_id, row.body]),
+      [[2, workspaceId, 'second'], [1, workspaceId, 'first']]);
+    assert.deepEqual(migrated.catalog.visibleProviderIds(), []);
+    assert.throws(() => migrated.catalog.get(memoryId), { code: 'NOT_FOUND' });
+    migrated.catalog.verifyMigratedFormalEntries([memoryId]);
+    assert.deepEqual(migrated.catalog.visibleProviderIds(), ['legacy-provider-id']);
+    assert.equal(migrated.catalog.get(memoryId).id, memoryId);
+  } finally { migrated.close(); }
+});
+test('snapshot stages hide changes until the cursor and projection commit together', async () => {
+  await mkdir('work/tests', { recursive: true });
+  const path = join(await tempDir('governance', 'snapshot-stage'), 'governance.db');
+  const repo = new SqliteCandidates(path);
+  const at = '2026-11-10T00:00:00.000Z';
+  const row = { entryId: '22222222-2222-4222-8222-222222222222', version: 1, body: 'original', enabled: true, withdrawnAt: null };
+  try {
+    repo.memory.upsertRule(row, at);
+    repo.ledger.setCursor('rules', 1, at);
+    const stage = repo.memory.stageSnapshot();
+    stage.store.upsertRule({ ...row, version: 2, body: 'new' }, at);
+    assert.equal(repo.memory.rule(row.entryId)?.body, 'original');
+    assert.throws(() => stage.commit(() => {
+      repo.ledger.resetScope('rules', 2, at);
+      throw new Error('switch failed');
+    }), /switch failed/);
+    assert.equal(repo.memory.rule(row.entryId)?.body, 'original');
+    assert.equal(repo.ledger.cursor('rules'), 1);
+    stage.commit(() => repo.ledger.resetScope('rules', 2, at));
+    assert.equal(repo.memory.rule(row.entryId)?.body, 'new');
+    assert.equal(repo.ledger.cursor('rules'), 2);
+  } finally { repo.close(); }
+});
 test('diagnostic jobs are single-flight and a killed run is marked interrupted', async () => {
   await mkdir('work/tests', { recursive: true });
-  const path = join(await mkdtemp(resolve('work/tests/jobs-')), 'governance.db');
+  const path = join(await tempDir('governance', 'jobs'), 'governance.db');
   let repo = new SqliteCandidates(path);
   const job = repo.memory.beginDiagnosticJob('embedding-backfill');
   assert.equal(job.state, 'running');
@@ -130,7 +199,7 @@ test('diagnostic jobs are single-flight and a killed run is marked interrupted',
 });
 test('idle-review runs are single-flight and refuse late items after finishing', async () => {
   await mkdir('work/tests', { recursive: true });
-  const path = join(await mkdtemp(resolve('work/tests/runs-')), 'governance.db');
+  const path = join(await tempDir('governance', 'runs'), 'governance.db');
   let repo = new SqliteCandidates(path);
   const run = repo.events.beginIdleRun('host-1', 's-1');
   assert.equal(run.state, 'running');
@@ -155,7 +224,7 @@ test('idle-review runs are single-flight and refuse late items after finishing',
 test('Rejected existing databases preserve their journal mode, data and version', async () => {
   await mkdir('work/tests', { recursive: true });
   for (const version of [0, 1, 2]) {
-    const path = join(await mkdtemp(resolve('work/tests/ownership-')), 'existing.db');
+    const path = join(await tempDir('governance', 'ownership'), 'existing.db');
     const original = new DatabaseSync(path);
     original.exec(`CREATE TABLE user_data(value TEXT); INSERT INTO user_data VALUES('preserve'); PRAGMA user_version=${version}`);
     const mode = original.prepare('PRAGMA journal_mode').get()!['journal_mode'];
@@ -173,7 +242,7 @@ test('Rejected existing databases preserve their journal mode, data and version'
 
 test('a partially failed idle-review run keeps finished actions and releases the rest', async () => {
   await mkdir('work/tests', { recursive: true });
-  const path = join(await mkdtemp(resolve('work/tests/idle-retry-')), 'governance.db');
+  const path = join(await tempDir('governance', 'idle-retry'), 'governance.db');
   const repo = new SqliteCandidates(path);
   try {
     // Two turns carrying a durable signal each.
@@ -208,7 +277,7 @@ test('a partially failed idle-review run keeps finished actions and releases the
 
 test('the user\'s own turn text is kept as review evidence and expires with the turn bookkeeping', async () => {
   await mkdir('work/tests', { recursive: true });
-  const path = join(await mkdtemp(resolve('work/tests/turn-messages-')), 'governance.db');
+  const path = join(await tempDir('governance', 'turn-messages'), 'governance.db');
   const repo = new SqliteCandidates(path);
   try {
     const turn = (turnId: string, text: string, noRetention = false) => ({
@@ -239,7 +308,7 @@ test('the user\'s own turn text is kept as review evidence and expires with the 
 
 test('an idle-review action must name the open run and may not write a formal memory', async () => {
   await mkdir('work/tests', { recursive: true });
-  const path = join(await mkdtemp(resolve('work/tests/idle-run-bound-')), 'governance.db');
+  const path = join(await tempDir('governance', 'idle-run-bound'), 'governance.db');
   const repo = new SqliteCandidates(path);
   try {
     const run = repo.events.beginIdleRun('host-1', 's-1');

@@ -1,14 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { listTrash, restoreTrash, trashSkill, trashDirFor } from '../../plugins/dsh-mnemo-weave/src/ui/skills-trash.ts';
+import { tempDir } from '../support/temp.ts';
 
 const skill = (name: string): string => `---\nname: ${name}\ndescription: A skill\n---\n\n# ${name}\n`;
 
 test('removing a skill keeps its whole folder and restore returns it unchanged', async () => {
-  const workspace = await mkdtemp(resolve('work', 'skills-trash-ws-'));
-  const stateDir = await mkdtemp(resolve('work', 'skills-trash-state-'));
+  const workspace = await tempDir('skills-trash', 'skills-trash-ws');
+  const stateDir = await tempDir('skills-trash', 'skills-trash-state');
   const dir = join(workspace, '.dsh', 'skills', 'alpha');
   const path = join(dir, 'SKILL.md');
   await mkdir(join(dir, 'scripts'), { recursive: true });
@@ -29,8 +30,8 @@ test('removing a skill keeps its whole folder and restore returns it unchanged',
 });
 
 test('restore refuses to overwrite a skill created at the same location', async () => {
-  const workspace = await mkdtemp(resolve('work', 'skills-trash2-ws-'));
-  const stateDir = await mkdtemp(resolve('work', 'skills-trash2-state-'));
+  const workspace = await tempDir('skills-trash', 'skills-trash2-ws');
+  const stateDir = await tempDir('skills-trash', 'skills-trash2-state');
   const path = join(workspace, '.dsh', 'skills', 'alpha', 'SKILL.md');
   await mkdir(join(workspace, '.dsh', 'skills', 'alpha'), { recursive: true });
   await writeFile(path, skill('alpha'), 'utf8');
@@ -43,8 +44,8 @@ test('restore refuses to overwrite a skill created at the same location', async 
 });
 
 test('a path outside the four roots is refused', async () => {
-  const workspace = await mkdtemp(resolve('work', 'skills-trash3-ws-'));
-  const stateDir = await mkdtemp(resolve('work', 'skills-trash3-state-'));
+  const workspace = await tempDir('skills-trash', 'skills-trash3-ws');
+  const stateDir = await tempDir('skills-trash', 'skills-trash3-state');
   await assert.rejects(trashSkill({ workspace, stateDir, path: join(workspace, 'SKILL.md') }),
     (error: unknown) => (error as { code?: string }).code === 'SKILL_PATH_INVALID');
 });

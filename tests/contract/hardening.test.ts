@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
@@ -8,16 +8,17 @@ import { SqliteCandidates } from '../../packages/infrastructure/governance/src/i
 import { VersionWorkflow } from '../../packages/core/application/src/version-workflow.ts';
 import { MnemoWeaveError } from '../../packages/core/contracts/src/index.ts';
 import type { RememberRequest } from '../../packages/core/contracts/src/index.ts';
+import { tempDir } from '../support/temp.ts';
 
 const DAY_MS = 86_400_000;
 const request = (key: string, content = `Hardening fixture content for ${key}.`): RememberRequest => ({
-  idempotencyKey: key, content, knowledgeType: 'Practice', tags: [],
+  idempotencyKey: key, content, tags: [],
   provenance: { source: 'hardening-test', sourceReference: 'fixture:hardening', evidence: ['fixture'], verificationStatus: 'unverified', confidence: 0.5, applicability: 'hardening fixture', limitations: 'test only', lastVerified: null },
 });
 
 async function fixture() {
   await mkdir('work/tests', { recursive: true });
-  const root = await mkdtemp(resolve('work/tests/hardening-'));
+  const root = await tempDir('hardening', 'hardening');
   return { root, path: join(root, 'governance.db') };
 }
 

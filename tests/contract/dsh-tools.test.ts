@@ -48,11 +48,20 @@ after(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-/** A Host context that records the tool registrations and event handlers. */
-function hostContext() {
+/**
+ * A Host context that records the tool registrations and event handlers.
+ *
+ * It reproduces the Cordis behavior that decides whether the plugin loads at all: reading a
+ * service that is neither declared nor provided throws `cannot get property "X" without inject`,
+ * and the exception escapes `apply`, so nothing is registered. A stub that answered `undefined`
+ * for every unknown name hid exactly that failure. `ctx.get` is the documented unchecked read.
+ */
+function hostContext(options: { commands?: boolean } = {}) {
   const tools: Array<{ name: string; description: string; execute: (args: never, execution?: unknown) => Promise<unknown> }> = [];
   const handlers = new Map<string, (payload: unknown) => unknown>();
-  const ctx = {
+  const provided = new Map<string, unknown>();
+  if (options.commands === true) provided.set('commands', { register: () => () => undefined });
+  const target = {
     tools: {
       register(definition: { name: string }) {
         tools.push(definition as never);
@@ -64,7 +73,16 @@ function hostContext() {
       handlers.set(event, handler);
       return () => undefined;
     },
+    get(name: string) { return provided.get(name); },
   };
+  const ctx = new Proxy(target, {
+    get(object, prop, receiver) {
+      if (typeof prop === 'string' && !(prop in object) && !provided.has(prop)) {
+        throw new Error(`cannot get property "${prop}" without inject`);
+      }
+      return Reflect.get(object, prop, receiver);
+    },
+  });
   return { ctx, tools, handlers };
 }
 
@@ -81,12 +99,57 @@ test('the plugin declares the tools service and registers the documented tool fa
   }
 });
 
+test('a Host without the command registry still gets every tool and the injected rules', () => {
+  // The command registry is optional. Reading it as a property used to throw out of `apply`, and
+  // the failure was invisible here because every stub returned `undefined` for unknown names.
+  const { ctx, tools, handlers } = hostContext();
+  assert.doesNotThrow(() => apply(ctx, CONFIG));
+  assert.deepEqual(tools.map(tool => tool.name), EXPECTED_TOOLS);
+  assert.equal(handlers.has('agent/created'), true, 'the prompt hook is still registered');
+});
+
 test('applying and disposing releases every registration', () => {
   const { ctx, tools } = hostContext();
   const dispose = apply(ctx, CONFIG);
   assert.equal(tools.length, EXPECTED_TOOLS.length);
   dispose();
   assert.equal(released.filter(name => name.startsWith('release:')).length, EXPECTED_TOOLS.length, 'each tool has a disposer');
+});
+
+test('a tool call with no turn field on the execution context still names its turn from the log', async () => {
+  // DSH does not put a turn on the tool execution context. Reading only `execution.turn` sent a
+  // session header and no turn header, and the Server refuses that partial identity as
+  // UNAUTHORIZED. The Session log is the authority for the open turn.
+  calls = [];
+  const recall = createTools(CONFIG).find(tool => tool.name === 'mnemoweave_recall')!;
+  const agent = { id: 'session-from-log', session: { snapshotEvents: () => [{ type: 'turn/start', data: { turn: 12 } }] } };
+  await recall.execute({ query: 'TypeScript', limit: 2 } as never, { signal: undefined, agent } as never);
+  const headers = calls.at(-1)!.init.headers as Record<string, string>;
+  assert.equal(headers['x-mnemoweave-turn-id'], '12', 'the open turn comes from the session log');
+  assert.equal(headers['x-mnemoweave-session-id'], 'session-from-log');
+  // A turn that already ended must not be reported: the next turn has not started yet.
+  const closed = { id: 'session-ended', session: { snapshotEvents: () => [{ type: 'turn/start', data: { turn: 3 } }, { type: 'turn/end', data: { turn: 3 } }] } };
+  await recall.execute({ query: 'TypeScript', limit: 2 } as never, { signal: undefined, agent: closed } as never);
+  assert.equal((calls.at(-1)!.init.headers as Record<string, string>)['x-mnemoweave-turn-id'], undefined);
+});
+
+test('the no-retention refusal also derives the turn from the session log', async () => {
+  calls = [];
+  const remember = createTools(CONFIG).find(tool => tool.name === 'mnemoweave_remember')!;
+  const agent = {
+    id: 'session-refused',
+    session: {
+      snapshotEvents: () => [
+        { type: 'turn/start', data: { turn: 9 } },
+        { type: 'turn/no-retention', data: { turn: 9 } },
+      ],
+    },
+  };
+  await assert.rejects(
+    async () => remember.execute({ content: '候选正文', reason: '测试', evidenceRefs: ['e-1'] } as never, { signal: undefined, agent } as never),
+    /TURN_NO_RETENTION/,
+  );
+  assert.equal(calls.length, 0, 'a refused turn never reaches the Server');
 });
 
 test('recall carries the host and turn identity and stays a read', async () => {
@@ -174,7 +237,7 @@ test('remember submits a candidate with host-generated provenance, never a publi
   calls = [];
   const remember = createTools(CONFIG).find(tool => tool.name === 'mnemoweave_remember')!;
   const result = await remember.execute({
-    content: '提交前必须运行类型检查。', knowledgeType: 'Practice', reason: '用户要求记录',
+    content: '提交前必须运行类型检查。', reason: '用户要求记录',
     evidenceRefs: ['tool:pnpm-typecheck'], assessment: 'supported',
   } as never, toolRun(3, 'session-1') as never);
   const call = calls.at(-1)!;
@@ -216,7 +279,7 @@ test('a turn marked not to be retained refuses every model-initiated write befor
     turn,
   });
   for (const [name, args] of [
-    ['mnemoweave_remember', { content: '候选正文', knowledgeType: 'Practice', reason: '测试', evidenceRefs: ['e-1'] }],
+    ['mnemoweave_remember', { content: '候选正文', reason: '测试', evidenceRefs: ['e-1'] }],
     ['mnemoweave_change_rule', { action: 'replace', entryId: 'rule-1', body: '新正文', reason: '测试' }],
     ['mnemoweave_write_workspace_archive', { action: 'create', title: '标题', body: '正文', evidence: 'x', reason: '测试' }],
   ] as const) {
@@ -231,7 +294,7 @@ test('a turn marked not to be retained refuses every model-initiated write befor
   // The next turn is unaffected: marking is per turn, not per session.
   const remember = tools.find(item => item.name === 'mnemoweave_remember')!;
   const result = await remember.execute(
-    { content: '候选正文', knowledgeType: 'Practice', reason: '测试', evidenceRefs: ['e-1'] } as never,
+    { content: '候选正文', reason: '测试', evidenceRefs: ['e-1'] } as never,
     { signal: undefined, agent: { id: 'session-1', session: { snapshotEvents: () => [{ type: 'turn/start', data: { turn: 5 } }] } }, turn: 5 } as never,
   );
   assert.equal((result as { status?: string }).status, 'candidate');

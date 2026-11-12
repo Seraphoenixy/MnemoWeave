@@ -24,5 +24,5 @@ process.stdout.write(`${JSON.stringify({
   version,
   peerRange: '>=0.2.0-rc.2 <0.2.1-0 || >=0.2.1-rc.1 <0.3.0-0 (dsh-mnemon 0.5.42)',
   helpProbe: probe(['--help']),
-  nextStep: 'Update docs/host-acceptance.md section 5 with this evidence, then implement packages/adapters/dsh against the real SDK and run the HOST-02 scenario list.',
+  nextStep: 'Record this version and evidence in docs/host-acceptance.md, then run the DSH scenario list against plugins/dsh-mnemo-weave.',
 }, null, 2)}\n`);

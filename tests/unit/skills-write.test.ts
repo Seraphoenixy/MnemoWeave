@@ -1,16 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { adoptSkill, createSkill, restoreSkill, skillVersions } from '../../plugins/dsh-mnemo-weave/src/ui/skills-write.ts';
+import { tempDir } from '../support/temp.ts';
 
 const hash = (text: string): string => createHash('sha256').update(text).digest('hex');
 const skill = (name: string, body: string): string => `---\nname: ${name}\ndescription: A skill\n---\n\n${body}\n`;
 
 async function fixture() {
-  const workspace = await mkdtemp(resolve('work', 'skills-write-ws-'));
-  const stateDir = await mkdtemp(resolve('work', 'skills-write-state-'));
+  const workspace = await tempDir('skills-write', 'skills-write-ws');
+  const stateDir = await tempDir('skills-write', 'skills-write-state');
   const path = join(workspace, '.dsh', 'skills', 'alpha', 'SKILL.md');
   const original = skill('alpha', 'Original body.');
   await mkdir(join(workspace, '.dsh', 'skills', 'alpha'), { recursive: true });
@@ -46,7 +47,7 @@ test('restore writes the stored version and records the text it replaced', async
 });
 
 test('a new skill is written only under a real root and never overwrites an existing name', async () => {
-  const workspace = await mkdtemp(resolve('work', 'skills-new-ws-'));
+  const workspace = await tempDir('skills-write', 'skills-new-ws');
   const root = join(workspace, '.dsh', 'skills');
   const created = await createSkill({ workspace, root, name: 'new-skill', description: 'A new skill.' });
   assert.equal(created.path, join(root, 'new-skill', 'SKILL.md'));

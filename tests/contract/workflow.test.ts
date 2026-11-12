@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readdir } from 'node:fs/promises';
+import { mkdir, readdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
@@ -9,16 +9,17 @@ import { MemoryWorkflow } from '../../packages/core/application/src/workflow.ts'
 import { MemoryApplication } from '../../packages/core/application/src/index.ts';
 import { RememberInput, SemanticAssessment } from '../../packages/core/contracts/src/index.ts';
 import type { WriteProvider, WorkflowRepository } from '../../packages/core/application/src/workflow-ports.ts';
+import { tempDir } from '../support/temp.ts';
 
 const checks = Object.fromEntries(['source', 'accuracy', 'reuse', 'scope', 'duplication', 'consistency'].map(key => [key, { result: 'pass', reason: 'Test fixture assessment' }]));
 const assessment = () => SemanticAssessment.parse({ checks, requiresHuman: false, conflict: 'none', summary: 'Test only; not real technical validation.' });
 const request = (key = 'workflow-test-001') => RememberInput.parse({
-  idempotencyKey: key, content: `Workflow immutable ${key}`, knowledgeType: 'Practice',
+  idempotencyKey: key, content: `Workflow immutable ${key}`,
   provenance: { source: 'contract-test', sourceReference: 'fixture:1', evidence: ['fixture'], verificationStatus: 'verified', confidence: 0.5, applicability: 'test only', limitations: 'not production knowledge', lastVerified: '2026-11-08T00:00:00Z' },
 });
 async function setup() {
   await mkdir('work/tests', { recursive: true });
-  const root = await mkdtemp(resolve('work/tests/workflow-'));
+  const root = await tempDir('workflow', 'workflow');
   const path = join(root, 'governance.db');
   const repo = new SqliteCandidates(path);
   const memories = new Map<string, string>();
@@ -70,7 +71,7 @@ test('no candidate is ever approved automatically, whatever its scope or verific
     const t = await setup();
     try {
       const input = request();
-      if (kind === 'architecture') input.knowledgeType = 'Architecture';
+      if (kind === 'architecture') input.category = 'decision';
       if (kind === 'unverified') input.provenance.verificationStatus = 'unverified';
       const candidate = t.repo.submit(input);
       await new MemoryWorkflow(t.repo, t.provider).tick();
@@ -273,7 +274,7 @@ test('several candidates are reviewed in one tick without calling a model', asyn
 
 test('A v1 database with real candidate data upgrades, backs up, and preserves legacy idempotency', async () => {
   await mkdir('work/tests', { recursive: true });
-  const root = await mkdtemp(resolve('work/tests/migration-')); const path = join(root, 'governance.db');
+  const root = await tempDir('workflow', 'migration'); const path = join(root, 'governance.db');
   const legacy = new DatabaseSync(path);
   legacy.exec(`CREATE TABLE governance_candidates(id TEXT PRIMARY KEY,idempotency_key TEXT NOT NULL UNIQUE,request_hash TEXT NOT NULL,request_json TEXT NOT NULL,status TEXT NOT NULL CHECK(status='pending_review'),submitted_at TEXT NOT NULL) STRICT;
     CREATE TABLE governance_submission_receipts(id TEXT PRIMARY KEY,candidate_id TEXT NOT NULL UNIQUE REFERENCES governance_candidates(id),status TEXT NOT NULL CHECK(status='candidate')) STRICT; PRAGMA user_version=1;`);

@@ -1,18 +1,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { SqliteCandidates, SqliteSyncLedger } from '../../packages/infrastructure/governance/src/index.ts';
 import { buildChange, plainContent } from '../../packages/core/application/src/sync.ts';
 import type { SyncChangeRecordValue, SyncEntryDraftValue } from '../../packages/core/contracts/src/index.ts';
+import { tempDir } from '../support/temp.ts';
 
 const NOW = '2026-11-10T07:00:00.000Z';
 
 async function openLedger() {
   await mkdir('work/tests', { recursive: true });
-  const path = join(await mkdtemp(resolve('work/tests/ledger-')), 'governance.db');
+  const path = join(await tempDir('sync-ledger', 'ledger'), 'governance.db');
   const repo = new SqliteCandidates(path);
   repo.close();
   const db = new DatabaseSync(path, { timeout: 5000 });

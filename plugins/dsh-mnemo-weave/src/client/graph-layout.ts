@@ -21,7 +21,6 @@ export interface LayoutNode {
   /** A retired node is drawn apart: it is reachable history, not a current memory. */
   retired: boolean;
   category?: string;
-  knowledgeType?: string;
 }
 
 export interface LayoutLink {
@@ -135,7 +134,6 @@ export function layoutGraph(graph: UiGraph, options: LayoutOptions = {}): GraphL
         placed.push({
           memoryId: id, x: centrePoint, y: centrePoint, hop: 0, radius: radiusFor(node.importance), retired: node.state !== 'active',
           ...(node.category === undefined ? {} : { category: node.category }),
-          ...(node.knowledgeType === undefined ? {} : { knowledgeType: node.knowledgeType }),
         });
       }
       continue;
@@ -153,7 +151,6 @@ export function layoutGraph(graph: UiGraph, options: LayoutOptions = {}): GraphL
         radius: radiusFor(node.importance),
         retired: node.state !== 'active',
         ...(node.category === undefined ? {} : { category: node.category }),
-        ...(node.knowledgeType === undefined ? {} : { knowledgeType: node.knowledgeType }),
       });
     });
   }

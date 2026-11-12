@@ -35,7 +35,7 @@ function harness(answer: unknown, options: { body?: string } = {}) {
 }
 
 test('a draft is created from the current version and nothing is published', async () => {
-  const h = harness({ action: 'draft', content: '长线缆串口在 9600 波特率下会丢包，提到 115200 后稳定。', knowledgeType: 'Troubleshooting', category: 'decision', importance: 4, reason: '可复用的排查结论', assessment: 'supported' });
+  const h = harness({ action: 'draft', content: '长线缆串口在 9600 波特率下会丢包，提到 115200 后稳定。', category: 'decision', importance: 4, reason: '可复用的排查结论', assessment: 'supported' });
   const draft = await previewDistillation(h.source, h.run, ENTRY);
   assert.equal(draft.kind, 'draft');
   if (draft.kind !== 'draft') throw new Error('expected a draft');
@@ -48,7 +48,7 @@ test('a draft is created from the current version and nothing is published', asy
     contentHash: (written['source'] as { contentHash: string }).contentHash,
   });
   assert.equal((written['source'] as { contentHash: string }).contentHash.length, 64);
-  assert.equal(written['knowledgeType'], 'Troubleshooting');
+  assert.equal('knowledgeType' in written, false, 'a draft records no knowledge type');
   assert.equal(written['importance'], 4);
   assert.equal(draft.usedRange.truncated, false);
 });
@@ -63,24 +63,24 @@ test('a task that declines returns a skip with its reason and creates no draft',
 });
 
 test('an unusable draft body is a skip rather than a stored draft', async () => {
-  const tooLong = harness({ action: 'draft', content: 'x'.repeat(8001), knowledgeType: 'Practice' });
+  const tooLong = harness({ action: 'draft', content: 'x'.repeat(8001) });
   assert.equal((await previewDistillation(tooLong.source, tooLong.run, ENTRY)).kind, 'skip');
   assert.equal(tooLong.created.length, 0);
-  const blank = harness({ action: 'draft', content: '   ', knowledgeType: 'Practice' });
+  const blank = harness({ action: 'draft', content: '   ' });
   assert.equal((await previewDistillation(blank.source, blank.run, ENTRY)).kind, 'skip');
   assert.equal(blank.created.length, 0);
 });
 
-test('an unknown knowledge type falls back to Practice instead of being stored verbatim', async () => {
-  const h = harness({ action: 'draft', content: '可复用的结论。', knowledgeType: 'Nonsense', category: 'bogus', importance: 9 });
+test('an unknown classification is dropped instead of being stored verbatim', async () => {
+  const h = harness({ action: 'draft', content: '可复用的结论。', category: 'bogus', importance: 9 });
   await previewDistillation(h.source, h.run, ENTRY);
-  assert.equal(h.created[0]!['knowledgeType'], 'Practice');
+  assert.equal('knowledgeType' in h.created[0]!, false);
   assert.equal('category' in h.created[0]!, false);
   assert.equal('importance' in h.created[0]!, false);
 });
 
 test('a long archive reports the range actually used', async () => {
-  const h = harness({ action: 'draft', content: '可复用的结论。', knowledgeType: 'Practice' }, { body: 'x'.repeat(20_000) });
+  const h = harness({ action: 'draft', content: '可复用的结论。' }, { body: 'x'.repeat(20_000) });
   const draft = await previewDistillation(h.source, h.run, ENTRY);
   if (draft.kind !== 'draft') throw new Error('expected a draft');
   assert.equal(draft.usedRange.truncated, true);

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -8,6 +8,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { startServer, stopProcess, testHostHeaders, TEST_HOST, until } from '../support/server.ts';
 import type { CandidateRecord, InjectionRecord } from '../../packages/core/contracts/src/index.ts';
 import { mnemonBinary } from './mnemon-binary.ts';
+import { tempDir } from '../support/temp.ts';
 
 /**
  * Real Mnemon + Server + ZCode hook process + MCP proxy. What the model receives per turn is the
@@ -15,7 +16,7 @@ import { mnemonBinary } from './mnemon-binary.ts';
  */
 test('Real Mnemon + Server + ZCode hook process + MCP proxy deliver resident rules and reachable memory', { timeout: 60000 }, async () => {
   await mkdir('work/e2e', { recursive: true });
-  const root = await mkdtemp(resolve('work/e2e', 'runtime-flow-'));
+  const root = await tempDir('runtime-memory', 'runtime-flow');
   const env = {
     MNEMON_BINARY: mnemonBinary(), MNEMON_DATA_DIR: join(root, 'provider'), MNEMON_STORE: 'acceptance',
     MNEMOWEAVE_STATE_DIR: join(root, 'state'), MNEMOWEAVE_PORT: '0',
@@ -34,7 +35,6 @@ test('Real Mnemon + Server + ZCode hook process + MCP proxy deliver resident rul
     const submission = await post('/v1/remember', {
       idempotencyKey: 'runtime-resident-001',
       content: 'Runtime acceptance: always use the isolated acceptance store.',
-      knowledgeType: 'Constraint',
       provenance: {
         source: 'e2e', sourceReference: 'isolated runtime scenario', evidence: ['fixture only'],
         verificationStatus: 'unverified', confidence: 0.5, applicability: 'runtime acceptance only',

@@ -202,7 +202,7 @@ test('memory forms are modal windows instead of page layout', () => {
   assert.match(modalHtml, /mwui-modal-body/, 'its content scrolls inside the window');
 
   const formHtml = render(panels.CreateMemoryForm, {
-    draft: { content: '', knowledgeType: 'Practice', category: '', importance: '', tags: '', entities: '', projectId: '', reason: '' },
+    draft: { content: '', category: '', importance: '', tags: '', entities: '', projectId: '', reason: '' },
     busy: false, error: null, language: 'zh', onChange: noop, onCancel: noop, onSubmit: noop,
   });
   assert.doesNotMatch(formHtml, /mwui-pane/, 'the form brings no card chrome of its own');

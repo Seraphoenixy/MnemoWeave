@@ -5,8 +5,11 @@ export declare const inject: readonly string[];
 export declare function render(injection: unknown): string;
 /** The command name a person types to mark the current turn as not retained. */
 export declare const NO_RETENTION_COMMAND: string;
-/** Injected services: the tool registry, and the optional command registry. */
-export declare const injectCommands: readonly string[];
+/**
+ * Reads a service the plugin does not declare. Cordis throws for undeclared property reads, and an
+ * exception in `apply` unloads the fiber, so optional services go through `ctx.get`.
+ */
+export declare function readOptionalService(ctx: unknown, name: string): any;
 /** The shared engineering-experience guidance every `remember` description quotes. */
 export declare const ENGINEERING_EXPERIENCE_GUIDANCE: string;
 /** One model-facing tool, in the shape DSH's `ctx.tools.register` accepts. */

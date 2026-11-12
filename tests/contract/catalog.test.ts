@@ -1,18 +1,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readdir } from 'node:fs/promises';
+import { mkdir, readdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { SqliteCandidates } from '../../packages/infrastructure/governance/src/index.ts';
 import { MemoryApplication } from '../../packages/core/application/src/index.ts';
 import { RememberInput, MnemoWeaveError } from '../../packages/core/contracts/src/index.ts';
 import { createHash } from 'node:crypto';
+import { tempDir } from '../support/temp.ts';
 
 async function fixture() {
   await mkdir('work/tests', { recursive: true });
-  const root = await mkdtemp(resolve('work/tests/catalog-')); const path = join(root, 'governance.db');
+  const root = await tempDir('catalog', 'catalog'); const path = join(root, 'governance.db');
   const repo = new SqliteCandidates(path);
-  const request = RememberInput.parse({ idempotencyKey: 'catalog-test-key', content: 'Authoritative Provider text.', knowledgeType: 'Practice', provenance: { source: 'test', sourceReference: 'fixture:catalog', evidence: ['test only'], verificationStatus: 'unverified', confidence: 0.5, applicability: 'isolated test', limitations: 'fixture', lastVerified: null } });
+  const request = RememberInput.parse({ idempotencyKey: 'catalog-test-key', content: 'Authoritative Provider text.', provenance: { source: 'test', sourceReference: 'fixture:catalog', evidence: ['test only'], verificationStatus: 'unverified', confidence: 0.5, applicability: 'isolated test', limitations: 'fixture', lastVerified: null } });
   const candidate = repo.submit(request); repo.review(candidate.id, 'approve', 'fixture-operator', 'fixture', null);
   assert.equal(repo.acquire('fixture-owner', 90000), true);
   const job = repo.claim('fixture-owner')!;
@@ -56,7 +57,8 @@ test('v2 published receipts backfill v3 without changing Candidate or Provider i
   const old = new DatabaseSync(f.path);
   // Rebuild an authentic v2 store: drop the version catalog and revert the v6 governance
   // changes (failure-tracking columns, outbox enqueue journal) so the upgrade chain replays.
-  old.exec(`DROP TABLE catalog_review_history; DROP TABLE catalog_review_state; DROP TABLE catalog_conflict_decisions; DROP TABLE catalog_conflicts; DROP TRIGGER catalog_operation_plan_immutable; DROP TABLE catalog_reservations; DROP TABLE catalog_relations; DROP TABLE catalog_operations; DROP TRIGGER catalog_revisions_immutable_update; DROP TRIGGER catalog_revisions_immutable_delete; DROP TABLE catalog_revisions; DROP TABLE catalog_memories;
+  // v23 no longer creates the review tables, so the revert must tolerate their absence.
+  old.exec(`DROP TABLE IF EXISTS catalog_review_history; DROP TABLE IF EXISTS catalog_review_state; DROP TABLE catalog_conflict_decisions; DROP TABLE catalog_conflicts; DROP TRIGGER catalog_operation_plan_immutable; DROP TABLE catalog_reservations; DROP TABLE catalog_relations; DROP TABLE catalog_operations; DROP TRIGGER catalog_revisions_immutable_update; DROP TRIGGER catalog_revisions_immutable_delete; DROP TABLE catalog_revisions; DROP TABLE catalog_memories;
     ALTER TABLE governance_tasks DROP COLUMN first_failed_at; ALTER TABLE governance_tasks DROP COLUMN alerted_at;
     CREATE TABLE governance_outbox_v2(id TEXT PRIMARY KEY, task_id TEXT NOT NULL UNIQUE REFERENCES governance_tasks(id), state TEXT NOT NULL);
     INSERT INTO governance_outbox_v2(id, task_id, state) SELECT id, task_id, 'pending' FROM governance_outbox;
@@ -82,24 +84,23 @@ test('v2 published receipts backfill v3 without changing Candidate or Provider i
 });
 
 /**
- * Classification must survive storage, not just the wire. A local Remember records knowledgeType
- * and tags; a synced entry records category, importance, tags and entities. Both are kept, and a
- * missing value stays missing instead of turning into an empty one.
+ * Classification must survive storage, not just the wire. A synced entry records category,
+ * importance, tags and entities; a missing value stays missing instead of turning into an
+ * empty one.
  */
 test('revision classification is stored and read back without inventing values', async () => {
   const f = await fixture();
   try {
     const memory = f.repo.catalog.get(f.publication.memoryId);
     const first = memory.revisions[0]!;
-    assert.equal(first.knowledgeType, 'Practice', 'a local Remember records its knowledge type');
     assert.deepEqual(first.tags, []);
-    assert.equal(first.category, undefined, 'no category is invented from the knowledge type');
+    assert.equal(first.category, undefined, 'a local Remember records no category');
     assert.equal(first.importance, undefined);
 
     // A synced revision carries the payload's classification instead.
     const second = f.repo.catalog.publishSynced(
       memory.id,
-      RememberInput.parse({ idempotencyKey: 'synced-meta', content: '另一台机器的正文。', knowledgeType: 'Practice', tags: [], provenance: { source: 'sync', sourceReference: 'x', evidence: ['e'], verificationStatus: 'verified', confidence: 1, applicability: 'isolated test', limitations: 'n', lastVerified: null } }),
+      RememberInput.parse({ idempotencyKey: 'synced-meta', content: '另一台机器的正文。', tags: [], provenance: { source: 'sync', sourceReference: 'x', evidence: ['e'], verificationStatus: 'verified', confidence: 1, applicability: 'isolated test', limitations: 'n', lastVerified: null } }),
       'provider-synced',
       createHash('sha256').update('另一台机器的正文。').digest('hex'),
       '2026-11-11T00:00:00.000Z',
@@ -113,6 +114,6 @@ test('revision classification is stored and read back without inventing values',
     assert.equal(row.importance, 4);
     assert.deepEqual(row.tags, ['发布']);
     assert.deepEqual(row.entities, ['MnemoWeave']);
-    assert.equal(row.knowledgeType, undefined, 'a synced revision does not claim a local knowledge type');
+    assert.equal(row.category, 'decision', 'a synced revision keeps the category its payload carried');
   } finally { f.repo.close(); }
 });

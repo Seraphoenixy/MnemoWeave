@@ -3,11 +3,11 @@ import { MnemoWeaveError } from '../../contracts/src/index.ts';
 import {
   CandidateIdInput, ConflictIdInput, ConflictResolutionInput, HumanReviewInput, MemoryIdInput,
   PublishedMemoryOutput, RecallInput, RecallOutput, RememberInput, RetryInput, CancelVersionInput,
-  ReviewCompleteInput, ReviewDueItem, ReviewDueOutput, EmbeddingDiagnostics, ProviderHealth,
+  EmbeddingDiagnostics, ProviderHealth,
 } from '../../contracts/src/index.ts';
 import type {
   CandidateRecord, ConflictResolutionRequest, EmbeddingDiagnosticsRecord, Health, ProviderEmbeddingStatusRecord,
-  RecallResult, RememberRequest, ReviewDueItemRecord,
+  RecallResult, RememberRequest,
 } from '../../contracts/src/index.ts';
 import type { MemoryCatalogReader } from './catalog-ports.ts';
 import type { WorkflowRepository } from './workflow-ports.ts';
@@ -41,8 +41,6 @@ export interface ReviewRepository extends CandidateRepository, WorkflowRepositor
   amend(id: string, request: RememberRequest, actor: string, reason: string): CandidateRecord;
   resolveConflict(input: ConflictResolutionRequest, actor: string): CandidateRecord;
   cancelVersion(candidateId: string, actor: string, reason: string): CandidateRecord;
-  reviewDue?(now?: Date): ReviewDueItemRecord[];
-  completeReview?(memoryId: string, actor: string, reason: string, now?: Date): ReviewDueItemRecord;
 }
 
 /**
@@ -175,16 +173,6 @@ export class MemoryApplication {
     if (!this.reviewRepository) throw new MnemoWeaveError('REVIEW_REQUIRED');
     const request = CancelVersionInput.parse(input);
     return this.reviewRepository.cancelVersion(request.candidateId, operator, request.reason);
-  }
-  /** Due reviews stay visible and valid; completion only reschedules. */
-  async reviewDue() {
-    if (!this.reviewRepository?.reviewDue) throw new MnemoWeaveError('REVIEW_REQUIRED');
-    return ReviewDueOutput.parse({ items: this.reviewRepository.reviewDue() });
-  }
-  async completeReview(input: unknown, operator: string): Promise<ReviewDueItemRecord> {
-    if (!this.reviewRepository?.completeReview) throw new MnemoWeaveError('REVIEW_REQUIRED');
-    const request = ReviewCompleteInput.parse(input);
-    return ReviewDueItem.parse(this.reviewRepository.completeReview(request.memoryId, operator, request.reason));
   }
   /** Called only by the authenticated operator protocol, never exposed as a model tool. */
   async humanReview(input: unknown, operator: string): Promise<CandidateRecord> {

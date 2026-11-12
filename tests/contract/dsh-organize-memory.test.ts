@@ -20,7 +20,7 @@ test('a user task only publishes a new record in the class the user selected', a
     createRule: async (input: unknown) => { writes.push(input); return { entryId: 'rule' }; },
     saveArchive: async (input: unknown) => { writes.push(input); return { entryId: 'archive' }; },
   } as unknown as MemorySource;
-  const input = { content: 'A new fact', knowledgeType: 'Practice', target: 'rule' as const };
+  const input = { content: 'A new fact', target: 'rule' as const };
 
   // A rule target offers the resident rules as reference and writes only a rule.
   assert.deepEqual(await organizeMemory(source, async prompt => {
@@ -36,7 +36,7 @@ test('a user task only publishes a new record in the class the user selected', a
   assert.deepEqual(await organizeMemory(source, async () => ({ action: 'review', reason: 'Contradictory' }), input), { kind: 'review', reason: 'Contradictory' });
 
   // An archive needs a bound workspace; without one the task is refused rather than guessed.
-  await assert.rejects(organizeMemory(source, async () => ({ action: 'create', body: 'X', title: 'X' }), { content: 'No workspace', knowledgeType: 'Practice', target: 'workspace-archive' }));
+  await assert.rejects(organizeMemory(source, async () => ({ action: 'create', body: 'X', title: 'X' }), { content: 'No workspace', category: 'fact', target: 'workspace-archive' }));
   assert.equal(writes.length, 1);
 });
 
@@ -49,10 +49,10 @@ test('the formal-memory target writes only a formal memory and carries no worksp
     create: async (input: Record<string, unknown>) => { writes.push(input); return { memoryId: 'formal' }; },
   } as unknown as MemorySource;
   assert.deepEqual(
-    await organizeMemory(source, async () => ({ action: 'create', body: '整理后的正文' }), { content: '原文', knowledgeType: 'Practice' }),
+    await organizeMemory(source, async () => ({ action: 'create', body: '整理后的正文' }), { content: '原文', category: 'fact' }),
     { kind: 'formal', entryId: 'formal' },
   );
-  assert.deepEqual(writes, [{ content: '整理后的正文', knowledgeType: 'Practice' }]);
+  assert.deepEqual(writes, [{ content: '整理后的正文', category: 'fact' }]);
   assert.equal('workspaceId' in writes[0]!, false, 'a formal memory carries no workspace');
 });
 

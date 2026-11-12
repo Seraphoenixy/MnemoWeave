@@ -2,9 +2,11 @@ node_modules/
 work/
 dist/
 coverage/
+# Hand-written plugin sources stay tracked (lib/index.js, lib/index.d.ts); every artifact the
+# plugin build writes is ignored.
 plugins/dsh-mnemo-weave/lib/client.js
 plugins/dsh-mnemo-weave/lib/ui/
-plugins/dsh-mnemo-weave/lib/shared/
+plugins/dsh-mnemo-weave/lib/host-config.js
 .env
 .env.*
 !.env.example

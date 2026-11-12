@@ -33,7 +33,7 @@ test('the DSH Host half lists, reads, edits and reports injections through a rea
   const seed = new SqliteCandidates(resolve(join(dir, 'state', 'governance.db')));
   const seedProvider = new MnemonCliProvider({ binary: mnemonBinary(), dataDir: resolve(join(dir, 'provider')), store: 'dsh_host' });
   const request = RememberInput.parse({
-    idempotencyKey: `seed-${randomUUID()}`, content: '插件读取的初始正文。', knowledgeType: 'Practice', tags: [],
+    idempotencyKey: `seed-${randomUUID()}`, content: '插件读取的初始正文。', tags: [],
     provenance: {
       source: 'local-user', sourceReference: 'e2e:dsh-host', evidence: ['seed'], verificationStatus: 'verified',
       confidence: 1, applicability: 'shared collection', limitations: '无（验收固定值）', lastVerified: '2026-11-10T10:00:00.000Z',
@@ -91,7 +91,7 @@ test('the DSH Host half lists, reads, edits and reports injections through a rea
     const withClass = await rpc('memory', { memoryId });
     assert.equal(withClass.ok, true);
     if (withClass.ok) {
-      const record = withClass.value as { revisions: Array<{ category?: string; importance?: number; tags?: string[]; knowledgeType?: string }> };
+      const record = withClass.value as { revisions: Array<{ category?: string; importance?: number; tags?: string[] }> };
       const latest = record.revisions[record.revisions.length - 1]!;
       assert.equal(latest.category, 'decision');
       assert.equal(latest.importance, 4);

@@ -72,13 +72,11 @@ export class SqliteSyncLedger implements SyncLedgerPort {
   resetScope(stream: string, cursor: number, at: string): void {
     this.transaction(() => {
       this.db.prepare('DELETE FROM sync_inbox WHERE stream = ? AND seq <= ?').run(stream, cursor);
-      if (cursor > this.cursor(stream)) {
-        this.db.prepare(`
-          INSERT INTO sync_state(stream, cursor, last_pull_at, last_error) VALUES(?, ?, ?, NULL)
-          ON CONFLICT(stream) DO UPDATE SET cursor = excluded.cursor, last_pull_at = excluded.last_pull_at
-        `).run(stream, cursor, at);
-      }
-      this.db.prepare('UPDATE sync_state SET last_error = NULL WHERE stream = ?').run(stream);
+      this.db.prepare(`
+        INSERT INTO sync_state(stream, cursor, last_pull_at, last_error) VALUES(?, ?, ?, NULL)
+        ON CONFLICT(stream) DO UPDATE SET cursor=MAX(sync_state.cursor, excluded.cursor),
+          last_pull_at=excluded.last_pull_at, last_error=NULL
+      `).run(stream, cursor, at);
     });
   }
 
@@ -120,6 +118,14 @@ export class SqliteSyncLedger implements SyncLedgerPort {
       SELECT * FROM sync_outbox WHERE entry_id = ? AND state IN ('pending', 'unknown')
       ORDER BY created_at DESC LIMIT 1
     `).get(entryId) as unknown as OutboxDbRow | undefined;
+    return row ? this.outboxRow(row) : null;
+  }
+
+  confirmedOutbox(entryId: string, baseVersion: number): SyncOutboxRow | null {
+    const row = this.db.prepare(`
+      SELECT * FROM sync_outbox WHERE entry_id=? AND base_version=? AND state='confirmed'
+      ORDER BY created_at DESC LIMIT 1
+    `).get(entryId, baseVersion) as unknown as OutboxDbRow | undefined;
     return row ? this.outboxRow(row) : null;
   }
 

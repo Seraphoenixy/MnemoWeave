@@ -1,7 +1,7 @@
 import { testHostHeaders, awaitServerReady, TEST_OPERATOR } from '../support/server.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, copyFile } from 'node:fs/promises';
+import { mkdir, copyFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
@@ -12,6 +12,7 @@ import type { CandidateRecord } from '../../packages/core/contracts/src/index.ts
 import { MnemonCliProvider, createRunner } from '../../packages/providers/mnemon/src/index.ts';
 import { startServer, stopProcess, until } from '../support/server.ts';
 import { mnemonBinary } from './mnemon-binary.ts';
+import { tempDir } from '../support/temp.ts';
 
 /**
  * The Server has no model: every non-duplicate candidate waits for a person, and this fixture
@@ -20,14 +21,14 @@ import { mnemonBinary } from './mnemon-binary.ts';
  */
 async function fixture() {
   await mkdir('work/e2e', { recursive: true });
-  const root = await mkdtemp(resolve('work/e2e/reliable-'));
+  const root = await tempDir('reliable-memory', 'reliable');
   const env = {
     MNEMON_BINARY: mnemonBinary(), MNEMON_DATA_DIR: join(root, 'provider'), MNEMON_STORE: 'milestone',
     MNEMOWEAVE_STATE_DIR: join(root, 'state'), MNEMOWEAVE_PORT: '0', MNEMOWEAVE_TOKEN: 'host-milestone-token-0123456789',
     MNEMOWEAVE_OPERATOR_TOKEN: 'operator-milestone-token-987654321', MNEMOWEAVE_WORKER: 'on',
   };
   const input = (name: string) => RememberInput.parse({
-    idempotencyKey: `milestone-${name}`, content: `MnemoWeave milestone ${name}: test-only scoped engineering knowledge.`, knowledgeType: 'Practice',
+    idempotencyKey: `milestone-${name}`, content: `MnemoWeave milestone ${name}: test-only scoped engineering knowledge.`,
     provenance: { source: 'local-fixture', sourceReference: `test:${name}`, evidence: ['automated fixture evidence'], verificationStatus: 'verified', confidence: 0.5, applicability: 'test fixture on Node24 Windows only', limitations: 'No real technical conclusion', lastVerified: '2026-11-08T00:00:00Z' },
   });
   return { root, env, input, close: async () => undefined };
@@ -74,7 +75,7 @@ test('Milestone: HTTP/MCP submit, human review, real Mnemon writes, restart and 
     await until(() => get(second.id), value => value.status === 'persisted');
     const mcpRecall = await client.callTool({ name: 'recall', arguments: { query: 'MnemoWeave milestone', limit: 20 } });
     assert.notEqual(mcpRecall.isError, true); assert.ok((mcpRecall.content as { text: string }[])[0]!.text.includes('http-approved'));
-    const architecture = await submit({ ...f.input('human-architecture'), knowledgeType: 'Architecture' });
+    const architecture = await submit({ ...f.input('human-architecture'), category: 'decision' });
     await until(() => get(architecture.id), value => value.status === 'needs_review');
     assert.equal((await review(architecture.id, 'approve', {}, headers)).status, 401);
     assert.equal((await review(architecture.id, 'approve')).status, 200);
@@ -83,7 +84,7 @@ test('Milestone: HTTP/MCP submit, human review, real Mnemon writes, restart and 
     await until(() => get(uncertain.id), value => value.status === 'needs_review');
     assert.equal((await review(uncertain.id, 'reject')).status, 200);
     assert.equal((await get(uncertain.id)).status, 'rejected');
-    const amended = await submit({ ...f.input('amend-original'), knowledgeType: 'Architecture' });
+    const amended = await submit({ ...f.input('amend-original'), category: 'decision' });
     await until(() => get(amended.id), value => value.status === 'needs_review');
     const amendedResponse = await review(amended.id, 'amend', { replacement: f.input('amend-corrected') });
     assert.equal(amendedResponse.status, 200);

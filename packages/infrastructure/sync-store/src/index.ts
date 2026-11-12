@@ -1,12 +1,13 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { VersionConflictError } from '../../../core/application/src/sync.ts';
 import {
   MnemoWeaveError, SyncAccepted, SyncChangeRecord, SyncEntry, SyncPullPage, SyncSnapshot,
-  SyncStream, SyncStreamGrant, SyncStreamsOutput, RULE_CAPACITY_BYTES, streamOf,
+  SyncStream, SyncStreamGrant, SyncStreamsOutput, ARCHIVE_ACTIVE_CAPACITY_BYTES, RULE_CAPACITY_BYTES,
+  FORMAL_STREAM, RULES_STREAM, streamOf,
 } from '../../../core/contracts/src/index.ts';
 import type {
-  SyncAcceptedValue, SyncChangeRecordValue, SyncChangeRequest, SyncEntryValue, SyncPullPageValue,
+  LegacyWorkspaceMapValue, SyncAcceptedValue, SyncChangeRecordValue, SyncChangeRequest, SyncEntryValue, SyncPullPageValue,
   SyncPullRequest, SyncSnapshotValue, SyncStreamGrantValue, SyncStreamsValue,
 } from '../../../core/contracts/src/index.ts';
 
@@ -33,6 +34,9 @@ function digest(value: string): string {
 export interface SyncStoreOptions {
   path: string;
   now?: () => string;
+  legacyWorkspaces?: LegacyWorkspaceMapValue;
+  ruleCapacityBytes?: number;
+  archiveCapacityBytes?: number;
 }
 
 interface DeviceRow {
@@ -43,14 +47,23 @@ interface DeviceRow {
 
 export class SyncStore {
   private readonly db: DatabaseSync;
+  private readonly ruleCapacityBytes: number;
+  private readonly archiveCapacityBytes: number;
   private readonly now: () => string;
 
   constructor(options: SyncStoreOptions) {
+    this.ruleCapacityBytes = options.ruleCapacityBytes ?? RULE_STREAM_CAPACITY_BYTES;
+    this.archiveCapacityBytes = options.archiveCapacityBytes ?? ARCHIVE_ACTIVE_CAPACITY_BYTES;
     this.now = options.now ?? (() => new Date().toISOString());
     this.db = new DatabaseSync(options.path, { timeout: 5000 });
+    try { this.initialize(options); }
+    catch (error) { this.db.close(); throw error; }
+  }
+
+  private initialize(options: SyncStoreOptions): void {
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;');
     const version = Number(this.db.prepare('PRAGMA user_version').get()!['user_version']);
-    if (version > SCHEMA_VERSION && version !== 2) throw new Error('Unsupported sync schema version');
+    if (version > SCHEMA_VERSION) throw new Error('Unsupported sync schema version');
     if (version === 0) {
       if (this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").get()) throw new Error('Refusing to initialize an unidentified existing database');
       this.transaction(() => {
@@ -112,13 +125,39 @@ export class SyncStore {
         `);
       });
     }
-    if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) === 2) {
-      // v2 was protocol 1: scopes, no stream derivation, no per-stream capacity. The switch
-      // procedure backs the database up first; this step renames the columns it can and leaves
-      // the old rows under their old key so nothing is silently reinterpreted as a stream.
-      // The operator backs the database up before switching; this step never rewrites a body.
+    if (version === 2) {
+      this.db.prepare('VACUUM INTO ?').run(`${options.path}.v2-${randomUUID()}.bak`);
       this.transaction(() => {
         if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) !== 2) return;
+        const mapping = options.legacyWorkspaces ?? {};
+        const resolveProject = (id: string) => {
+          const item = Object.hasOwn(mapping, id) ? mapping[id] : undefined;
+          if (!item) throw new Error(`Missing workspace migration mapping for project ${id}`);
+          return item.workspaceId;
+        };
+        const oldGrants = this.db.prepare('SELECT device_id, scope, can_read, can_write FROM sync_device_scopes ORDER BY device_id').all() as
+          { device_id: string; scope: string; can_read: number; can_write: number }[];
+        const projectGrants = new Map<string, typeof oldGrants>();
+        for (const grant of oldGrants) {
+          if (!grant.can_read && grant.can_write) throw new Error('Resolve legacy write-only grants before migrating');
+          if (grant.scope === 'global') continue;
+          if (!grant.scope.startsWith('project:')) throw new Error(`Unknown legacy scope ${grant.scope}`);
+          const project = grant.scope.slice('project:'.length);
+          resolveProject(project);
+          const grants = projectGrants.get(project) ?? [];
+          grants.push(grant);
+          projectGrants.set(project, grants);
+        }
+        const workspaceGrants = new Map<string, typeof oldGrants>();
+        for (const [project, { workspaceId }] of Object.entries(mapping)) {
+          const grants = projectGrants.get(project) ?? [];
+          const previous = workspaceGrants.get(workspaceId);
+          const permissions = (items: typeof oldGrants) => JSON.stringify(items.map(item => [item.device_id, item.can_read, item.can_write]));
+          if (previous && permissions(previous) !== permissions(grants)) {
+            throw new Error(`Legacy projects mapped to ${workspaceId} have different device permissions`);
+          }
+          workspaceGrants.set(workspaceId, grants);
+        }
         this.db.exec(`
           CREATE TABLE sync_device_streams(
             device_id TEXT NOT NULL REFERENCES sync_devices(device_id),
@@ -127,17 +166,10 @@ export class SyncStore {
             can_write INTEGER NOT NULL,
             PRIMARY KEY(device_id, stream)
           );
-          -- The old "global" grant covered rules and formal memories together; it becomes one
-          -- grant on each stream. A project grant has no workspace id yet, so it is never copied
-          -- into a stream name: it waits in the backup table for the operator's mapping, and a
-          -- device without the new grant simply sees nothing on that stream.
           INSERT INTO sync_device_streams(device_id, stream, can_read, can_write)
             SELECT device_id, 'rules', can_read, can_write FROM sync_device_scopes WHERE scope='global';
           INSERT INTO sync_device_streams(device_id, stream, can_read, can_write)
             SELECT device_id, 'formal-memories', can_read, can_write FROM sync_device_scopes WHERE scope='global';
-          CREATE TABLE legacy_device_scope_grants(device_id TEXT NOT NULL, scope TEXT NOT NULL, can_read INTEGER NOT NULL, can_write INTEGER NOT NULL);
-          INSERT INTO legacy_device_scope_grants(device_id, scope, can_read, can_write)
-            SELECT device_id, scope, can_read, can_write FROM sync_device_scopes WHERE scope LIKE 'project:%';
           CREATE TABLE sync_stream_heads(stream TEXT PRIMARY KEY, head INTEGER NOT NULL);
           CREATE TABLE legacy_scope_changes AS SELECT * FROM sync_changes;
           CREATE TABLE legacy_scope_receipts AS SELECT * FROM sync_change_receipts;
@@ -166,11 +198,6 @@ export class SyncStore {
             request_hash TEXT NOT NULL,
             created_at TEXT NOT NULL
           );
-          -- Old cursors are discarded rather than reinterpreted: every stream is re-read from a
-          -- snapshot. The old entries table had no stream column, so it is rebuilt with one
-          -- derived from the entry kind, and for an archive from the workspace in its payload. A
-          -- legacy archive whose payload carries no workspace cannot name a stream; it keeps its
-          -- row under an empty stream and is never listed, so it waits for the operator's mapping.
           CREATE TABLE sync_entries_streams(
             entry_id TEXT PRIMARY KEY,
             stream TEXT NOT NULL,
@@ -182,14 +209,7 @@ export class SyncStore {
             updated_at TEXT NOT NULL
           );
           INSERT INTO sync_entries_streams(entry_id, stream, kind, version, content_json, payload_json, withdrawn_at, updated_at)
-            SELECT entry_id,
-              CASE
-                WHEN kind IN ('runtime','rule') THEN 'rules'
-                WHEN kind IN ('formal','formal-memory') THEN 'formal-memories'
-                WHEN json_extract(payload_json, '$.workspaceId') IS NOT NULL
-                  THEN 'workspace-archives:' || json_extract(payload_json, '$.workspaceId')
-                ELSE ''
-              END,
+            SELECT entry_id, '',
               CASE kind
                 WHEN 'runtime' THEN 'rule'
                 WHEN 'formal' THEN 'formal-memory'
@@ -203,8 +223,31 @@ export class SyncStore {
           CREATE INDEX IF NOT EXISTS sync_entries_stream ON sync_entries(stream);
           DROP TABLE IF EXISTS sync_device_scopes;
           DROP TABLE IF EXISTS sync_scope_heads;
+          CREATE TABLE sync_migrated_streams(stream TEXT PRIMARY KEY);
           PRAGMA user_version=3;
         `);
+        const insertGrant = this.db.prepare('INSERT INTO sync_device_streams VALUES(?, ?, ?, ?)');
+        for (const [workspaceId, grants] of workspaceGrants) {
+          for (const grant of grants) {
+            insertGrant.run(grant.device_id, `workspace-archives:${workspaceId}`, grant.can_read, grant.can_write);
+          }
+        }
+        const updateEntry = this.db.prepare('UPDATE sync_entries SET stream=?, payload_json=? WHERE entry_id=?');
+        const entries = this.db.prepare('SELECT * FROM sync_entries').all() as
+          { entry_id: string; kind: string; version: number; content_json: string; payload_json: string; withdrawn_at: string | null }[];
+        for (const row of entries) {
+          const { projectId, scope: _scope, ...legacy } = JSON.parse(row.payload_json);
+          const payload = row.kind === 'workspace-archive'
+            ? { ...legacy, workspaceId: typeof projectId === 'string' ? resolveProject(projectId) : legacy.workspaceId,
+                state: legacy.state ?? 'active', archivedAt: legacy.archivedAt ?? null }
+            : row.kind === 'rule' ? { ...legacy, importance: legacy.importance ?? 'normal', pinned: legacy.pinned ?? false } : legacy;
+          const entry = SyncEntry.parse({
+            entryId: row.entry_id, kind: row.kind, version: row.version, content: JSON.parse(row.content_json),
+            payload, withdrawnAt: row.withdrawn_at,
+          });
+          updateEntry.run(streamOf(entry.kind, entry.payload), JSON.stringify(entry.payload), entry.entryId);
+        }
+        this.db.exec('INSERT INTO sync_migrated_streams SELECT DISTINCT stream FROM sync_entries');
       });
     }
   }
@@ -333,30 +376,27 @@ export class SyncStore {
     }
   }
 
-  /**
-   * Capacity for the streams that have one. The rule collection is measured across the whole
-   * stream, including the `\n§\n` separators, and an over-capacity write is refused before a
-   * version or log entry exists. A disabled or withdrawn rule does not consume capacity.
-   */
-  private assertCapacity(stream: string, entryId: string, payloadJson: string, body: string, withdrawnAt: string | null): void {
-    if (stream !== 'rules') return;
-    const payload = JSON.parse(payloadJson) as { enabled?: boolean };
-    if (payload.enabled === false || withdrawnAt !== null) return;
-    let used = 0;
-    let counted = 0;
-    const rows = this.db.prepare("SELECT entry_id, content_json, payload_json, withdrawn_at FROM sync_entries WHERE stream='rules'").all() as
-      { entry_id: string; content_json: string; payload_json: string; withdrawn_at: string | null }[];
-    for (const row of rows) {
-      if (row.entry_id === entryId) continue;
-      if ((JSON.parse(row.payload_json) as { enabled?: boolean }).enabled === false || row.withdrawn_at !== null) continue;
-      const text = (JSON.parse(row.content_json) as { data: string }).data;
-      used += Buffer.byteLength(text, 'utf8') + (counted === 0 ? 0 : Buffer.byteLength('\n§\n', 'utf8'));
-      counted += 1;
+  private assertCapacity(stream: string, entry: SyncChangeRequest['entry']): void {
+    if (stream === FORMAL_STREAM) return;
+    const rule = stream === RULES_STREAM;
+    const separator = rule ? Buffer.byteLength('\n§\n', 'utf8') : 0;
+    const rows = this.db.prepare(`
+      SELECT entry_id, json_extract(content_json, '$.byteLength') AS bytes FROM sync_entries
+      WHERE stream=? AND withdrawn_at IS NULL
+        AND (? OR COALESCE(json_extract(payload_json, '$.state'), 'active') = 'active')
+    `).all(stream, Number(rule)) as { entry_id: string; bytes: number }[];
+    const previous = rows.find(row => row.entry_id === entry.entryId);
+    const archived = 'state' in entry.payload && entry.payload.state === 'archived';
+    const included = entry.withdrawnAt === null && (rule || !archived);
+    const before = rows.reduce((sum, row) => sum + row.bytes, 0) + Math.max(0, rows.length - 1) * separator;
+    const count = rows.length - Number(previous !== undefined) + Number(included);
+    const after = before - Math.max(0, rows.length - 1) * separator - (previous?.bytes ?? 0)
+      + (included ? entry.content.byteLength : 0) + Math.max(0, count - 1) * separator;
+    if (after > (rule ? this.ruleCapacityBytes : this.archiveCapacityBytes)
+      && (rule ? after >= before : included)) {
+      throw new MnemoWeaveError(rule ? 'RULE_CAPACITY_EXCEEDED' : 'ARCHIVE_CAPACITY_EXCEEDED');
     }
-    used += Buffer.byteLength(body, 'utf8') + (counted === 0 ? 0 : Buffer.byteLength('\n§\n', 'utf8'));
-    if (used > RULE_STREAM_CAPACITY_BYTES) throw new MnemoWeaveError('RULE_CAPACITY_EXCEEDED');
   }
-
 
   submit(token: string, change: SyncChangeRequest): SyncAcceptedValue {
     const { deviceId, grants } = this.identity(token);
@@ -372,11 +412,11 @@ export class SyncStore {
     this.assertContent(JSON.stringify(change.entry.content));
     const requestHash = digest(JSON.stringify(change));
     return this.transaction(() => {
-      const receipt = this.db.prepare('SELECT stream, entry_id, version, seq, request_hash FROM sync_change_receipts WHERE change_id = ?').get(change.changeId) as
-        { stream: string; entry_id: string; version: number; seq: number; request_hash: string } | undefined;
+      const receipt = this.db.prepare('SELECT stream, entry_id, version, seq, request_hash, created_at FROM sync_change_receipts WHERE change_id = ?').get(change.changeId) as
+        { stream: string; entry_id: string; version: number; seq: number; request_hash: string; created_at: string } | undefined;
       if (receipt) {
         if (receipt.request_hash !== requestHash) throw new MnemoWeaveError('CHANGE_ID_REUSED');
-        return SyncAccepted.parse({ changeId: change.changeId, entryId: receipt.entry_id, stream: receipt.stream, version: receipt.version, seq: receipt.seq, duplicate: true });
+        return SyncAccepted.parse({ changeId: change.changeId, entryId: receipt.entry_id, stream: receipt.stream, version: receipt.version, seq: receipt.seq, duplicate: true, confirmedAt: receipt.created_at });
       }
       const current = this.entryRow(change.entry.entryId);
       if (current) {
@@ -390,9 +430,29 @@ export class SyncStore {
         if (!current) throw new MnemoWeaveError('NOT_FOUND');
         if (change.baseVersion !== current.version) throw new VersionConflictError(current);
       }
-      this.assertCapacity(stream, change.entry.entryId, JSON.stringify(change.entry.payload), change.entry.content.data, change.entry.withdrawnAt);
+      if (stream === FORMAL_STREAM && change.operation === 'create' && change.entry.withdrawnAt === null
+        && change.entry.content.format === 'plain') {
+        const match = this.db.prepare(`
+          SELECT entry_id, version FROM sync_entries
+          WHERE stream=? AND withdrawn_at IS NULL AND json_extract(content_json, '$.format')='plain'
+            AND json_extract(content_json, '$.contentHash')=? AND json_extract(content_json, '$.byteLength')=?
+          ORDER BY entry_id LIMIT 1
+        `).get(stream, change.entry.content.contentHash, change.entry.content.byteLength) as
+          { entry_id: string; version: number } | undefined;
+        if (match) {
+          const confirmedAt = this.now();
+          this.db.prepare('INSERT INTO sync_change_receipts(change_id, stream, entry_id, version, seq, request_hash, created_at) VALUES(?, ?, ?, ?, 0, ?, ?)')
+            .run(change.changeId, stream, match.entry_id, match.version, requestHash, confirmedAt);
+          return SyncAccepted.parse({ changeId: change.changeId, entryId: match.entry_id, stream, version: match.version, seq: 0, duplicate: true, confirmedAt });
+        }
+      }
+      this.assertCapacity(stream, change.entry);
       const version = current ? current.version + 1 : 1;
       const createdAt = this.now();
+      const payload = change.entry.kind === 'workspace-archive' && 'workspaceId' in change.entry.payload
+        ? { ...change.entry.payload, archivedAt: change.entry.payload.state === 'archived'
+          ? createdAt : null }
+        : change.entry.payload;
       const seq = this.nextSeq(stream);
       const revisions = [...(current?.revisions ?? []), { version, content: change.entry.content, createdAt }]
         .filter((revision, index, all) => all.findIndex((item) => item.version === revision.version) === index);
@@ -401,7 +461,7 @@ export class SyncStore {
         kind: change.entry.kind,
         version,
         content: change.entry.content,
-        payload: change.entry.payload,
+        payload,
         withdrawnAt: change.entry.withdrawnAt,
         revisions,
       });
@@ -418,7 +478,7 @@ export class SyncStore {
         .run(stream, seq, change.changeId, entry.entryId, version, change.operation, JSON.stringify(record.entry), deviceId, createdAt);
       this.db.prepare('INSERT INTO sync_change_receipts(change_id, stream, entry_id, version, seq, request_hash, created_at) VALUES(?, ?, ?, ?, ?, ?, ?)')
         .run(change.changeId, stream, change.entry.entryId, version, seq, requestHash, createdAt);
-      return SyncAccepted.parse({ changeId: change.changeId, entryId: entry.entryId, stream, version, seq, duplicate: false });
+      return SyncAccepted.parse({ changeId: change.changeId, entryId: entry.entryId, stream, version, seq, duplicate: false, confirmedAt: createdAt });
     });
   }
 
@@ -451,6 +511,9 @@ export class SyncStore {
       nextSince: page.at(-1)?.seq ?? query.since,
       hasMore,
       retentionFloor,
+      ...(query.since === 0 && this.db.prepare("SELECT name FROM sqlite_master WHERE name='sync_migrated_streams'").get()
+        && this.db.prepare('SELECT 1 FROM sync_migrated_streams WHERE stream=?').get(query.stream)
+        ? { snapshotAtStart: true } : {}),
     });
   }
 
@@ -460,11 +523,11 @@ export class SyncStore {
    */
   receipt(token: string, changeId: string): SyncAcceptedValue {
     const { grants } = this.identity(token);
-    const row = this.db.prepare('SELECT stream, entry_id, version, seq FROM sync_change_receipts WHERE change_id = ?').get(changeId) as
-      { stream: string; entry_id: string; version: number; seq: number } | undefined;
+    const row = this.db.prepare('SELECT stream, entry_id, version, seq, created_at FROM sync_change_receipts WHERE change_id = ?').get(changeId) as
+      { stream: string; entry_id: string; version: number; seq: number; created_at: string } | undefined;
     if (!row) throw new MnemoWeaveError('NOT_FOUND');
     this.requireRead(grants, row.stream);
-    return SyncAccepted.parse({ changeId, entryId: row.entry_id, stream: row.stream, version: row.version, seq: row.seq, duplicate: true });
+    return SyncAccepted.parse({ changeId, entryId: row.entry_id, stream: row.stream, version: row.version, seq: row.seq, duplicate: true, confirmedAt: row.created_at });
   }
 
   entry(token: string, entryId: string): SyncEntryValue {

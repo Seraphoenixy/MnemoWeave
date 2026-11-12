@@ -69,8 +69,6 @@ test('Every documented route is actually handled by the HTTP server', async () =
     readConflict: async () => ({ id: UUID }),
     resolveConflict: async () => candidate,
     cancelVersion: async () => candidate,
-    reviewDue: async () => ({ items: [] }),
-    completeReview: async () => ({ memoryId: UUID }),
     humanReview: async () => candidate,
     retryWrite: async () => candidate,
   } as unknown as MemoryApplication;
@@ -143,12 +141,12 @@ test('Every documented route is actually handled by the HTTP server', async () =
     }),
     createDistillation: async () => ({
       draftId: UUID, source: { workspaceId: WORKSPACE, entryId: UUID, entryVersion: 1, contentHash: 'a'.repeat(64) },
-      content: 'probe', knowledgeType: 'Practice', reason: 'probe', assessment: 'supported',
+      content: 'probe', reason: 'probe', assessment: 'supported',
       contentHash: 'b'.repeat(64), createdAt: now(), taskId: null,
     }),
     readDistillation: async () => ({
       draftId: UUID, source: { workspaceId: WORKSPACE, entryId: UUID, entryVersion: 1, contentHash: 'a'.repeat(64) },
-      content: 'probe', knowledgeType: 'Practice', reason: 'probe', assessment: 'supported',
+      content: 'probe', reason: 'probe', assessment: 'supported',
       contentHash: 'b'.repeat(64), createdAt: now(), taskId: null,
     }),
     idleReviewScan: async () => ({ signals: [], lastTurn: 0, skipped: { tooShort: 0, question: 0, noTurn: 0, outOfWindow: 0, duplicate: 0, noRetention: 0 } }),
@@ -182,7 +180,7 @@ test('Every documented route is actually handled by the HTTP server', async () =
       '/v1/recall': JSON.stringify({ query: 'probe' }),
       '/v1/memories/explore': JSON.stringify({ query: 'probe' }),
       '/v1/memories/related': JSON.stringify({ memoryId: UUID }),
-      '/v1/memories': JSON.stringify({ content: 'probe', knowledgeType: 'Practice' }),
+      '/v1/memories': JSON.stringify({ content: 'probe', category: 'fact' }),
       '/v1/memories/{memoryId}': JSON.stringify({ content: 'edited', entryVersion: 1 }),
       '/v1/memories/{memoryId}/withdraw': JSON.stringify({ reason: 'probe', entryVersion: 1 }),
       '/v1/rules': JSON.stringify({ body: 'probe rule' }),
@@ -199,11 +197,11 @@ test('Every documented route is actually handled by the HTTP server', async () =
       '/v1/archives/search': '{}',
       '/v1/memory-write-tasks/{taskId}/actions/{index}': JSON.stringify({
         kind: 'formal-memory', trigger: 'conversation', action: 'create', reason: 'probe',
-        assessment: 'supported', evidenceRefs: ['probe'], content: 'probe memory', knowledgeType: 'Practice',
+        assessment: 'supported', evidenceRefs: ['probe'], content: 'probe memory', category: 'fact',
       }),
       '/v1/archive-distillations': JSON.stringify({
         source: { workspaceId: WORKSPACE, entryId: UUID, entryVersion: 1, contentHash: 'a'.repeat(64) },
-        content: 'probe', knowledgeType: 'Practice', reason: 'probe', assessment: 'supported',
+        content: 'probe', reason: 'probe', assessment: 'supported',
       }),
       '/v1/idle-review/scan': JSON.stringify({ sessionId: 'probe', completedThroughTurn: 1 }),
       '/v1/idle-review/runs': JSON.stringify({ sessionId: 'probe' }),

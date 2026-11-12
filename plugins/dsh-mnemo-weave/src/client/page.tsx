@@ -32,7 +32,7 @@ const LIST_LIMIT = 25;
 const CATEGORY_VALUES = ['preference', 'decision', 'fact', 'insight', 'context', 'general'] as const;
 /** The empty creation draft, restored whenever the create window closes without publishing. */
 const EMPTY_CREATE_DRAFT: CreateDraft = {
-  content: '', knowledgeType: 'Practice', category: '', importance: '', tags: '', entities: '',
+  content: '', category: '', importance: '', tags: '', entities: '',
   reason: '',
 };
 
@@ -87,9 +87,9 @@ function MemoryCard({ item, active, language, now, onSelect }: { item: UiMemoryS
   const excerpt = rest.join(' ').trim();
   // Classification is shown only when the revision recorded it: an absent category is not
   // "general", and labelling it as such would be inventing data.
-  const label = item.category !== undefined
-    ? translate(language, `category.${item.category}` as MessageKey)
-    : item.knowledgeType;
+  const label = item.category === undefined
+    ? undefined
+    : translate(language, `category.${item.category}` as MessageKey);
   return (
     <li>
       <button type="button" className="mwui-memcard" data-active={active ? 'true' : 'false'} onClick={() => onSelect(item.memoryId)}>
@@ -876,12 +876,18 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     return () => { clearTimeout(timer); controller.abort(); };
   }, [query, categoryFilter, entityFilter, sort, loadList, language]);
 
-  // Embedding coverage is a Provider fact, read once per page open; the settings card shows it.
+  // Query Provider diagnostics only while the settings card is in use.
   useEffect(() => {
+    if (tab !== 'settings') return;
     const controller = new AbortController();
-    void api.embeddingDiagnostics(controller.signal).then(setDiagnostics, () => setDiagnostics(null));
+    setDiagnostics(undefined);
+    void api.embeddingDiagnostics(controller.signal).then(report => {
+      if (!controller.signal.aborted) setDiagnostics(report);
+    }, () => {
+      if (!controller.signal.aborted) setDiagnostics(null);
+    });
     return () => controller.abort();
-  }, [api]);
+  }, [api, tab]);
 
   useEffect(() => {
     if (selectedId === null) return;
@@ -1000,7 +1006,6 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     try {
       const input: Parameters<typeof api.create>[0] = {
         content: createDraft.content,
-        knowledgeType: createDraft.knowledgeType,
         ...(createDraft.category === '' ? {} : { category: createDraft.category }),
         ...(createDraft.importance === '' ? {} : { importance: Number(createDraft.importance) }),
         ...(toList(createDraft.tags).length === 0 ? {} : { tags: toList(createDraft.tags) }),
@@ -1196,8 +1201,6 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
       const created = await api.createRule({
         body: draft.body.trim(),
         enabled: draft.enabled,
-        importance: draft.importance ?? 'normal',
-        pinned: draft.pinned === true,
       });
       setNotice(translate(language, 'runtime.created'));
       await loadStatus();
@@ -1207,11 +1210,11 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     }
   }, [api, language, loadStatus]);
 
-  const saveRule = useCallback(async (target: string, input: { body: string; enabled: boolean; importance: 'critical' | 'normal' | 'low'; pinned: boolean; baseVersion: number }): Promise<void> => {
+  const saveRule = useCallback(async (target: string, input: { body: string; enabled: boolean; baseVersion: number }): Promise<void> => {
     try {
       const updated = await api.editRule({
         ruleId: target, body: input.body.trim(), enabled: input.enabled,
-        importance: input.importance, pinned: input.pinned, baseVersion: input.baseVersion,
+        baseVersion: input.baseVersion,
       });
       setNotice(translate(language, 'runtime.saved'));
       await loadStatus();
@@ -1249,26 +1252,56 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     error: string | null;
     /** 「提炼后归档」: the user confirmed the archive of the source as well as the draft. */
     thenArchive: boolean;
+    confirmationId: string | null;
+    archived: boolean;
   } | null>(null);
+  const distillationStorageKey = 'mnemoweave.archive-distillation';
+  const rememberDistillation = (draftId: string, thenArchive: boolean, confirmationId: string | null) => {
+    window.localStorage.setItem(distillationStorageKey, JSON.stringify({ draftId, thenArchive, confirmationId }));
+  };
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      try {
+        const stored = JSON.parse(window.localStorage.getItem(distillationStorageKey) ?? 'null') as {
+          draftId: string; thenArchive: boolean; confirmationId: string | null;
+        } | null;
+        if (!stored || typeof stored.draftId !== 'string') return;
+        const draft = await api.readDistillation(stored.draftId);
+        if (!active) return;
+        setSelectedWorkspace(draft.source.workspaceId);
+        setArchiveId(draft.source.entryId);
+        setTab('archives');
+        setDistillation({
+          draft, skip: null, busy: false, result: null, error: null,
+          thenArchive: stored.thenArchive === true, confirmationId: stored.confirmationId ?? null, archived: false,
+        });
+      } catch { /* A stale draft reference does not prevent opening the page. */ }
+    })();
+    return () => { active = false; };
+  }, [api]);
   const startDistillation = useCallback(async (entryId: string): Promise<void> => {
-    setDistillation({ draft: null, skip: null, busy: true, result: null, error: null, thenArchive: false });
+    setDistillation({ draft: null, skip: null, busy: true, result: null, error: null, thenArchive: false, confirmationId: null, archived: false });
     try {
       const answer = await api.distillArchive(entryId);
+      if (answer.kind === 'draft') rememberDistillation(answer.draftId, false, null);
       setDistillation(answer.kind === 'skip'
-        ? { draft: null, skip: answer, busy: false, result: null, error: null, thenArchive: false }
-        : { draft: answer, skip: null, busy: false, result: null, error: null, thenArchive: false });
+        ? { draft: null, skip: answer, busy: false, result: null, error: null, thenArchive: false, confirmationId: null, archived: false }
+        : { draft: answer, skip: null, busy: false, result: null, error: null, thenArchive: false, confirmationId: null, archived: false });
     } catch (error) {
-      setDistillation({ draft: null, skip: null, busy: false, result: null, error: error instanceof Error ? error.message : String(error), thenArchive: false });
+      setDistillation({ draft: null, skip: null, busy: false, result: null, error: error instanceof Error ? error.message : String(error), thenArchive: false, confirmationId: null, archived: false });
     }
   }, [api]);
   const confirmDistillation = useCallback(async (): Promise<void> => {
     if (distillation?.draft === null || distillation?.draft === undefined) return;
     const { draft, thenArchive } = distillation;
-    setDistillation(previous => previous === null ? previous : { ...previous, busy: true, error: null });
+    const confirmationId = distillation.confirmationId ?? crypto.randomUUID();
+    setDistillation(previous => previous === null ? previous : { ...previous, busy: true, error: null, confirmationId });
     try {
+      rememberDistillation(draft.draftId, thenArchive, confirmationId);
       // The draft id is the task id, so a retry after a transport failure returns the first receipt.
       const result = await api.confirmDistillation({ draftId: draft.draftId });
-      setDistillation(previous => previous === null ? previous : { ...previous, busy: false, result });
+      setDistillation(previous => previous === null ? previous : { ...previous, busy: thenArchive && (result.status === 'published' || result.status === 'duplicate'), result });
       if (result.status !== 'published' && result.status !== 'duplicate') {
         // A queued, unknown, review or failed result does not advance the archive step: the
         // source keeps its capacity until the memory is actually published or confirmed a duplicate.
@@ -1278,15 +1311,16 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
       if (!thenArchive) return;
       // The user confirmed both steps. The archive carries the version read at preview time, so a
       // source edited in between keeps its newest text and the conflict is reported.
-      const source = archivesRef.current?.find(item => item.entryId === draft.source.entryId);
-      if (source === undefined) return;
       try {
-        const archived = await api.setArchiveState({ entryId: source.entryId, state: 'archived', baseVersion: source.version });
+        const archived = await api.setArchiveState({
+          entryId: draft.source.entryId, state: 'archived', baseVersion: draft.source.entryVersion, changeId: confirmationId,
+        });
         setArchives(previous => previous?.map(item => item.entryId === archived.entryId ? archived : item));
         setNotice(translate(language, 'archives.archive'));
+        setDistillation(previous => previous === null ? previous : { ...previous, busy: false, archived: true });
         void loadArchives();
       } catch (failure) {
-        setArchivesError(failureText(failure, language));
+        setDistillation(previous => previous === null ? previous : { ...previous, busy: false, error: failureText(failure, language) });
       }
     } catch (error) {
       setDistillation(previous => previous === null ? previous : { ...previous, busy: false, error: error instanceof Error ? error.message : String(error) });
@@ -1697,7 +1731,7 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
   // A window closes only after the user confirms that unsubmitted content can be dropped.
   const createDirty = createDraft.content !== '' || createDraft.tags !== '' || createDraft.entities !== ''
     || createDraft.reason !== '' || createDraft.category !== ''
-    || createDraft.importance !== '' || createDraft.knowledgeType !== 'Practice';
+    || createDraft.importance !== '';
   const editTags = detail === null ? '' : (detail.revisions.find(item => item.revisionId === detail.revisionId)?.tags ?? []).join(', ');
   const editDirty = editing && editBase !== null && (
     draft !== editBase.content || reason.trim() !== '' || categoryChoice !== '' || importanceChoice !== '' || tagsDraft !== editTags
@@ -2086,12 +2120,25 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
       ) : tab === 'runtime' ? (
         <RuntimePanel rules={rules} usage={ruleUsage} error={rulesError} selected={ruleId} language={language} onSelect={setRuleId} onCreate={submitRule} onSave={saveRule} />
       ) : tab === 'archives' ? (
-        <ArchivesPanel archives={archives} capacities={archiveCapacities} history={archiveHistory} error={archivesError} selected={archiveId} language={language} workspaces={workspaces} workspace={selectedWorkspace} onWorkspace={setSelectedWorkspace} onSelect={entryId => { setArchiveId(entryId); setDistillation(null); }} onSetState={changeArchiveState} distillation={distillation === null ? null : {
+        <ArchivesPanel archives={archives} capacities={archiveCapacities} history={archiveHistory} error={archivesError} selected={archiveId} language={language} workspaces={workspaces} workspace={selectedWorkspace} onWorkspace={setSelectedWorkspace} onSelect={entryId => { setArchiveId(entryId); if (distillation?.draft?.source.entryId !== entryId) setDistillation(null); }} onSetState={changeArchiveState} distillation={distillation === null ? null : {
           draft: distillation.draft, skip: distillation.skip, busy: distillation.busy,
           result: distillation.result, error: distillation.error,
           onStart: entryId => { void startDistillation(entryId); },
           onConfirm: () => { void confirmDistillation(); },
-          onDiscard: () => { setDistillation(null); },
+          onDiscard: () => { window.localStorage.removeItem(distillationStorageKey); setDistillation(null); },
+          confirmed: distillation.confirmationId !== null,
+          onOpenMemory: memoryId => { setTab('memories'); openMemoryFromView(memoryId); },
+          complete: distillation.archived || (!distillation.thenArchive
+            && (distillation.result?.status === 'published' || distillation.result?.status === 'duplicate')),
+          onRevise: (content, category) => {
+            const draft = distillation.draft;
+            if (!draft) return;
+            setDistillation({ ...distillation, busy: true, error: null });
+            void api.reviseDistillation({ draftId: draft.draftId, content, category }).then(revised => {
+              rememberDistillation(revised.draftId, distillation.thenArchive, null);
+              setDistillation({ ...distillation, draft: revised, busy: false, error: null });
+            }).catch(failure => setDistillation({ ...distillation, busy: false, error: failureText(failure, language) }));
+          },
           thenArchive: distillation.thenArchive,
           onToggleThenArchive: enabled => { setDistillation(previous => previous === null ? previous : { ...previous, thenArchive: enabled }); },
         }} releaseCandidates={releaseCandidates} showReleaseCandidates={capacityRefused || (releaseCandidates?.capacity.exceeded ?? false)} onSave={async (draft, target) => {

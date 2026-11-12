@@ -52,12 +52,12 @@ test('the list request forwards every filter it validated', async () => {
   const { rpc, source } = await harness();
   const result = await rpc('memories', {
     limit: 20, cursor: 'abc',
-    category: 'decision', knowledgeType: 'Practice', entity: 'MnemoWeave', sort: 'importance', query: '关键词',
+    category: 'decision', entity: 'MnemoWeave', sort: 'importance', query: '关键词',
   });
   assert.equal(result.ok, true);
   assert.deepEqual(source['memories']?.[0], {
     limit: 20, cursor: 'abc',
-    category: 'decision', knowledgeType: 'Practice', entity: 'MnemoWeave', sort: 'importance', query: '关键词',
+    category: 'decision', entity: 'MnemoWeave', sort: 'importance', query: '关键词',
   });
 });
 
@@ -68,11 +68,11 @@ test('the detail, edit, withdraw, graph and explore requests forward their field
   assert.deepEqual(source['memory'], [UUID, REVISION], 'a historical read keeps the revision');
 
   await rpc('create', {
-    content: '新记忆的正文', knowledgeType: 'Practice', category: 'decision', importance: 4,
+    content: '新记忆的正文', category: 'decision', importance: 4,
     tags: ['a'], entities: ['MnemoWeave'], reason: '理由',
   });
   assert.deepEqual(source['create']?.[0], {
-    content: '新记忆的正文', knowledgeType: 'Practice', category: 'decision', importance: 4,
+    content: '新记忆的正文', category: 'decision', importance: 4,
     tags: ['a'], entities: ['MnemoWeave'], reason: '理由',
   }, 'a new memory keeps every field');
 
@@ -132,10 +132,11 @@ test('a rejected request forwards nothing at all', async () => {
     ['memories', { sort: 'sideways' }],
     ['graph', { limit: 900 }],
     ['explore', { query: '' }],
-    ['create', { content: '', knowledgeType: 'Practice' }],
-    ['create', { content: 'x' }],
-    ['create', { content: 'x', knowledgeType: 'Nope' }],
-    ['create', { content: 'x', knowledgeType: 'Practice', importance: 9 }],
+    ['create', { content: '' }],
+    ['create', { content: 'x', category: 'nope' }],
+    // The removed field is still refused rather than silently ignored.
+    ['create', { content: 'x', knowledgeType: 'Practice' }],
+    ['create', { content: 'x', importance: 9 }],
     ['edit', { memoryId: UUID, content: '', entryVersion: 0 }],
     ['withdraw', { memoryId: UUID, reason: '   ', entryVersion: 0 }],
     ['createRule', { body: '   ' }],

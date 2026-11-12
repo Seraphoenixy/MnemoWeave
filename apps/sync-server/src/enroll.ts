@@ -1,7 +1,8 @@
 import { randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { SyncStore } from '../../../packages/infrastructure/sync-store/src/index.ts';
-import { SyncStream } from '../../../packages/core/contracts/src/index.ts';
+import { LegacyWorkspaceMap, SyncStream } from '../../../packages/core/contracts/src/index.ts';
 import type { SyncStreamGrantValue } from '../../../packages/core/contracts/src/index.ts';
 
 /**
@@ -24,7 +25,11 @@ function fail(message: string): never {
 function openStore(): SyncStore {
   const stateDir = process.env['MNEMOWEAVE_SYNC_STATE_DIR']?.trim();
   if (!stateDir) fail('CONFIG_MISSING:MNEMOWEAVE_SYNC_STATE_DIR');
-  return new SyncStore({ path: join(stateDir, 'sync.db') });
+  const mapPath = process.env['MNEMOWEAVE_LEGACY_WORKSPACE_MAP'];
+  return new SyncStore({
+    path: join(stateDir, 'sync.db'),
+    ...(mapPath ? { legacyWorkspaces: LegacyWorkspaceMap.parse(JSON.parse(readFileSync(mapPath, 'utf8'))) } : {}),
+  });
 }
 
 function parseGrant(spec: string): SyncStreamGrantValue {

@@ -44,6 +44,7 @@ export interface SyncServiceOptions {
   apply: (row: SyncInboxRecord) => Promise<ApplyOutcome>;
   intervalMs?: number;
   now?: () => string;
+  settlePublications?: () => Promise<void>;
 }
 
 export class SyncService {
@@ -52,6 +53,7 @@ export class SyncService {
   private readonly ledger: SyncLedgerPort;
   private readonly apply: (row: SyncInboxRecord) => Promise<ApplyOutcome>;
   private readonly intervalMs: number;
+  private readonly settlePublications: SyncServiceOptions['settlePublications'];
   private readonly now: () => string;
   private readonly streams = new Set<string>();
   private timer: ReturnType<typeof setInterval> | undefined;
@@ -65,6 +67,7 @@ export class SyncService {
     this.ledger = options.ledger;
     this.apply = options.apply;
     this.intervalMs = options.intervalMs ?? 300000;
+    this.settlePublications = options.settlePublications;
     this.now = options.now ?? (() => new Date().toISOString());
   }
 
@@ -121,6 +124,7 @@ export class SyncService {
           this.ledger.setError(stream, error instanceof Error ? error.message.slice(0, 200) : 'SYNC_UNAVAILABLE', this.now());
         }
       }
+      await this.settlePublications?.();
       return { streams: [...this.streams], pulled, applied, errors, skipped: false };
     } finally {
       this.running = false;

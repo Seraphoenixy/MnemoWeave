@@ -1,10 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import type { SkillBacktestResult } from '../../plugins/dsh-mnemo-weave/src/shared/contract.ts';
 import { adoptionDecision, autoAdoptSkill, readSkillPreferences, saveSkillPreferences } from '../../plugins/dsh-mnemo-weave/src/ui/skills-adopt.ts';
+import { tempDir } from '../support/temp.ts';
 
 const hash = (text: string): string => createHash('sha256').update(text).digest('hex');
 const skill = (body: string): string => `---\nname: alpha\ndescription: A skill\n---\n\n${body}\n`;
@@ -31,15 +32,15 @@ test('automatic adoption requires an enabled, unchanged baseline and a fresh com
 });
 
 test('the preference defaults to off and survives a restart', async () => {
-  const stateDir = await mkdtemp(resolve('work', 'skills-prefs-'));
+  const stateDir = await tempDir('skills-adopt', 'skills-prefs');
   assert.deepEqual(await readSkillPreferences(stateDir), { autoAdopt: false });
   assert.deepEqual(await saveSkillPreferences({ autoAdopt: true }, stateDir), { autoAdopt: true });
   assert.deepEqual(await readSkillPreferences(stateDir), { autoAdopt: true });
 });
 
 test('an enabled host adopts only when the gate passes, keeping the old text', async () => {
-  const workspace = await mkdtemp(resolve('work', 'skills-auto-ws-'));
-  const stateDir = await mkdtemp(resolve('work', 'skills-auto-state-'));
+  const workspace = await tempDir('skills-adopt', 'skills-auto-ws');
+  const stateDir = await tempDir('skills-adopt', 'skills-auto-state');
   const path = join(workspace, '.dsh', 'skills', 'alpha', 'SKILL.md');
   await mkdir(join(workspace, '.dsh', 'skills', 'alpha'), { recursive: true });
   const original = skill('Original.');

@@ -163,8 +163,9 @@ function archiveRow(entry: SyncEntryValue, body: string): LocalArchiveRow {
  * that exceeds capacity is refused the same way: it is never trimmed or archived on arrival.
  */
 export async function applyInboxEntry(record: SyncInboxRecord, ports: ApplyPorts): Promise<ApplyOutcome> {
-  const at = (ports.now ?? (() => new Date().toISOString()))();
   const entry = record.entry;
+  const at = entry.revisions?.find(revision => revision.version === entry.version)?.createdAt
+    ?? (ports.now ?? (() => new Date().toISOString()))();
   let body: string;
   try {
     body = decodeContent(entry.content);
@@ -181,7 +182,14 @@ export async function applyInboxEntry(record: SyncInboxRecord, ports: ApplyPorts
     if (record.operation === 'delete' || entry.withdrawnAt !== null) {
       ports.store.withdrawRule(entry.entryId, at);
     } else if (ports.store.applyRuleWithCapacity !== undefined && ports.ruleLimits !== undefined) {
-      ports.store.applyRuleWithCapacity(ruleRow(entry, body), at, ports.ruleLimits);
+      try {
+        ports.store.applyRuleWithCapacity(ruleRow(entry, body), at, ports.ruleLimits);
+      } catch (error) {
+        if (error instanceof MnemoWeaveError && error.code === 'RULE_CAPACITY_EXCEEDED') {
+          return { status: 'needs_review', error: error.code };
+        }
+        throw error;
+      }
     } else {
       ports.store.upsertRule(ruleRow(entry, body), at);
     }
@@ -226,11 +234,15 @@ async function applyFormal(record: SyncInboxRecord, body: string, ports: ApplyPo
     // A retry after a partial failure must not write the Provider twice.
     const existing = ports.store.formalProviderId(entry.entryId, entry.version);
     if (existing) {
+      const current = await ports.provider.show(existing);
+      if (current.id !== existing || current.content !== body) throw new MnemoWeaveError('PROVIDER_INTEGRITY');
       mirror(existing);
       return { status: 'applied' };
     }
     const local = ports.store.formalProviderIdByHash?.(entry.entryId, entry.content.contentHash);
     if (local) {
+      const current = await ports.provider.show(local);
+      if (current.id !== local || current.content !== body) throw new MnemoWeaveError('PROVIDER_INTEGRITY');
       ports.store.upsertFormalMap({ entryId: entry.entryId, version: entry.version, providerId: local, contentHash: entry.content.contentHash, state: 'applied', appliedAt: at }, at);
       mirror(local);
       return { status: 'applied' };

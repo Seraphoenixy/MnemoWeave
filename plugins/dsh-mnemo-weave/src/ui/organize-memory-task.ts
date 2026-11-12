@@ -146,7 +146,7 @@ export async function applyOrganizeMemories(
     }
     if (original.action === 'create') {
       try {
-        const created = await source.create({ content: original.content!, knowledgeType: 'Practice', reason: original.reason });
+        const created = await source.create({ content: original.content!, reason: original.reason });
         items.push({ index: original.index, action: 'create', state: 'applied', targetId: created.memoryId });
       } catch (error) { items.push({ index: original.index, action: 'create', state: 'failed', detail: { reason: failure(error) } }); }
       continue;

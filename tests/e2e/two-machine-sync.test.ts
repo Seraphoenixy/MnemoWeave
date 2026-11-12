@@ -56,7 +56,7 @@ test('a memory written on one machine is editable on the other and returns updat
   const seed = new SqliteCandidates(resolve(join(stateA, 'governance.db')));
   const seedProvider = new MnemonCliProvider({ binary: mnemonBinary(), dataDir: providerA, store: 'machine_a' });
   const request = RememberInput.parse({
-    idempotencyKey: `seed-${randomUUID()}`, content: '机器 A 写入的初始正文。', knowledgeType: 'Practice', tags: [],
+    idempotencyKey: `seed-${randomUUID()}`, content: '机器 A 写入的初始正文。', tags: [],
     provenance: {
       source: 'local-user', sourceReference: 'e2e:two-machine', evidence: ['seed'], verificationStatus: 'verified',
       confidence: 1, applicability: 'alpha', limitations: '无（验收固定值）', lastVerified: '2026-11-10T08:00:00.000Z',
@@ -81,8 +81,9 @@ test('a memory written on one machine is editable on the other and returns updat
     // A edits; the change is confirmed remotely and applied locally.
     const first = await a.client!.editMemory(memoryId, { content: '机器 A 编辑后的正文。', entryVersion: 0, reason: 'A edit' });
     assert.equal(first.entryVersion, 1);
+    assert.equal(remote.prune({ now: new Date(Date.now() + 100 * 86_400_000).toISOString(), retentionDays: 90 }).changes, 1);
 
-    // B pulls, mirrors the memory into its own Provider and catalog, and can read it.
+    // B restores from a snapshot, mirrors the memory into its own Provider and catalog, and can read it.
     // The startup pass may still be running when the explicit refresh arrives; an overlap is
     // reported as `skipped` rather than queued, so retry until a pass actually completes.
     await untilRefreshed(b.client!.syncRefresh!);
@@ -96,7 +97,7 @@ test('a memory written on one machine is editable on the other and returns updat
     const second = await b.client!.editMemory(memoryId, { content: '机器 B 编辑后的正文。', entryVersion: 1, reason: 'B edit' });
     assert.equal(second.entryVersion, 2);
     const changes = remote.pull(TOKEN_B, { stream: 'formal-memories', since: 0, limit: 10 }).changes;
-    assert.deepEqual(changes.map((change) => [change.operation, change.version]), [['create', 1], ['update', 2]]);
+    assert.deepEqual(changes.map((change) => [change.operation, change.version]), [['update', 2]]);
 
     // A pulls the new version and shows it.
     await untilRefreshed(a.client!.syncRefresh!);
@@ -115,6 +116,45 @@ test('a memory written on one machine is editable on the other and returns updat
     await a.close();
     await b.close();
     await new Promise<void>((done) => { server.closeAllConnections(); server.close(() => done()); });
+    remote.close();
+  }
+});
+
+
+test('two isolated devices creating the same formal text receive one authoritative ID', async () => {
+  const root = resolve('work', 'two-machine-duplicate', randomUUID());
+  mkdirSync(root, { recursive: true });
+  const remote = new SyncStore({ path: join(root, 'remote.db') });
+  const grants = [{ stream: 'formal-memories', canRead: true, canWrite: true }];
+  remote.enroll('device-a', TOKEN_A, grants);
+  remote.enroll('device-b', TOKEN_B, grants);
+  const server = createSyncServer({ gateway: remote });
+  await new Promise<void>(done => server.listen(0, '127.0.0.1', done));
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const binary = mnemonBinary();
+  const machine = (device: string, token: string) => configure({
+    MNEMON_BINARY: binary, MNEMON_DATA_DIR: join(root, device, 'provider'), MNEMON_STORE: 'duplicate',
+    MNEMOWEAVE_STATE_DIR: join(root, device, 'state'), MNEMOWEAVE_PORT: '0',
+    MNEMOWEAVE_TOKEN: 'host-token-0123456789abcdef', MNEMOWEAVE_OPERATOR_TOKEN: 'operator-token-0123456789abcdef',
+    MNEMOWEAVE_SYNC_URL: url, MNEMOWEAVE_SYNC_DEVICE_ID: device, MNEMOWEAVE_SYNC_TOKEN: token,
+    MNEMOWEAVE_SYNC_INTERVAL_MS: '0',
+  });
+  const a = machine('device-a', TOKEN_A);
+  const b = machine('device-b', TOKEN_B);
+  try {
+    const input = { content: '部署前应核对配置版本和对应的回滚点。', category: 'decision' as const };
+    const [first, second] = await Promise.all([a.client!.createMemory!(input), b.client!.createMemory!(input)]);
+    assert.equal(first.memoryId, second.memoryId);
+    assert.equal(Number(first.duplicate === true) + Number(second.duplicate === true), 1);
+    assert.equal(remote.changeRange('formal-memories').head, 1);
+    for (const app of [a, b]) {
+      const memories = await app.client!.memories({ limit: 10 });
+      assert.deepEqual(memories.items.map(item => item.memoryId), [first.memoryId]);
+    }
+  } finally {
+    await a.close();
+    await b.close();
+    await new Promise<void>(done => { server.closeAllConnections(); server.close(() => done()); });
     remote.close();
   }
 });

@@ -1,5 +1,6 @@
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { ARCHIVE_ACTIVE_CAPACITY_BYTES, LegacyWorkspaceMap, RULE_CAPACITY_BYTES } from '../../../packages/core/contracts/src/index.ts';
 import { SyncStore } from '../../../packages/infrastructure/sync-store/src/index.ts';
 import { createSyncServer, SYNC_PROTOCOL_VERSION } from '../../../packages/protocols/sync-http/src/index.ts';
 
@@ -27,7 +28,13 @@ const host = process.env['MNEMOWEAVE_SYNC_HOST']?.trim() || '127.0.0.1';
 const stateDir = requireEnv('MNEMOWEAVE_SYNC_STATE_DIR');
 mkdirSync(stateDir, { recursive: true });
 
-const store = new SyncStore({ path: join(stateDir, 'sync.db') });
+const mapPath = process.env['MNEMOWEAVE_LEGACY_WORKSPACE_MAP'];
+const store = new SyncStore({
+  path: join(stateDir, 'sync.db'),
+  ruleCapacityBytes: boundedInt('MNEMOWEAVE_RULE_CAPACITY_BYTES', RULE_CAPACITY_BYTES, 1),
+  archiveCapacityBytes: boundedInt('MNEMOWEAVE_ARCHIVE_ACTIVE_CAPACITY_BYTES', ARCHIVE_ACTIVE_CAPACITY_BYTES, 1),
+  ...(mapPath ? { legacyWorkspaces: LegacyWorkspaceMap.parse(JSON.parse(readFileSync(mapPath, 'utf8'))) } : {}),
+});
 const server = createSyncServer({ gateway: store });
 
 // Change retention is a maintenance job, not a request path: run it at startup and

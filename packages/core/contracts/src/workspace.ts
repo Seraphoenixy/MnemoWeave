@@ -10,6 +10,11 @@ import { ARCHIVE_ACTIVE_CAPACITY_BYTES, ARCHIVE_BODY_MAX_BYTES, ARCHIVE_SEARCH_L
  */
 
 export const WorkspaceId = z.uuid();
+export const LegacyWorkspaceMap = z.record(z.string().min(1), z.object({
+  workspaceId: WorkspaceId.transform(id => id.toLowerCase()),
+  name: z.string().trim().min(1).max(200),
+}).strict());
+export type LegacyWorkspaceMapValue = z.infer<typeof LegacyWorkspaceMap>;
 export const WorkspaceName = z.string().trim().min(1).max(200);
 
 export const WorkspaceCreate = z.object({
@@ -65,8 +70,8 @@ export const RuleEdit = z.object({
   remove: z.literal(true).optional(),
   baseVersion: z.number().int().positive(),
 }).strict().superRefine((value, context) => {
-  const edits = [value.body, value.enabled, value.importance, value.pinned, value.remove].filter(item => item !== undefined);
-  if (edits.length === 0) context.addIssue({ code: 'custom', message: 'Rule edit requires a body, state, importance, pinned or remove change' });
+  const edits = [value.body, value.enabled, value.remove].filter(item => item !== undefined);
+  if (edits.length === 0) context.addIssue({ code: 'custom', message: 'Rule edit requires a body, enabled state or removal' });
   if (value.remove === true && edits.length > 1) context.addIssue({ code: 'custom', message: 'Removing a rule is exclusive with editing it' });
 });
 export const RuleRecord = z.object({
@@ -198,6 +203,7 @@ export type ArchiveSearchOutputRecord = z.infer<typeof ArchiveSearchOutput>;
 /** Moves one archive between active and archived; the version must match what the caller read. */
 export const ArchiveStateInput = z.object({
   state: ArchiveState,
+  changeId: z.uuid().optional(),
   baseVersion: z.number().int().positive(),
 }).strict();
 export type ArchiveStateInputRecord = z.infer<typeof ArchiveStateInput>;

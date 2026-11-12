@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
+import { tempDir } from '../support/temp.ts';
 import { MnemoWeaveError } from '../../packages/core/contracts/src/index.ts';
 import { SqliteCandidates } from '../../packages/infrastructure/governance/src/index.ts';
 
@@ -15,14 +15,13 @@ const HOST = 'host-a';
 const TASK = '22222222-2222-4222-8222-222222222222';
 const HASH = 'a'.repeat(64);
 
-function open() {
-  mkdirSync('work/tests', { recursive: true });
-  const dir = mkdtempSync(resolve('work/tests/write-task-'));
+async function open(): Promise<SqliteCandidates> {
+  const dir = await tempDir('write-task', 'write-task');
   return new SqliteCandidates(join(dir, 'governance.db'));
 }
 
-test('a claim writes an unknown receipt before the action runs', () => {
-  const repo = open();
+test('a claim writes an unknown receipt before the action runs', async () => {
+  const repo = await open();
   try {
     assert.equal(repo.writeTasks.receipt(HOST, TASK, 0), null);
     const first = repo.writeTasks.claim({ hostId: HOST, taskId: TASK, index: 0, kind: 'formal-memory', action: 'create', requestHash: HASH });
@@ -33,8 +32,8 @@ test('a claim writes an unknown receipt before the action runs', () => {
   } finally { repo.close(); }
 });
 
-test('the same key with the same payload returns the original receipt', () => {
-  const repo = open();
+test('the same key with the same payload returns the original receipt', async () => {
+  const repo = await open();
   try {
     repo.writeTasks.claim({ hostId: HOST, taskId: TASK, index: 0, kind: 'formal-memory', action: 'create', requestHash: HASH });
     const settled = repo.writeTasks.settle(HOST, TASK, 0, { status: 'published', memoryId: 'm-1', entryVersion: 1 });
@@ -45,8 +44,8 @@ test('the same key with the same payload returns the original receipt', () => {
   } finally { repo.close(); }
 });
 
-test('the same key with a different payload is an idempotency conflict, not a second write', () => {
-  const repo = open();
+test('the same key with a different payload is an idempotency conflict, not a second write', async () => {
+  const repo = await open();
   try {
     repo.writeTasks.claim({ hostId: HOST, taskId: TASK, index: 0, kind: 'formal-memory', action: 'create', requestHash: HASH });
     assert.throws(
@@ -60,8 +59,8 @@ test('the same key with a different payload is an idempotency conflict, not a se
   } finally { repo.close(); }
 });
 
-test('the task receipt list is ordered by action index with the fields a host reports', () => {
-  const repo = open();
+test('the task receipt list is ordered by action index with the fields a host reports', async () => {
+  const repo = await open();
   try {
     for (const index of [2, 0, 1]) {
       repo.writeTasks.claim({ hostId: HOST, taskId: TASK, index, kind: 'rule', action: 'create', requestHash: `${index}`.padStart(64, 'c') });
@@ -80,8 +79,8 @@ test('the task receipt list is ordered by action index with the fields a host re
   } finally { repo.close(); }
 });
 
-test('a no-retention turn is remembered against that turn, then forgotten with age', () => {
-  const repo = open();
+test('a no-retention turn is remembered against that turn, then forgotten with age', async () => {
+  const repo = await open();
   try {
     const observed = repo.turns.observe(HOST, {
       protocolVersion: '1', adapterVersion: '0.1.0', eventId: 'event-1', sessionId: 's-1', turnId: '4',
@@ -98,14 +97,14 @@ test('a no-retention turn is remembered against that turn, then forgotten with a
   } finally { repo.close(); }
 });
 
-test('a distillation draft fixes its source version and refuses a second body for the same draft', () => {
-  const repo = open();
+test('a distillation draft fixes its source version and refuses a second body for the same draft', async () => {
+  const repo = await open();
   try {
     const workspaceId = '11111111-1111-4111-8111-111111111111';
     repo.workspaces.register(workspaceId, '甲工作区');
     const draft = repo.distillations.create({
       hostId: HOST, workspaceId, entryId: 'archive-1', entryVersion: 3, sourceContentHash: HASH,
-      content: '提炼出的通用正文', knowledgeType: 'Practice', reason: '可复用结论', assessment: 'supported',
+      content: '提炼出的通用正文', reason: '可复用结论', assessment: 'supported',
       category: null, importance: null, tags: null, entities: null,
       contentHash: 'd'.repeat(64),
     });

@@ -42,13 +42,13 @@ test('the list route forwards every query parameter it documents', async () => {
   });
   try {
     const response = await fetch(
-      `${base}/v1/memories?limit=7&category=decision&knowledgeType=Practice&entity=MnemoWeave&sort=importance&cursor=abc&query=${encodeURIComponent('关键词')}`,
+      `${base}/v1/memories?limit=7&category=decision&entity=MnemoWeave&sort=importance&cursor=abc&query=${encodeURIComponent('关键词')}`,
       { headers: auth },
     );
     assert.equal(response.status, 200);
     assert.deepEqual(seen[0], {
       limit: 7,
-      category: 'decision', knowledgeType: 'Practice', entity: 'MnemoWeave',
+      category: 'decision', entity: 'MnemoWeave',
       sort: 'importance', cursor: 'abc', query: '关键词',
     }, 'no documented parameter is parsed and then dropped');
   } finally { await close(); }
@@ -96,6 +96,8 @@ test('the explore route forwards the query, the cap and the score floor', async 
 test('an invalid value of a documented parameter is refused rather than ignored', async () => {
   const { base, close } = await harness({ memories: async () => ({ items: [] }) as never });
   try {
+    // A removed filter is refused, so a stale client cannot read an unfiltered list as filtered.
+    // A removed filter is refused, so a stale client cannot read an unfiltered list as filtered.
     for (const query of ['category=nonsense', 'knowledgeType=Nope', 'sort=sideways', 'limit=0']) {
       const response = await fetch(`${base}/v1/memories?${query}`, { headers: auth });
       assert.equal(response.status, 400, `${query} must be refused`);

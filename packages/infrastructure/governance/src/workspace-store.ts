@@ -257,7 +257,6 @@ export interface DistillationRow {
   entryVersion: number;
   sourceContentHash: string;
   content: string;
-  knowledgeType: string;
   category: string | null;
   importance: number | null;
   tags: string[] | null;
@@ -283,7 +282,7 @@ export class SqliteDistillationStore {
       draftId: String(row['draft_id']), hostId: String(row['host_id']),
       workspaceId: String(row['workspace_id']), entryId: String(row['entry_id']),
       entryVersion: Number(row['entry_version']), sourceContentHash: String(row['source_content_hash']),
-      content: String(row['content']), knowledgeType: String(row['knowledge_type']),
+      content: String(row['content']),
       category: row['category'] === null ? null : String(row['category']),
       importance: row['importance'] === null ? null : Number(row['importance']),
       tags: row['tags_json'] === null ? null : JSON.parse(String(row['tags_json'])) as string[],
@@ -299,11 +298,11 @@ export class SqliteDistillationStore {
     const createdAt = new Date().toISOString();
     this.transaction(() => {
       this.db.prepare(`INSERT INTO archive_distillations(draft_id, host_id, workspace_id, entry_id, entry_version,
-        source_content_hash, content, knowledge_type, category, importance, tags_json, entities_json, reason,
+        source_content_hash, content, category, importance, tags_json, entities_json, reason,
         assessment, content_hash, created_at, task_id)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)`)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)`)
         .run(draftId, draft.hostId, draft.workspaceId, draft.entryId, draft.entryVersion, draft.sourceContentHash,
-          draft.content, draft.knowledgeType, draft.category, draft.importance,
+          draft.content, draft.category, draft.importance,
           draft.tags === null ? null : JSON.stringify(draft.tags),
           draft.entities === null ? null : JSON.stringify(draft.entities),
           draft.reason, draft.assessment, draft.contentHash, createdAt);

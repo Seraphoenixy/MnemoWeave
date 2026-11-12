@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -8,11 +8,12 @@ import { MnemonCliProvider } from '../../packages/providers/mnemon/src/index.ts'
 import { MemoryApplication } from '../../packages/core/application/src/index.ts';
 import { createHttpServer } from '../../packages/protocols/http/src/index.ts';
 import { mnemonBinary } from './mnemon-binary.ts';
+import { tempDir } from '../support/temp.ts';
 
 test('Real Mnemon: Remember, deduplicate, HTTP + stdio MCP Recall', { timeout: 60000 }, async () => {
   const binary = mnemonBinary();
   await mkdir(resolve('work/e2e'), { recursive: true });
-  const dataDir = await mkdtemp(resolve('work/e2e/run-'));
+  const dataDir = await tempDir('native', 'run');
   const provider = new MnemonCliProvider({ binary, dataDir, store: 'acceptance' });
   assert.equal((await provider.health()).ready, true);
   const content = 'MnemoWeave acceptance fixture: 原生 TypeScript memory orchestration test.';
@@ -59,7 +60,6 @@ test('Real Mnemon: Remember, deduplicate, HTTP + stdio MCP Recall', { timeout: 6
         arguments: {
           idempotencyKey: `native-mcp-${Date.now()}`,
           content: 'MCP candidate: the acceptance store is isolated.',
-          knowledgeType: 'Constraint',
           provenance: {
             source: 'e2e', sourceReference: 'native mcp', evidence: ['fixture'],
             verificationStatus: 'unverified', confidence: 0.5, applicability: 'acceptance only',

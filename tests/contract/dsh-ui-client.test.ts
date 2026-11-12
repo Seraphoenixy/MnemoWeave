@@ -403,7 +403,7 @@ test('classification on an edit is validated before the Server call', async () =
 
   for (const payload of [
     { memoryId, content: 'x', entryVersion: 0, category: 'nonsense' },
-    { memoryId, content: 'x', entryVersion: 0, knowledgeType: 'Nope' },
+    { memoryId, content: 'x', entryVersion: 0, category: 'nope' },
     { memoryId, content: 'x', entryVersion: 0, importance: 0 },
     { memoryId, content: 'x', entryVersion: 0, importance: 6 },
     { memoryId, content: 'x', entryVersion: 0, tags: ['ok', '   '] },
@@ -477,13 +477,13 @@ test('every list filter the Host validates is forwarded to the source', async ()
 
   const result = await handler('memories', {
     limit: 20,
-    category: 'decision', knowledgeType: 'Practice', entity: 'MnemoWeave', sort: 'importance',
+    category: 'decision', entity: 'MnemoWeave', sort: 'importance',
     query: '关键词', cursor: 'abc',
   });
   assert.equal(result.ok, true);
   assert.deepEqual(calls.memories, {
     limit: 20,
-    category: 'decision', knowledgeType: 'Practice', entity: 'MnemoWeave', sort: 'importance',
+    category: 'decision', entity: 'MnemoWeave', sort: 'importance',
     query: '关键词', cursor: 'abc',
   }, 'no validated field is dropped on the way to the source');
 

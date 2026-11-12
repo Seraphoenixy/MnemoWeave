@@ -13,9 +13,22 @@ export const name = 'dsh-mnemo-weave';
 // Registering the memory tools is the host service that makes them callable; without it the
 // plugin still injects the rules but the model has no way to ask for anything else.
 export const inject = ['tools'];
-// The command registry is the Host's own per-turn control surface; it is optional so a Host
-// without it still gets the tools and the injected rules.
-export const injectCommands = ['commands'];
+
+/**
+ * Reads a service the plugin does not declare. Cordis throws `cannot get property "X" without
+ * inject` for any undeclared name, and an exception in `apply` unloads the whole fiber, so an
+ * optional dependency must be read through `ctx.get` (which answers undefined) rather than as a
+ * property. The command registry below is such a dependency: the tools and the injected rules do
+ * not depend on it.
+ */
+function readOptionalService(ctx, name) {
+  try {
+    if (typeof ctx?.get === 'function') return ctx.get(name);
+    return ctx[name];
+  } catch {
+    return undefined;
+  }
+}
 
 /** The shared engineering-experience guidance every `remember` description quotes. */
 export const ENGINEERING_EXPERIENCE_GUIDANCE = [
@@ -117,7 +130,8 @@ async function callServer(config, method, path, body, execution, query) {
     throw new Error('MnemoWeave service token is not configured (MNEMOWEAVE_TOKEN)');
   }
   const sessionId = typeof execution?.agent?.id === 'string' && execution.agent.id !== '' ? execution.agent.id : undefined;
-  const turnId = typeof execution?.turn === 'number' ? String(execution.turn) : typeof execution?.turn === 'string' ? execution.turn : undefined;
+  const turn = currentTurn(execution);
+  const turnId = turn === undefined ? undefined : String(turn);
   const agentId = typeof execution?.agent?.id === 'string' ? execution.agent.id : 'default';
   const search = query === undefined ? '' : `?${new URLSearchParams(query).toString()}`;
   const timeout = AbortSignal.timeout(10_000);
@@ -317,7 +331,6 @@ export function createTools(config) {
         additionalProperties: false,
         properties: {
           content: { type: 'string', description: 'The memory text, 1–8000 UTF-8 bytes.' },
-          knowledgeType: { type: 'string', enum: ['Concept', 'Practice', 'Architecture', 'Troubleshooting', 'Constraint', 'Procedure', 'Reference'] },
           category: { type: 'string', enum: ['preference', 'decision', 'fact', 'insight', 'context', 'general'] },
           importance: { type: 'integer', minimum: 1, maximum: 5 },
           tags: { type: 'array', items: { type: 'string' }, description: 'At most 20 tags.' },
@@ -326,7 +339,7 @@ export function createTools(config) {
           reason: { type: 'string', description: 'Why this is worth keeping now.' },
           assessment: { type: 'string', enum: ['supported', 'uncertain', 'conflict'] },
         },
-        required: ['content', 'knowledgeType', 'reason'],
+        required: ['content', 'reason'],
       },
       output: TOOL_OUTPUT,
       execute: async (args, execution) => {
@@ -339,7 +352,6 @@ export function createTools(config) {
         const candidate = await callServer(config, 'POST', '/v1/remember', {
           idempotencyKey: `dsh-${randomUUID()}`.slice(0, 64),
           content: args.content,
-          knowledgeType: args.knowledgeType,
           tags: [],
           ...(args.category === undefined ? {} : { category: args.category }),
           ...(args.importance === undefined ? {} : { importance: args.importance }),
@@ -382,6 +394,39 @@ function openTurn(agent) {
 }
 
 /**
+ * The turn each session is currently in.
+ *
+ * DSH does not put a turn on the tool execution context, and the `agent` a tool receives is not
+ * the one whose Session log the prompt hook reads, so a tool cannot derive the turn on its own.
+ * The `system-prompt/assemble` hook runs once per model step with the live agent, so it records
+ * the open turn there and the tools read it back. Without this the tools sent a session header and
+ * no turn header, which the Server refuses as a partial identity.
+ */
+const openTurnBySession = new Map();
+
+function rememberTurn(sessionId, turn) {
+  if (typeof sessionId !== 'string' || sessionId === '') return;
+  if (turn === undefined) openTurnBySession.delete(sessionId);
+  else openTurnBySession.set(sessionId, turn);
+}
+
+/**
+ * The turn a tool call belongs to. An explicit `execution.turn` wins when a host supplies one;
+ * otherwise the turn recorded by the current step's prompt assembly is used, then the Session log.
+ */
+function currentTurn(execution) {
+  const explicit = typeof execution?.turn === 'number' ? execution.turn
+    : typeof execution?.turn === 'string' && execution.turn.trim() !== '' ? Number(execution.turn) : undefined;
+  if (explicit !== undefined && Number.isFinite(explicit)) return explicit;
+  const sessionId = execution?.agent?.id;
+  if (typeof sessionId === 'string') {
+    const recorded = openTurnBySession.get(sessionId);
+    if (recorded !== undefined) return recorded;
+  }
+  return openTurn(execution?.agent);
+}
+
+/**
  * Whether the current turn was marked "do not retain".
  *
  * The Host records that intent as a session event on the turn it applies to; a turn with no such
@@ -411,7 +456,7 @@ let markedNoRetention = () => false;
 
 function noRetentionRefusal(execution) {
   const agent = execution?.agent;
-  const turn = typeof execution?.turn === 'number' ? execution.turn : typeof execution?.turn === 'string' ? Number(execution.turn) : undefined;
+  const turn = currentTurn(execution);
   if (agent === undefined || turn === undefined || !Number.isFinite(turn)) return undefined;
   if (!turnNoRetention(agent, turn) && !markedNoRetention(agent, turn)) return undefined;
   const error = new Error('TURN_NO_RETENTION: this turn was marked not to be retained, so no memory write is accepted');
@@ -424,6 +469,8 @@ function createTurnRules(agent, sessionId, config) {
   let cached;
   const load = async () => {
     const turn = openTurn(agent);
+    // Tools cannot see this agent, so the turn is published here for them to read back.
+    rememberTurn(sessionId, turn);
     // A host that exposes no durable turn cannot prove two assemblies belong together, so it
     // reads again rather than silently reusing a block across turns.
     if (turn === undefined) return fetchInjection(sessionId, config);
@@ -460,7 +507,7 @@ export function apply(ctx, config = {}) {
     if (Date.now() - at > 24 * 60 * 60_000) { noRetentionTurns.delete(key); return false; }
     return true;
   };
-  const commands = ctx.commands;
+  const commands = readOptionalService(ctx, 'commands');
   if (typeof commands?.register === 'function') {
     const release = commands.register({
       name: NO_RETENTION_COMMAND,

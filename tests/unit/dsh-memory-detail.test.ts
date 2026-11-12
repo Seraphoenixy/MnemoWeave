@@ -125,7 +125,7 @@ test('classification is kept per revision and absence stays distinguishable', ()
   const detail = parseMemoryDetail(payload({
     revisions: [
       { id: REV2, number: 2, parentId: REV1, contentHash: 'b'.repeat(64), candidateId: 'c2', publishedAt: '2026-11-10T02:00:00.000Z', effectiveAt: '2026-11-10T02:00:00.000Z', category: 'decision', importance: 4, tags: ['发布', '回滚'], entities: ['MnemoWeave'] },
-      { id: REV1, number: 1, parentId: null, contentHash: 'a'.repeat(64), candidateId: 'c1', publishedAt: '2026-11-09T02:00:00.000Z', effectiveAt: '2026-11-09T02:00:00.000Z', knowledgeType: 'Practice', tags: [] },
+      { id: REV1, number: 1, parentId: null, contentHash: 'a'.repeat(64), candidateId: 'c1', publishedAt: '2026-11-09T02:00:00.000Z', effectiveAt: '2026-11-09T02:00:00.000Z', category: 'fact', tags: [] },
     ],
   }));
   const newer = detail.revisions.find(revision => revision.revisionId === REV2)!;
@@ -133,12 +133,11 @@ test('classification is kept per revision and absence stays distinguishable', ()
   assert.equal(newer.importance, 4);
   assert.deepEqual(newer.tags, ['发布', '回滚']);
   assert.deepEqual(newer.entities, ['MnemoWeave']);
-  assert.equal(newer.knowledgeType, undefined, 'a synced revision records no local knowledge type');
+  assert.equal(newer.category, 'decision', 'a synced revision keeps its recorded category');
 
   const older = detail.revisions.find(revision => revision.revisionId === REV1)!;
-  assert.equal(older.knowledgeType, 'Practice');
   assert.deepEqual(older.tags, [], 'an explicitly empty tag list is not the same as absent');
-  assert.equal(older.category, undefined);
+  assert.equal(older.category, 'fact');
 
   const chips = classificationMeta(detail, 'en');
   assert.deepEqual(chips.map(chip => chip.key), ['category', 'importance']);
@@ -146,7 +145,8 @@ test('classification is kept per revision and absence stays distinguishable', ()
 
   // Viewing the older revision switches the classification with it.
   const asHistory = classificationMeta({ ...detail, revisionId: REV1, isCurrent: false }, 'en');
-  assert.deepEqual(asHistory.map(chip => chip.key), ['knowledgeType']);
+  assert.deepEqual(asHistory.map(chip => chip.key), ['category'], 'the older revision shows its own classification');
+  assert.equal(asHistory[0]!.value, 'fact');
 });
 
 test('the diff marks added and removed lines in order', () => {

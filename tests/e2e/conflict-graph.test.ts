@@ -36,7 +36,7 @@ async function waitFor<T>(what: string, probe: () => Promise<T | undefined>, tim
 
 function request(key: string, content: string) {
   return RememberInput.parse({
-    idempotencyKey: key, content, knowledgeType: 'Practice', tags: [],
+    idempotencyKey: key, content, tags: [],
     provenance: {
       source: 'local-user', sourceReference: `conflict:${key}`, evidence: ['fixture'], verificationStatus: 'verified',
       confidence: 1, applicability: 'global', limitations: '无', lastVerified: '2026-11-10T00:00:00.000Z',

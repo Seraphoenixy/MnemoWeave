@@ -64,6 +64,57 @@ export class SqliteMemoryStore implements MemoryApplyStore {
     this.catalog = catalog;
   }
 
+  stageSnapshot() {
+    const changes: Array<() => void> = [];
+    const maps = new Map<string, FormalMapRow>();
+    const rules = new Map<string, LocalRuleRow>();
+    const withdrawnRules = new Set<string>();
+    let ruleLimits: RuleLimits | undefined;
+    const store: MemoryApplyStore = {
+      upsertRule: (row, at) => changes.push(() => this.upsertRule(row, at)),
+      withdrawRule: (entryId, at) => {
+        withdrawnRules.add(entryId);
+        rules.delete(entryId);
+        changes.push(() => this.withdrawRule(entryId, at));
+      },
+      upsertArchive: (row, at) => changes.push(() => this.upsertArchive(row, at)),
+      withdrawArchive: (entryId, at) => changes.push(() => this.withdrawArchive(entryId, at)),
+      upsertFormalMap: (row, at) => {
+        maps.set(`${row.entryId}:${row.version}`, row);
+        changes.push(() => this.upsertFormalMap(row, at));
+      },
+      formalProviderId: (entryId, version) => {
+        const pending = maps.get(`${entryId}:${version}`);
+        return pending ? pending.providerId : this.formalProviderId(entryId, version);
+      },
+      formalProviderIdByHash: (entryId, hash) =>
+        [...maps.values()].find(row => row.entryId === entryId && row.contentHash === hash && row.providerId)?.providerId
+          ?? this.formalProviderIdByHash(entryId, hash),
+      setEntryVersion: (entryId, version, at) => changes.push(() => this.setEntryVersion(entryId, version, at)),
+      publishSynced: input => changes.push(() => this.publishSynced(input)),
+      retireSynced: memoryId => changes.push(() => this.retireSynced(memoryId)),
+      applyRuleWithCapacity: (row, at, limits) => {
+        rules.set(row.entryId, row);
+        withdrawnRules.delete(row.entryId);
+        ruleLimits = limits;
+        changes.push(() => this.upsertRule(row, at));
+      },
+    };
+    return {
+      store,
+      commit: (finish: () => void): void => this.transaction(() => {
+        if (ruleLimits) {
+          const merged = this.allRules().filter(row => !rules.has(row.entryId) && !withdrawnRules.has(row.entryId));
+          if (ruleUsage([...merged, ...rules.values()], ruleLimits).exceeded) {
+            throw new MnemoWeaveError('RULE_CAPACITY_EXCEEDED');
+          }
+        }
+        for (const change of changes) change();
+        finish();
+      }),
+    };
+  }
+
   /** Durable maintenance job: the latest row of one kind, running or settled. */
   diagnosticJob(kind: string): DiagnosticJobRecord | undefined {
     const row = this.db.prepare('SELECT * FROM diagnostic_jobs WHERE kind=? ORDER BY started_at DESC, rowid DESC LIMIT 1').get(kind);
@@ -99,27 +150,23 @@ export class SqliteMemoryStore implements MemoryApplyStore {
     const request = RememberInput.parse({
       idempotencyKey: `sync-${input.entryId.slice(0, 8)}-${input.version}`,
       content: input.content,
-      knowledgeType: 'Practice',
       tags: input.tags,
       provenance: {
         source: 'sync',
         sourceReference: `mnemoweave:${input.entryId}:${input.version}`,
         evidence: [`synced from the shared server at ${input.at}`],
         verificationStatus: 'verified',
-        confidence: 1,
         applicability: 'shared collection',
         limitations: '内容由其他设备写入，本机未重新审核',
         lastVerified: input.at,
       },
     });
-    // The classification comes from the entry payload, not from the synthetic request: the
-    // `knowledgeType: 'Practice'` above is only a schema placeholder.
     this.catalog.publishSynced(input.entryId, request, input.providerId, input.contentHash, input.at, 'sync', `synced revision ${input.version}`, {
       category: input.category,
       ...(input.importance === undefined ? {} : { importance: input.importance }),
       tags: input.tags,
       ...(input.entities === undefined ? {} : { entities: input.entities }),
-    });
+    }, input.version);
   }
 
   retireSynced(memoryId: string): void {
@@ -147,8 +194,10 @@ export class SqliteMemoryStore implements MemoryApplyStore {
    */
   applyRuleWithCapacity(row: LocalRuleRow, at: string, limits: RuleLimits): void {
     this.transaction(() => {
-      const merged = [...this.allRules().filter(entry => entry.entryId !== row.entryId), { ...row, createdAt: row.createdAt ?? at }];
-      if (ruleUsage(merged, limits).exceeded) throw new MnemoWeaveError('RULE_CAPACITY_EXCEEDED');
+      const before = this.allRules();
+      const merged = [...before.filter(entry => entry.entryId !== row.entryId), { ...row, createdAt: row.createdAt ?? at }];
+      const usage = ruleUsage(merged, limits);
+      if (usage.exceeded && usage.usedBytes >= ruleUsage(before, limits).usedBytes) throw new MnemoWeaveError('RULE_CAPACITY_EXCEEDED');
       this.persistRule({ ...row, createdAt: row.createdAt ?? at }, at);
     });
   }
@@ -178,23 +227,16 @@ export class SqliteMemoryStore implements MemoryApplyStore {
   }
 
   /** Keep the exact text of a rule that left the resident set, so history stays readable. */
-  recordRuleArchive(row: RuleArchiveRow): void {
-    this.db.prepare(`
-      INSERT OR IGNORE INTO runtime_rule_archive(archive_id, rule_id, rule_version, body, importance, pinned, archived_at, reason)
-      VALUES(?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(row.archiveId, row.ruleId, row.ruleVersion, row.body, row.importance, row.pinned ? 1 : 0, row.archivedAt, row.reason);
-  }
-
-  private recordArchiveRevision(row: LocalArchiveRow, at: string): void {
+  private recordArchiveRevision(row: LocalArchiveRow, at: string, revisionId: string): void {
     this.db.prepare(`
       INSERT INTO project_archive_revisions(revision_id, entry_id, version, workspace_id, title, body, source, verification, evidence, state, archived_at, recorded_at)
       VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(entry_id, version) DO UPDATE SET
         state=excluded.state, archived_at=excluded.archived_at, recorded_at=excluded.recorded_at
-    `).run(randomUUID(), row.entryId, row.version, row.workspaceId, row.title, row.body, row.source, row.verification, row.evidence, row.state ?? 'active', row.archivedAt ?? null, at);
+    `).run(revisionId, row.entryId, row.version, row.workspaceId, row.title, row.body, row.source, row.verification, row.evidence, row.state ?? 'active', row.archivedAt ?? null, at);
   }
 
-  upsertArchive(row: LocalArchiveRow, at: string): void {
+  upsertArchive(row: LocalArchiveRow, at: string, revisionId: string = randomUUID()): void {
     this.transaction(() => {
       this.db.prepare(`
         INSERT INTO project_archives(entry_id, workspace_id, title, body, source, verification, evidence, version, withdrawn_at, updated_at, state, archived_at)
@@ -203,7 +245,7 @@ export class SqliteMemoryStore implements MemoryApplyStore {
           source=excluded.source, verification=excluded.verification, evidence=excluded.evidence, version=excluded.version,
           withdrawn_at=excluded.withdrawn_at, updated_at=excluded.updated_at, state=excluded.state, archived_at=excluded.archived_at
       `).run(row.entryId, row.workspaceId, row.title, row.body, row.source, row.verification, row.evidence, row.version, row.withdrawnAt, at, row.state ?? 'active', row.archivedAt ?? null);
-      this.recordArchiveRevision(row, at);
+      this.recordArchiveRevision(row, at, revisionId);
     });
   }
 
@@ -341,6 +383,10 @@ export class SqliteMemoryStore implements MemoryApplyStore {
         if (title !== 0) return title;
         return (right.updatedAt ?? '').localeCompare(left.updatedAt ?? '');
       });
+  }
+
+  archiveRevisionById(revisionId: string): ArchiveRevisionDbRow | undefined {
+    return this.db.prepare('SELECT * FROM project_archive_revisions WHERE revision_id=?').get(revisionId) as ArchiveRevisionDbRow | undefined;
   }
 
   archiveHistory(entryId: string): ArchiveRevisionDbRow[] {

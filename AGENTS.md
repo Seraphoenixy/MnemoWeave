@@ -3,7 +3,7 @@
 ## 项目与基线
 
 - 项目名：MnemoWeave；根目录：`D:\project\MnemoWeave`。
-- 文档只有六份：`docs/architecture.md`（结构与已固定的设计决策）、`docs/implementation.md`（契约与机制）、`docs/sync.md`（三机同步协议与版本模型）、`docs/ui.md`（通用记忆界面与宿主适配）、`docs/host-acceptance.md`（Host 验收）、`docs/status.md`（当前状态与未决事项）；开工前先读 `docs/status.md` 与 `docs/implementation.md`。
+- 文档只有六份内容文档（另有 `docs/README.md` 仅作导航索引）：`docs/architecture.md`（结构与已固定的设计决策）、`docs/implementation.md`（契约与机制）、`docs/sync.md`（三机同步协议与版本模型）、`docs/ui.md`（通用记忆界面与宿主适配）、`docs/host-acceptance.md`（Host 验收）、`docs/status.md`（当前状态与未决事项）；开工前先读 `docs/status.md` 与 `docs/implementation.md`。
 - 改动 `docs/architecture.md` 决策表中等价于改变架构选择；不要为了配合某次实现而改写决策，应先在对话中确认。
 - 项目文件、上游源码、临时文件、工具下载和缓存均放在本项目下；中间文件使用 `work/`，不得提交个人记忆、数据库、凭据或 API Key。
 
@@ -45,5 +45,5 @@
 - 测试使用项目 `work/` 下隔离目录和专用 store，禁止使用用户默认记忆目录。
 - Provider 主要通过真实 CLI 进程验证输入、JSON 输出和副作用；上游 Go 测试不是本项目验收前提。只有修改或排查 Mnemon 内部源码时再考虑。
 - 按改动范围验证，不为简单可逆变更添加镜像实现的测试。不能把未执行或失败的检查写成通过。
-- 治理库当前 schema v21；迁移每步先 `VACUUM INTO` 快照；升级仍需先在隔离状态目录演练，不直接对真实库升级。Host 真实会话验收（ZCode、ChatGPT 桌面、DSH）仍属未完成项，见 `docs/host-acceptance.md` 与 `docs/status.md`。
+- 治理库当前 schema v23；迁移每步先 `VACUUM INTO` 快照；升级仍需先在隔离状态目录演练，不直接对真实库升级。Host 真实会话验收（ZCode、ChatGPT 桌面、DSH）仍属未完成项，见 `docs/host-acceptance.md` 与 `docs/status.md`。
 - 向用户说明实际改动路径、执行命令、测试结果、未决事项和下一步；区分已实现、预留和待验证能力。

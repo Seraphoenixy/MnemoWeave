@@ -51,7 +51,6 @@ test('a created memory is published with its classification and can be edited', 
   try {
     const created = await client.createMemory({
       content: '用户直接新增的正文：MnemoWeave 的记忆页可以新建记忆。',
-      knowledgeType: 'Practice',
       category: 'decision',
       importance: 4,
       tags: ['新增', '界面'],
@@ -91,14 +90,28 @@ test('a created memory is published with its classification and can be edited', 
     // And it behaves like any other memory: it can be edited from where it started.
     const edited = await client.editMemory(created.value.memoryId, { content: '新增后又被编辑的正文。', entryVersion: created.value.entryVersion });
     assert.equal(edited.ok, true);
-    if (edited.ok) assert.equal(edited.value.entryVersion, created.value.entryVersion + 1);
+    if (!edited.ok) return;
+    assert.equal(edited.value.entryVersion, created.value.entryVersion + 1);
+
+    const metadataEdit = await client.editMemory(created.value.memoryId, {
+      content: '新增后又被编辑的正文。', entryVersion: edited.value.entryVersion, tags: ['排障'],
+    });
+    assert.equal(metadataEdit.ok, true);
+    if (!metadataEdit.ok) return;
+    assert.equal(metadataEdit.value.entryVersion, edited.value.entryVersion + 1);
+    assert.equal(metadataEdit.value.providerMemoryId, edited.value.providerMemoryId);
+    const updated = await client.listMemories({ limit: 50 });
+    assert.equal(updated.ok, true);
+    if (!updated.ok) return;
+    assert.deepEqual(updated.value.items[0]?.tags, ['排障']);
+    assert.deepEqual(updated.value.items[0]?.entities, ['MnemoWeave']);
   } finally { await close(); }
 });
 
 test('a created memory is reachable from the one memory list', async () => {
   const { client, close } = await harness();
   try {
-    const created = await client.createMemory({ content: '正文。', knowledgeType: 'Constraint' });
+    const created = await client.createMemory({ content: '正文。', category: 'fact' });
     assert.equal(created.ok, true);
     if (!created.ok) return;
     // There is no project dimension to filter by: the created memory is simply in the list.
@@ -112,11 +125,12 @@ test('creation refuses invalid input before publishing anything', async () => {
   const { client, close } = await harness();
   try {
     for (const input of [
-      { content: '   ', knowledgeType: 'Practice' },
-      { content: 'x', knowledgeType: 'NotAType' },
-      { content: 'x', knowledgeType: 'Practice', scope: 'project' as const },
-      { content: 'x', knowledgeType: 'Practice', importance: 9 },
-      { content: 'x', knowledgeType: 'Practice', category: 'nonsense' },
+      { content: '   ', category: 'fact' },
+      { content: 'x', scope: 'project' as const },
+      { content: 'x', importance: 9 },
+      { content: 'x', category: 'nonsense' },
+      // The removed dimension is refused as an unknown field, not silently ignored.
+      { content: 'x', knowledgeType: 'Practice' },
     ]) {
       const result = await client.createMemory(input as never);
       assert.equal(result.ok, false, `expected rejection for ${JSON.stringify(input)}`);

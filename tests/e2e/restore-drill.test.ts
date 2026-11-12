@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, cp, readdir, stat, writeFile } from 'node:fs/promises';
+import { mkdir, cp, readdir, stat, writeFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
+import { tempDir } from '../support/temp.ts';
 import { RememberInput } from '../../packages/core/contracts/src/index.ts';
 import { SqliteCandidates } from '../../packages/infrastructure/governance/src/index.ts';
 import { MnemonCliProvider } from '../../packages/providers/mnemon/src/index.ts';
@@ -17,7 +18,7 @@ import { mnemonBinary } from './mnemon-binary.ts';
  */
 test('an isolated copy restores rules, an archive with history, and a formal memory', async () => {
   await mkdir(resolve('work', 'restore-drill'), { recursive: true });
-  const rootA = await mkdtemp(resolve('work', 'restore-drill', 'source-'));
+  const rootA = await tempDir('restore-drill', 'source');
   const stateA = join(rootA, 'state');
   const providerA = join(rootA, 'provider');
   await mkdir(stateA, { recursive: true });
@@ -35,7 +36,7 @@ test('an isolated copy restores rules, an archive with history, and a formal mem
     const written = await provider.persistReviewed(content, `candidate:${randomUUID()}`);
     providerId = written.id;
     const request = RememberInput.parse({
-      idempotencyKey: `restore-${logicalId}`, content, knowledgeType: 'Practice', tags: ['restore'],
+      idempotencyKey: `restore-${logicalId}`, content, tags: ['restore'],
       provenance: {
         source: 'local-user', sourceReference: 'restore-drill', evidence: ['drill'], verificationStatus: 'verified',
         confidence: 1, applicability: 'project', limitations: '无', lastVerified: '2026-11-10T00:00:00.000Z',
@@ -45,7 +46,7 @@ test('an isolated copy restores rules, an archive with history, and a formal mem
   } finally { repo.close(); }
 
   // The backup copies both authorities; nothing is exported or rewritten.
-  const rootB = await mkdtemp(resolve('work', 'restore-drill', 'restored-'));
+  const rootB = await tempDir('restore-drill', 'restored');
   await cp(stateA, join(rootB, 'state'), { recursive: true });
   await cp(providerA, join(rootB, 'provider'), { recursive: true });
   const restoredProvider = join(rootB, 'provider');

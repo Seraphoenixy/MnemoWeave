@@ -9,9 +9,7 @@ import { ARCHIVE_BODY_MAX_BYTES } from './capacity.ts';
  * hint, but it never narrows or widens access to an entry.
  */
 
-export const KNOWLEDGE_TYPES = ['Concept', 'Practice', 'Architecture', 'Troubleshooting', 'Constraint', 'Procedure', 'Reference'] as const;
 export const CATEGORIES = ['preference', 'decision', 'fact', 'insight', 'context', 'general'] as const;
-export const KnowledgeType = z.enum(KNOWLEDGE_TYPES);
 export const Category = z.enum(CATEGORIES);
 
 const memoryBody = z.string().refine(
@@ -24,7 +22,7 @@ export const Provenance = z.object({
   sourceReference: z.string().trim().min(1).max(2000),
   evidence: z.array(z.string().trim().min(1).max(2000)).min(1).max(20),
   verificationStatus: z.enum(['unverified', 'verified', 'disputed']),
-  confidence: z.number().min(0).max(1),
+  confidence: z.number().min(0).max(1).optional(),
   applicability: z.string().trim().min(1).max(2000),
   limitations: z.string().trim().min(1).max(2000),
   lastVerified: z.iso.datetime().nullable(),
@@ -44,7 +42,6 @@ export const ChangeIntent = z.object({
 export const RememberInput = z.object({
   idempotencyKey: z.string().regex(/^[A-Za-z0-9_-]{8,128}$/),
   content: memoryBody,
-  knowledgeType: KnowledgeType,
   tags: z.array(z.string().trim().min(1).max(100)).max(20).default([]),
   category: Category.optional(),
   importance: z.number().int().min(1).max(5).optional(),
@@ -93,11 +90,7 @@ export const RevisionDescriptor = z.object({
   providerMemoryId: z.string().min(1), contentHash: z.string().regex(/^[a-f0-9]{64}$/),
   candidateId: z.uuid(), publishedAt: z.iso.datetime(), effectiveAt: z.iso.datetime(),
   applicability: z.string(),
-  /**
-   * Classification attached to this revision. `knowledgeType` comes from a local Remember; the
-   * rest arrive with a synced formal entry. They are separate dimensions, not synonyms.
-   */
-  knowledgeType: KnowledgeType.optional(),
+  /** Classification attached to this revision; omitted when none was recorded. */
   category: Category.optional(),
   importance: z.number().int().min(1).max(5).optional(),
   /** Absent means no classification was recorded; an empty array means it was recorded as empty. */
@@ -143,7 +136,6 @@ export const MemoryListItem = z.object({
   memoryId: z.uuid(), revisionId: z.uuid(), providerMemoryId: z.string().min(1),
   applicability: z.string(), publishedAt: z.iso.datetime(), content: z.string(),
   entryVersion: z.number().int().nonnegative(),
-  knowledgeType: KnowledgeType.optional(),
   category: Category.optional(),
   importance: z.number().int().min(1).max(5).optional(),
   tags: z.array(z.string()).optional(),
@@ -155,7 +147,6 @@ export const MemoryListQuery = z.object({
   query: z.string().trim().max(500).optional(),
   limit: z.coerce.number().int().min(1).max(200).default(50),
   category: Category.optional(),
-  knowledgeType: KnowledgeType.optional(),
   /** Keep only memories whose current revision names this entity (case-insensitive). */
   entity: z.string().trim().min(1).max(200).optional(),
   sort: z.enum(['newest', 'oldest', 'importance']).optional(),
@@ -171,7 +162,6 @@ export const MemoryList = z.object({
   /** Present when more candidates remain; absent once the scan is exhausted. */
   nextCursor: z.string().optional(),
   categories: z.array(z.object({ value: z.string(), count: z.number().int().nonnegative() }).strict()).optional(),
-  knowledgeTypes: z.array(z.object({ value: z.string(), count: z.number().int().nonnegative() }).strict()).optional(),
   /** Entities named by the current revisions in the browsable set, in their recorded spelling. */
   entities: z.array(z.object({ value: z.string(), count: z.number().int().nonnegative() }).strict()).optional(),
 }).strict();
@@ -192,7 +182,7 @@ export const ExploreHit = z.object({
   memoryId: z.uuid(), revisionId: z.uuid(), providerMemoryId: z.string().min(1),
   state: z.enum(['active', 'superseded', 'unverified']),
   content: z.string(), score: z.number(), publishedAt: z.iso.datetime(),
-  category: z.string().optional(), knowledgeType: z.string().optional(), tags: z.array(z.string()).optional(),
+  category: z.string().optional(), tags: z.array(z.string()).optional(),
 }).strict();
 export const ExploreOutput = z.object({
   query: z.string(),
@@ -217,7 +207,6 @@ export const MemoryGraphNode = z.object({
   state: z.enum(['active', 'superseded', 'unverified']),
   publishedAt: z.iso.datetime(),
   category: z.string().optional(),
-  knowledgeType: z.string().optional(),
   importance: z.number().int().min(1).max(5).optional(),
 }).strict();
 export const MemoryGraphEdge = z.object({
@@ -238,7 +227,6 @@ export type MemoryGraphRecord = z.infer<typeof MemoryGraph>;
 /** Direct user creation: publishes without a review round and is recorded as `local-user`. */
 export const MemoryCreateInput = z.object({
   content: memoryBody,
-  knowledgeType: KnowledgeType,
   category: Category.optional(),
   importance: z.number().int().min(1).max(5).optional(),
   tags: z.array(z.string().trim().min(1).max(100)).max(20).optional(),
@@ -259,7 +247,6 @@ export const MemoryEditInput = z.object({
   reason: z.string().trim().min(1).max(4000).optional(),
   entryVersion: z.number().int().nonnegative(),
   category: Category.optional(),
-  knowledgeType: KnowledgeType.optional(),
   importance: z.number().int().min(1).max(5).optional(),
   tags: z.array(z.string().trim().min(1).max(100)).max(20).optional(),
   entities: z.array(z.string().trim().min(1).max(200)).max(50).optional(),
@@ -331,15 +318,6 @@ export const StorageStatus = z.object({
   hardBytes: z.number().int().nonnegative().optional(),
 }).strict();
 export type StorageStatusRecord = z.infer<typeof StorageStatus>;
-
-/** Review-due is derived from publication time and knowledge type; it never invalidates. */
-export const ReviewDueItem = z.object({
-  memoryId: z.uuid(), knowledgeType: z.string().min(1), intervalDays: z.number().int().positive(),
-  dueAt: z.iso.datetime(), lastReviewedAt: z.iso.datetime().nullable(),
-}).strict();
-export type ReviewDueItemRecord = z.infer<typeof ReviewDueItem>;
-export const ReviewDueOutput = z.object({ items: z.array(ReviewDueItem) }).strict();
-export const ReviewCompleteInput = z.object({ memoryId: z.uuid(), reason: z.string().trim().min(1).max(4000) }).strict();
 
 /** The formal body limit shared by the request schemas and the archive segment contract. */
 export const FORMAL_BODY_MAX_BYTES = 8_000;

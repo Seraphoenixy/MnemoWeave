@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { ARCHIVE_SEARCH_LIMIT_MAX } from './capacity.ts';
 import { DiagnosticJob, EmbeddingDiagnostics } from './provider.ts';
-import { Candidate, ConflictDescriptor, ConflictResolutionInput, ExploreInput, ExploreOutput, HumanReviewInput, MemoryCreateInput, MemoryCreateOutput, MemoryEditInput, MemoryEditOutput, MemoryGraph, MemoryGraphQuery, MemoryList, MemoryWithdrawInput, MemoryWithdrawOutput, PublishedMemoryOutput, RememberInput, RetryInput, ReviewCompleteInput, ReviewDueOutput, StorageStatus, CancelVersionInput, KnowledgeType, Category, MemoryReadOutput } from './catalog.ts';
+import { Candidate, ConflictDescriptor, ConflictResolutionInput, ExploreInput, ExploreOutput, HumanReviewInput, MemoryCreateInput, MemoryCreateOutput, MemoryEditInput, MemoryEditOutput, MemoryGraph, MemoryGraphQuery, MemoryList, MemoryWithdrawInput, MemoryWithdrawOutput, PublishedMemoryOutput, RememberInput, RetryInput, StorageStatus, CancelVersionInput, Category, MemoryReadOutput } from './catalog.ts';
 import { ArchiveCreate, ArchiveEdit, ArchiveHistory, ArchiveList, ArchiveRecord, ArchiveReleaseCandidates, ArchiveSearchInput, ArchiveSearchOutput, ArchiveSegmentInput, ArchiveSegmentOutput, ArchiveStateInput, RuleArchiveList, RuleCreate, RuleEdit, RuleList, RuleRecord, SessionWorkspaceInput, SessionWorkspaceRecord, WorkspaceCreate, WorkspaceList, WorkspaceRecord } from './workspace.ts';
 import { HostEvent, IdleReviewPendingOutput, IdleReviewRun, IdleReviewRunFinishInput, IdleReviewRunItem, IdleReviewRunStartInput, IdleReviewRunStartOutput, IdleReviewRunsOutput, IdleReviewScanInput, IdleReviewScanOutput, IdleReviewSignalsOutput, InjectRequest, InjectionOutput, InjectionReport } from './host.ts';
 import { ArchiveDistillationCreate, ArchiveDistillationRecord, FormalMemoryTaskAction, RuleTaskAction, WorkspaceArchiveTaskAction, WriteTaskAction, WriteTaskReceipt } from './write-task.ts';
@@ -186,7 +186,7 @@ export const openapi = {
     '/v1/memories': {
       get: {
         description: 'List the shared formal-memory collection with current Provider text; an optional space-separated query filters the list. No workspace filter exists.',
-        parameters: [hostHeader, { name: 'query', in: 'query', schema: { type: 'string', maxLength: 500 } }, { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 200 } }, { name: 'cursor', in: 'query', schema: { type: 'string' } }, { name: 'category', in: 'query', schema: z.toJSONSchema(Category) }, { name: 'knowledgeType', in: 'query', schema: z.toJSONSchema(KnowledgeType) }, { name: 'entity', in: 'query', schema: { type: 'string', maxLength: 200 } }, { name: 'sort', in: 'query', schema: { type: 'string', enum: ['newest', 'oldest', 'importance'] } }],
+        parameters: [hostHeader, { name: 'query', in: 'query', schema: { type: 'string', maxLength: 500 } }, { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 200 } }, { name: 'cursor', in: 'query', schema: { type: 'string' } }, { name: 'category', in: 'query', schema: z.toJSONSchema(Category) }, { name: 'entity', in: 'query', schema: { type: 'string', maxLength: 200 } }, { name: 'sort', in: 'query', schema: { type: 'string', enum: ['newest', 'oldest', 'importance'] } }],
         responses: { '200': { description: 'Memory list', content: jsonContent(MemoryList) }, '400': { description: 'Invalid input' }, '401': { description: 'Unauthorized' }, '503': { description: 'Provider unavailable' } },
       },
       post: {
@@ -278,18 +278,6 @@ export const openapi = {
       requestBody: { required: true, content: jsonContent(CancelVersionInput) },
       responses: { '200': { description: 'Operation cancelled; candidate rejected', content: jsonContent(Candidate) }, '401': { description: 'Operator credential required' }, '409': { description: 'Operation already published' } },
     } },
-    '/v1/reviews/due': { get: {
-      description: 'Operator review queue: memories whose review interval has elapsed. Due entries are not invalidated or hidden.',
-      security: [{ operator: [] }],
-      responses: { '200': { description: 'Due reviews', content: jsonContent(ReviewDueOutput) }, '401': { description: 'Operator credential required' } },
-    } },
-    '/v1/reviews/complete': { post: {
-      description: 'Operator records a completed review and reschedules the interval from now.',
-      security: [{ operator: [] }],
-      requestBody: { required: true, content: jsonContent(ReviewCompleteInput) },
-      responses: { '200': { description: 'Rescheduled memory' }, '401': { description: 'Operator credential required' } },
-    } },
-
     '/v1/memory-write-tasks/{taskId}/actions/{index}': {
       post: {
         description: 'Execute one action of an authorized write task. Trusted host code only; never registered as a model tool. The key (host, task, index) is stable, so a replay returns the latest receipt and the same key with a different payload is IDEMPOTENCY_CONFLICT.',

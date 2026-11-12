@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { mkdir, writeFile, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import { tempDir } from '../support/temp.ts';
 import {
   HOT_RELOAD_ENV, isHostArtifact, reloadBundle, shouldWatch, watchLib, type PluginManagerLike,
 } from '../../plugins/dsh-mnemo-weave/src/ui/hot-reload.ts';
@@ -48,7 +49,7 @@ test('reload reports the host outcome instead of assuming success', async () => 
 });
 
 test('watchLib debounces writes and honours the filter', async () => {
-  const dir = await mkdtemp(resolve('work/tests/hot-reload-'));
+  const dir = await tempDir('dsh-ui-hot-reload', 'hot-reload');
   try {
     await mkdir(join(dir, 'ui'), { recursive: true });
     const seen: string[] = [];

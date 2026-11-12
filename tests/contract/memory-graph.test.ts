@@ -33,7 +33,7 @@ async function seeded(root: string): Promise<{ client: MemoryClient; ids: string
   const ids: string[] = [];
   const publish = async (content: string, projectId: string | null, at: string): Promise<{ memoryId: string; revisionId: string }> => {
     const request = RememberInput.parse({
-      idempotencyKey: `graph-${randomUUID()}`, content, knowledgeType: 'Practice', tags: [],
+      idempotencyKey: `graph-${randomUUID()}`, content, tags: [],
             provenance: {
         source: 'local-user', sourceReference: 'graph:fixture', evidence: ['graph'], verificationStatus: 'verified',
         confidence: 1, applicability: projectId ?? 'global', limitations: '无（验收固定值）', lastVerified: '2026-11-10T00:00:00.000Z',
@@ -55,7 +55,7 @@ async function seeded(root: string): Promise<{ client: MemoryClient; ids: string
   repo.catalog.publishSynced(
     second.memoryId,
     RememberInput.parse({
-      idempotencyKey: 'graph-second-version', content: '图节点二的第二版。', knowledgeType: 'Practice', tags: [],
+      idempotencyKey: 'graph-second-version', content: '图节点二的第二版。', tags: [],
       provenance: {
         source: 'sync', sourceReference: 'graph:fixture:2', evidence: ['graph'], verificationStatus: 'verified',
         confidence: 1, applicability: 'alpha', limitations: '无（验收固定值）', lastVerified: '2026-11-10T00:00:00.000Z',

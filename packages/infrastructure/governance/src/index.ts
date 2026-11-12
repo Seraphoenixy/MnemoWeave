@@ -8,7 +8,7 @@ import { dirname, isAbsolute, join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import type { CandidateRepository } from '../../../core/application/src/index.ts';
 import { Candidate, CandidateRequest, FORMAL_STREAM, MnemoWeaveError, RememberInput } from '../../../core/contracts/src/index.ts';
-import type { CandidateRecord, RememberRequest, RetentionSweepReport } from '../../../core/contracts/src/index.ts';
+import type { CandidateRecord, LegacyWorkspaceMapValue, RememberRequest, RetentionSweepReport } from '../../../core/contracts/src/index.ts';
 import { CANDIDATE_BODY_RETENTION_DAYS } from './events.ts';
 
 export * from './sync-ledger.ts';
@@ -20,7 +20,7 @@ const BLOB_THRESHOLD_BYTES = 4096;
 const BLOB_ORPHAN_GRACE_MS = 3_600_000;
 import type { Assessment } from '../../../core/contracts/src/index.ts';
 import type { WorkflowRepository, ReviewDecision, Job, WriteResult } from '../../../core/application/src/workflow-ports.ts';
-import { SqliteMemoryCatalog, REVIEW_INTERVAL_DAYS, DEFAULT_REVIEW_INTERVAL_DAYS } from './catalog.ts';
+import { SqliteMemoryCatalog } from './catalog.ts';
 import { SessionEventStore } from './events.ts';
 import type { VersionCheckpoint } from '../../../core/application/src/version-ports.ts';
 import type {ConflictResolutionRequest} from '../../../core/contracts/src/index.ts';
@@ -40,6 +40,7 @@ export interface PublishedFormal {
 export class SqliteCandidates implements CandidateRepository, WorkflowRepository {
   private readonly db: DatabaseSync;
   private readonly dbPath: string;
+  private readonly shareEnabled: boolean;
   private readonly blobsDir: string;
   private readonly quotaSoftBytes: number | undefined;
   private readonly quotaHardBytes: number | undefined;
@@ -69,10 +70,11 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
     catch { process.stderr.write(JSON.stringify({ event: 'publish_listener_failed', memoryId }) + String.fromCharCode(10)); }
   }
   /** Ordered change stream (internal audit only): catalog mutations append here in the same transaction. */
-  constructor(path: string, quota: { softBytes?: number; hardBytes?: number } = {}) {
+  constructor(path: string, quota: { softBytes?: number; hardBytes?: number; legacyWorkspaces?: LegacyWorkspaceMapValue; shareEnabled?: boolean } = {}) {
     if (!isAbsolute(path)) throw new Error('Governance database path must be absolute');
     if (quota.softBytes !== undefined && quota.hardBytes !== undefined && quota.softBytes >= quota.hardBytes) throw new Error('Quota soft limit must be below the hard limit');
     this.dbPath = path;
+    this.shareEnabled = quota.shareEnabled ?? true;
     this.blobsDir = join(dirname(path), 'blobs');
     mkdirSync(this.blobsDir, { recursive: true });
     this.quotaSoftBytes = quota.softBytes;
@@ -82,7 +84,7 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
     try {
       this.transaction(() => {
         const version = Number(this.db.prepare('PRAGMA user_version').get()!['user_version']);
-      if (version > 22) throw new Error('Unsupported governance schema version');
+      if (version > 23) throw new Error('Unsupported governance schema version');
         if (version === 0) {
           if (this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").get()) throw new Error('Refusing to initialize an unidentified existing database');
           this.db.exec(`
@@ -210,23 +212,13 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
         this.db.prepare('VACUUM INTO ?').run(destination);
         this.transaction(() => {
           if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) !== 8) return;
-          // KNOWLEDGE-01: review schedule derived from publication time and knowledge type.
+          // Historical step: v23 drops the schedule this introduced. The step keeps its original
+          // shape so a library at v8 still walks the chain one version at a time.
           this.db.exec(`
             CREATE TABLE catalog_review_state(memory_id TEXT PRIMARY KEY REFERENCES catalog_memories(id),knowledge_type TEXT NOT NULL,interval_days INTEGER NOT NULL,last_reviewed_at TEXT,due_at TEXT NOT NULL);
             CREATE TABLE catalog_review_history(id TEXT PRIMARY KEY,memory_id TEXT NOT NULL REFERENCES catalog_memories(id),reviewed_at TEXT NOT NULL,reviewer TEXT NOT NULL,reason TEXT NOT NULL);
             PRAGMA user_version=9;
           `);
-          const rows = this.db.prepare(`SELECT m.id AS memory_id, r.effective_at, c.request_json
-            FROM catalog_memories m JOIN catalog_revisions r ON r.id=m.current_revision_id
-            JOIN governance_candidates c ON c.id=r.candidate_id`).all();
-          const insert = this.db.prepare('INSERT OR IGNORE INTO catalog_review_state(memory_id,knowledge_type,interval_days,last_reviewed_at,due_at) VALUES(?,?,?,NULL,?)');
-          for (const row of rows) {
-            const request = JSON.parse(String(row['request_json'])) as { knowledgeType?: string };
-            const knowledgeType = typeof request.knowledgeType === 'string' ? request.knowledgeType : 'Practice';
-            const intervalDays = REVIEW_INTERVAL_DAYS[knowledgeType] ?? DEFAULT_REVIEW_INTERVAL_DAYS;
-            const dueAt = new Date(new Date(String(row['effective_at'])).getTime() + intervalDays * 86_400_000).toISOString();
-            insert.run(String(row['memory_id']), knowledgeType, intervalDays, dueAt);
-          }
         });
       }
       if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) === 9) {
@@ -322,10 +314,9 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
           if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) !== 13) return;
           // v14: classification per revision.
           //
-          // A local Remember carries `knowledgeType` and tags; a synced formal entry carries
-          // `category`, `importance`, tags and entities. They are different dimensions, so both
-          // are stored and neither is derived from the other. Existing revisions keep NULL, which
-          // the contract reports as "unknown" rather than as an empty tag list.
+          // A synced formal entry carries `category`, `importance`, tags and entities; existing
+          // revisions keep NULL, which the contract reports as "unknown" rather than as an empty
+          // tag list. v23 drops the knowledge-type column this step also introduced.
           this.db.exec(`
             ALTER TABLE catalog_revisions ADD COLUMN knowledge_type TEXT;
             ALTER TABLE catalog_revisions ADD COLUMN category TEXT;
@@ -567,7 +558,6 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
               entry_version INTEGER NOT NULL,
               source_content_hash TEXT NOT NULL,
               content TEXT NOT NULL,
-              knowledge_type TEXT NOT NULL,
               category TEXT,
               importance INTEGER,
               tags_json TEXT,
@@ -638,10 +628,7 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
               ALTER TABLE catalog_memories DROP COLUMN project_id;
             `);
           }
-          // Archives: rename the owner column and re-key the rows by workspace. An old project id
-          // is not a workspace id, so rows whose id is not a UUID cannot be migrated here; they
-          // stay under a deterministic placeholder workspace that the operator remaps, and the
-          // original value is kept in a backup table.
+          // Keep original project ownership for reconciliation and migrate both current and historical rows.
           const archiveColumns = this.db.prepare("PRAGMA table_info(project_archives)").all().map(row => String(row['name']));
           if (archiveColumns.includes('project_id') && !archiveColumns.includes('workspace_id')) {
             this.db.exec(`
@@ -654,29 +641,57 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
           if (revisionColumns.includes('project_id') && !revisionColumns.includes('workspace_id')) {
             this.db.exec(`ALTER TABLE project_archive_revisions RENAME COLUMN project_id TO workspace_id;`);
           }
+          if (archiveColumns.includes('project_id') || revisionColumns.includes('project_id')) {
+            const projects = this.db.prepare(`
+              SELECT workspace_id FROM project_archives
+              UNION SELECT workspace_id FROM project_archive_revisions
+            `).all();
+            const mapped: { projectId: string; workspaceId: string; name: string }[] = [];
+            for (const row of projects) {
+              const projectId = String(row['workspace_id']);
+              const workspace = Object.hasOwn(quota.legacyWorkspaces ?? {}, projectId) ? quota.legacyWorkspaces![projectId] : undefined;
+              if (!workspace) throw new Error(`Missing workspace migration mapping for project ${projectId}`);
+              mapped.push({ projectId, ...workspace });
+            }
+            this.db.exec('CREATE TEMP TABLE archive_workspace_migration(project_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL)');
+            for (const workspace of mapped) {
+              this.db.prepare('INSERT INTO archive_workspace_migration VALUES(?, ?)').run(workspace.projectId, workspace.workspaceId);
+              this.db.prepare('INSERT OR IGNORE INTO workspaces(workspace_id, name, created_at) VALUES(?, ?, ?)').run(workspace.workspaceId, workspace.name, new Date().toISOString());
+            }
+            for (const table of ['project_archives', 'project_archive_revisions']) {
+              this.db.exec(`UPDATE ${table} SET workspace_id=(SELECT workspace_id FROM archive_workspace_migration WHERE project_id=${table}.workspace_id)`);
+            }
+            this.db.exec('DROP TABLE archive_workspace_migration');
+          }
           // Local sync ledgers: a scope becomes a stream.
           //
-          // Legacy cursors are discarded, as the switch procedure requires: every stream is
-          // re-read from a snapshot rather than resumed at a sequence number that no longer
-          // means the same thing. Unconfirmed outbox rows for rules and formal memories are
-          // kept because their streams are derivable; workspace-archive rows depended on a
-          // project id that has no workspace mapping yet, so they stay in the backup tables
-          // for the operator to reconcile instead of being filed under a guessed workspace.
-          // The staging and backup tables are dropped first: a store that already passed through
-          // this step (a rehearsal that reverts the version counter) must not collide with the
-          // rows it left behind.
+          // Legacy cursors and completed queues are replaced by a fresh snapshot for each stream.
           const legacyLedger = this.db.prepare("SELECT 1 FROM pragma_table_info('sync_outbox') WHERE name='scope'").get() !== undefined;
           this.db.exec(`
             DROP TABLE IF EXISTS sync_state_streams;
             DROP TABLE IF EXISTS sync_outbox_streams;
             DROP TABLE IF EXISTS sync_inbox_streams;
-            DROP TABLE IF EXISTS archive_project_backup;
             CREATE TABLE sync_state_streams(stream TEXT PRIMARY KEY, cursor INTEGER NOT NULL, last_pull_at TEXT, last_error TEXT);
             CREATE TABLE sync_outbox_streams(change_id TEXT PRIMARY KEY, stream TEXT NOT NULL, entry_id TEXT NOT NULL, base_version INTEGER NOT NULL, operation TEXT NOT NULL, entry_json TEXT NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL, last_error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS sync_outbox_streams_state ON sync_outbox_streams(state);
             CREATE TABLE sync_inbox_streams(stream TEXT NOT NULL, seq INTEGER NOT NULL, change_id TEXT NOT NULL, entry_id TEXT NOT NULL, version INTEGER NOT NULL, operation TEXT NOT NULL, entry_json TEXT NOT NULL, state TEXT NOT NULL, error TEXT, received_at TEXT NOT NULL, PRIMARY KEY(stream, seq));
           `);
           if (legacyLedger) {
+            const outstanding = this.db.prepare(`
+              SELECT 1 FROM sync_outbox WHERE state <> 'confirmed'
+              UNION ALL SELECT 1 FROM sync_inbox WHERE state <> 'applied'
+              UNION ALL SELECT 1 FROM share_outbox WHERE ?
+              LIMIT 1
+            `).get(Number(this.shareEnabled));
+            if (outstanding) throw new Error('Drain legacy sync and publication queues before migrating');
+            if (this.shareEnabled) this.db.exec(`
+              CREATE TABLE IF NOT EXISTS legacy_formal_pending(memory_id TEXT PRIMARY KEY) STRICT;
+              INSERT OR IGNORE INTO legacy_formal_pending SELECT DISTINCT entry_id FROM formal_map;
+              INSERT OR IGNORE INTO legacy_formal_pending SELECT entry_id FROM sync_outbox
+                WHERE json_extract(entry_json, '$.kind') IN ('formal', 'formal-memory');
+              INSERT OR IGNORE INTO legacy_formal_pending SELECT entry_id FROM sync_inbox
+                WHERE json_extract(entry_json, '$.kind') IN ('formal', 'formal-memory');
+            `);
             // Only a store that still carries the scope-keyed ledgers needs the backup; a store
             // already keyed by stream keeps its rows through the copy below unchanged.
             this.db.exec(`
@@ -688,16 +703,6 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
                 SELECT change_id, json_object('scope', scope, 'entry', json(entry_json), 'operation', operation, 'state', state) FROM sync_outbox;
               INSERT OR IGNORE INTO legacy_sync_inbox_backup(scope, seq, payload_json)
                 SELECT scope, seq, json_object('changeId', change_id, 'entry', json(entry_json), 'version', version) FROM sync_inbox;
-              INSERT OR IGNORE INTO sync_outbox_streams(change_id, stream, entry_id, base_version, operation, entry_json, state, attempts, last_error, created_at, updated_at)
-                SELECT change_id,
-                  CASE json_extract(entry_json,'$.kind')
-                    WHEN 'runtime' THEN 'rules'
-                    WHEN 'formal' THEN 'formal-memories'
-                    ELSE NULL
-                  END,
-                  entry_id, base_version, operation, entry_json, state, attempts, last_error, created_at, updated_at
-                FROM sync_outbox
-                WHERE json_extract(entry_json,'$.kind') IN ('runtime','formal');
             `);
           } else {
             this.db.exec(`
@@ -720,7 +725,7 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
 
       // No job survives this process: a row still marked running belongs to a killed run.
       this.db.prepare("UPDATE diagnostic_jobs SET state='interrupted', finished_at=? WHERE state='running'").run(new Date().toISOString());
-      this.db.prepare('SELECT knowledge_type, category, importance, tags_json, entities_json FROM catalog_revisions LIMIT 0').all();
+      this.db.prepare('SELECT category, importance, tags_json, entities_json FROM catalog_revisions LIMIT 0').all();
       this.db.prepare('SELECT memory_id, version, provider_id, content, content_hash, scope, state FROM share_outbox LIMIT 0').all();
       this.db.prepare('SELECT workspace_id, name, created_at FROM workspaces LIMIT 0').all();
       this.db.prepare('SELECT host_id, session_id, closed FROM turn_sessions LIMIT 0').all();
@@ -735,6 +740,32 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
       this.turns = new SqliteTurnStore(this.db, operation => this.transaction(operation));
       this.events = new SessionEventStore(this.db, operation => this.transaction(operation));
       this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;');
+      if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) === 22) {
+        this.db.prepare('VACUUM INTO ?').run(path + '.pre-v23.' + randomUUID() + '.db');
+        this.transaction(() => {
+          if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) !== 22) return;
+          // The knowledge-type domain and the review schedule derived from it are both gone.
+          // Existing rows are cleared rather than left readable: a removed dimension that still
+          // answers queries is a second, undocumented classification system.
+          this.db.exec(
+            'DROP TABLE IF EXISTS catalog_review_state;'
+            + 'DROP TABLE IF EXISTS catalog_review_history;'
+            + 'DROP TABLE IF EXISTS archive_distillations;'
+            + 'CREATE TABLE archive_distillations('
+            + 'draft_id TEXT PRIMARY KEY,host_id TEXT NOT NULL,workspace_id TEXT NOT NULL,'
+            + 'entry_id TEXT NOT NULL,entry_version INTEGER NOT NULL,source_content_hash TEXT NOT NULL,'
+            + 'content TEXT NOT NULL,category TEXT,importance INTEGER,tags_json TEXT,entities_json TEXT,'
+            + 'reason TEXT NOT NULL,assessment TEXT NOT NULL,content_hash TEXT NOT NULL,'
+            + 'created_at TEXT NOT NULL,task_id TEXT) STRICT;',
+          );
+          // A draft is a preview, not a record: an unfinished one is recreated from its source.
+          this.db.exec('DROP TRIGGER IF EXISTS catalog_revisions_immutable_update;');
+          const hasKnowledge = this.db.prepare("SELECT 1 FROM pragma_table_info('catalog_revisions') WHERE name='knowledge_type'").get() !== undefined;
+          if (hasKnowledge) this.db.exec('ALTER TABLE catalog_revisions DROP COLUMN knowledge_type;');
+          this.db.exec("CREATE TRIGGER catalog_revisions_immutable_update BEFORE UPDATE ON catalog_revisions BEGIN SELECT RAISE(ABORT,'Revision is immutable'); END;");
+          this.db.exec('PRAGMA user_version=23;');
+        });
+      }
     } catch (error) { this.db.close(); throw error; }
   }
   private transaction<T>(operation: () => T): T {
@@ -774,10 +805,18 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
       return this.get(id);
     });
   }
-  reviewDue(now?: Date): ReturnType<SqliteMemoryCatalog['reviewDue']> { return this.catalog.reviewDue(now); }
-  completeReview(memoryId: string, actor: string, reason: string, now?: Date): ReturnType<SqliteMemoryCatalog['completeReview']> {
-    return this.transaction(() => this.catalog.completeReview(memoryId, actor, reason, now));
+  commitDirectEdit(
+    memoryId: string, request: RememberRequest, providerId: string, hash: string, time: string,
+    entryVersion: number, actor: string, reason: string, meta: Parameters<SqliteMemoryCatalog['publishDirectEdit']>[7],
+  ) {
+    return this.transaction(() => {
+      const revision = this.catalog.publishDirectEdit(memoryId, request, providerId, hash, time, actor, reason, meta);
+      this.memory.upsertFormalMap({ entryId: memoryId, version: entryVersion, providerId, contentHash: hash, state: 'applied', appliedAt: time }, time);
+      this.memory.setEntryVersion(memoryId, entryVersion, time);
+      return revision;
+    });
   }
+
   get(candidateId: string): CandidateRecord {
     const row = this.db.prepare(`SELECT c.*, r.id AS receipt_id FROM governance_candidates c
       JOIN governance_submission_receipts r ON r.candidate_id=c.id WHERE c.id=?`).get(candidateId);
@@ -819,7 +858,7 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
       const body = this.db.prepare('SELECT content FROM governance_candidate_bodies WHERE candidate_id=?').get(candidateId);
       if (!body) return false; // cleared body: no content comparison, never a false duplicate
       const prior = CandidateRequest.parse(JSON.parse(String(this.db.prepare('SELECT request_json FROM governance_candidates WHERE id=?').get(candidateId)!['request_json'])));
-      return String(body['content']) === incoming.content && prior.knowledgeType === incoming.knowledgeType && JSON.stringify(prior.tags) === JSON.stringify(incoming.tags) && JSON.stringify(prior.provenance) === JSON.stringify(incoming.provenance);
+      return String(body['content']) === incoming.content && JSON.stringify(prior.tags) === JSON.stringify(incoming.tags) && JSON.stringify(prior.provenance) === JSON.stringify(incoming.provenance);
     }));
   }
   acquire(owner: string, duration: number): boolean {
@@ -916,7 +955,7 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
       // Durable share marker, same transaction as the publication: if the process dies before
       // the listener runs, the next start still knows this memory owes a shared change.
       const shareStream = FORMAL_STREAM;
-      this.db.prepare(`
+      if (this.shareEnabled) this.db.prepare(`
         INSERT INTO share_outbox(memory_id, version, provider_id, content, content_hash, scope, state, attempts, last_error, created_at, updated_at)
         VALUES(?, ?, ?, ?, ?, ?, 'pending', 0, NULL, ?, ?)
         ON CONFLICT(memory_id) DO UPDATE SET version=excluded.version, provider_id=excluded.provider_id,
@@ -935,6 +974,10 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
   }
 
   /** Publications that still have to reach shared sync; drained on start and after each publish. */
+  hasUnsettledShare(memoryId: string): boolean {
+    return this.db.prepare('SELECT 1 FROM share_outbox WHERE memory_id=?').get(memoryId) !== undefined;
+  }
+
   pendingShares(limit = 20): PublishedFormal[] {
     const rows = this.db.prepare(
       "SELECT memory_id, version, provider_id, content, content_hash, scope FROM share_outbox WHERE state = 'pending' ORDER BY created_at LIMIT ?",

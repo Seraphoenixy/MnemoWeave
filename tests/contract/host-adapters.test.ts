@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { normalize as normalizePath, resolve } from 'node:path';
 import { normalizeHookEvent, injectContext, zcodeWorkspaceHooks, installWorkspaceHooks, installWorkspaceMcp, zcodeDescriptor, ZCODE_HOST_FACTS } from '../../packages/adapters/zcode/src/index.ts';
-import { DSH_HOST_FACTS } from '../../packages/adapters/dsh/src/index.ts';
 import type { HandlerOptions } from '../../packages/adapters/zcode/src/index.ts';
+import { tempDir } from '../support/temp.ts';
 
 const hookInput = (event: string, extra: Record<string, unknown> = {}) => ({
   session_id: 'sess-zcode-1', hook_event_name: event, ...extra,
@@ -53,7 +53,7 @@ test('ZCode workspace config generation enables hooks and merges without losing 
   for (const event of ['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'PostToolUseFailure', 'Stop']) {
     assert.ok(hooks.events[event], `missing hook registration for ${event}`);
   }
-  const root = await mkdtemp(resolve('work/tests/zcode-'));
+  const root = await tempDir('host-adapters', 'zcode');
   const preExisting = join2(root, '.zcode', 'config.json');
   const { mkdirSync } = await import('node:fs');
   mkdirSync(join2(root, '.zcode'), { recursive: true });
@@ -70,12 +70,11 @@ test('ZCode workspace config generation enables hooks and merges without losing 
 
 function join2(...parts: string[]): string { return parts.join('/').replace(/\/{2,}/g, '/'); }
 
-test('HOST-01 records keep verification state honest per host', () => {
+test('ZCode HOST-01 records keep verification state honest', () => {
   // ZCode: the assistant-final gap was corrected by upstream docs — Stop carries the text.
   assert.equal(ZCODE_HOST_FACTS.assistantFinalEntry.includes('Stop hook stdin carries last_assistant_message'), true);
   assert.equal(ZCODE_HOST_FACTS.sessionEndEntry.includes('missing'), true, 'the remaining ZCode gap is the missing session-end event');
   const zcode = zcodeDescriptor();
   assert.equal(zcode.capabilities.context_injection.status, 'unverified');
   assert.equal(zcode.gatesMet, false, 'ZCode stays unverified until a live session runs the handler');
-  assert.equal(DSH_HOST_FACTS.status, 'blocked', 'DSH stays blocked until an installed SDK/runtime can be verified');
 });

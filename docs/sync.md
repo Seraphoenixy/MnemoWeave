@@ -28,7 +28,7 @@
 
 变更包含 `changeId`、`baseVersion`、`operation` 和全量目标条目。创建以 0 为基准，远端分配版本 1；更新或撤回须基于已确认版本。远端在事务中检查设备权限、幂等键、基准版本及派生同步流，写入当前态、修订、同步流日志和回执。同一同步流的序号单调递增，条目版本独立递增。
 
-启用同步时，正式记忆新增在远端事务内按当前有效条目的 `contentHash` 和 `byteLength` 做并发查重。匹配时按逻辑 ID 字典序选择第一条，在原 `changeId` 下保存重复回执，返回该条目的 ID 和版本，不分配新序号。发起端在本机应用或取得该条目并核对正文后才返回 `duplicate`。本机模式在单一发布临界区内完成同样的比较与提交。此规则用于当前 `plain` 封装。启用密文前须确定能保留查重语义的协议，客户端收到 `enc-v1` 转 `needs_review`。
+启用同步时，正式记忆新增在远端事务内按当前有效条目的 `contentHash` 和 `byteLength` 做并发查重。匹配时按逻辑 ID 字典序选择第一条，在原 `changeId` 下保存重复回执，返回该条目的 ID 和版本。回执的 `seq=0` 表示没有产生新日志序号。普通提交的回执包含 `confirmedAt`，用于本机应用远端确认时间。发起端在本机应用或取得该条目并核对正文后才返回 `duplicate`。本机模式在单一发布临界区内完成同样的比较与提交。此规则用于当前 `plain` 封装。启用密文前须确定能保留查重语义的协议，客户端收到 `enc-v1` 转 `needs_review`。
 
 正式记忆编辑和撤回按读取到的 `entryVersion` 提交。准则、档案表单也带读取时的版本。过期基准返回 `VERSION_CONFLICT`。正式记忆新增、编辑、撤回和工作区档案写入经远端确认后进入本机应用。正式记忆只有远端确认且本机应用完成才返回发布成功。准则通过 Outbox 提交。排队或结果未知时保留原本机有效集合，确认并应用后再更新常驻内容。
 
@@ -41,7 +41,7 @@
 
 ## 拉取、应用与快照
 
-本机先解析未知结果并推送 Outbox，再按可读同步流增量拉取、写入 Inbox、依序应用。只对连续已应用记录推进游标。出现缺口、清理地板或落后过久时，按同步流取得快照。快照以单一一致切点生成，只包含请求流的条目。正式记忆快照还包含其历史修订、关系和撤回状态。快照先写入暂存状态，客户端继续读取上一份已应用状态。校验整个快照、正文、关系和映射后，在一次本机事务内切换该流的可见目录或工作副本，并推进游标。新写入 Provider 的记录在切换前不得通过逻辑 ID 或召回暴露。失败时保留旧状态和游标，重试复用已核对的 Provider 写入。首次安装无旧状态时报告该流尚未就绪。
+本机先解析未知结果并推送 Outbox，再按可读同步流增量拉取、写入 Inbox、依序应用。只对连续已应用记录推进游标。出现缺口、清理地板或落后过久时，按同步流取得快照。快照以单一一致切点生成，只包含请求流的条目。正式记忆快照还包含其历史修订、关系和撤回状态。本机先把快照投影写入暂存状态，此时客户端继续读取上一份已应用状态。校验整个快照、正文、关系和映射后，在一次本机事务内切换该流的可见目录或工作副本，并推进游标。新写入 Provider 的记录在切换前不得通过逻辑 ID 或召回暴露。失败时保留旧状态和游标，重试复用已核对的 Provider 写入。首次安装无旧状态时报告该流尚未就绪。
 
 正式记忆按修订顺序在本机调用 `remember --no-diff`，以 `mnemoweave:<changeId>:<version>` 定位已写入的正文，核对内容、关系后更新 `formal_map` 和目录。每台机器的 Mnemon ID 独立。写入响应丢失时先定位并核对；无法确定结果时保留待处理记录。撤回移出当前召回，保留历史。
 
@@ -68,8 +68,12 @@ node dist/apps/sync-server/src/enroll.js enroll dev-a rules:rw formal-memories:r
 node dist/apps/sync-server/src/enroll.js revoke dev-a
 ```
 
+本机与远端需成套更新，以识别带 `confirmedAt` 的回执和 `seq=0` 的同文回执。迁移过的流在游标 0 的拉取响应中返回 `snapshotAtStart`。本机首次读取该流时先应用快照，以取得旧日志清除前已经存在的条目。
+
 ## 配置与保留
 
 本机 `MNEMOWEAVE_SYNC_URL`、`MNEMOWEAVE_SYNC_DEVICE_ID`、`MNEMOWEAVE_SYNC_TOKEN` 必须一并提供。三者均未配置时运行本机模式，部分配置拒绝启动。地址使用 HTTPS 或 loopback。轮询间隔 `MNEMOWEAVE_SYNC_INTERVAL_MS` 默认 300000 ms，0 停止周期调度；`MNEMOWEAVE_SYNC_TIMEOUT_MS` 默认 10000 ms。
+
+本机和远端使用相同的 `MNEMOWEAVE_RULE_CAPACITY_BYTES` 与 `MNEMOWEAVE_ARCHIVE_ACTIVE_CAPACITY_BYTES`。旧项目切换时两端均使用 `MNEMOWEAVE_LEGACY_WORKSPACE_MAP` 指向对照表文件。
 
 远端使用 `MNEMOWEAVE_SYNC_HOST`、`MNEMOWEAVE_SYNC_PORT`、`MNEMOWEAVE_SYNC_STATE_DIR`。默认每个同步流保留 90 天或 50000 条日志，回执独立保留 365 天，分别由 `MNEMOWEAVE_SYNC_RETENTION_DAYS`、`MNEMOWEAVE_SYNC_MAX_CHANGES` 和 `MNEMOWEAVE_SYNC_RECEIPT_DAYS` 配置。清理只移除日志前缀，过期回执返回 `CHANGE_ID_EXPIRED`，本机转人工处理。

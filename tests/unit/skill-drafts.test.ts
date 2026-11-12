@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { adoptStoredDraft, dismissSkillDraft, listSkillDrafts, markSkillDraftAdopted, saveSkillDraft } from '../../plugins/dsh-mnemo-weave/src/ui/skill-drafts.ts';
+import { tempDir } from '../support/temp.ts';
 
 const base = {
   workspace: '/w/alpha',
@@ -19,7 +20,7 @@ const base = {
 };
 
 test('drafts persist with their original workspace and skill path', async () => {
-  const stateDir = await mkdtemp(resolve('work', 'skill-drafts-'));
+  const stateDir = await tempDir('skill-drafts', 'skill-drafts');
   const first = await saveSkillDraft(base, stateDir);
   assert.equal(first.workspace, base.workspace);
   assert.equal(first.skillPath, base.skillPath);
@@ -32,8 +33,8 @@ test('drafts persist with their original workspace and skill path', async () => 
 });
 
 test('a stored draft is adopted through the baseline-checked write and marked adopted', async () => {
-  const stateDir = await mkdtemp(resolve('work', 'skill-drafts3-'));
-  const workspace = await mkdtemp(resolve('work', 'skill-drafts3-ws-'));
+  const stateDir = await tempDir('skill-drafts', 'skill-drafts3');
+  const workspace = await tempDir('skill-drafts', 'skill-drafts3-ws');
   const skillPath = join(workspace, '.dsh', 'skills', 'alpha', 'SKILL.md');
   await mkdir(join(workspace, '.dsh', 'skills', 'alpha'), { recursive: true });
   const original = base.baseline;
@@ -52,7 +53,7 @@ test('a stored draft is adopted through the baseline-checked write and marked ad
     (error: unknown) => (error as { code?: string }).code === 'INVALID_STATE');
 });
 test('a draft is dismissed or marked adopted without losing its content', async () => {
-  const stateDir = await mkdtemp(resolve('work', 'skill-drafts2-'));
+  const stateDir = await tempDir('skill-drafts', 'skill-drafts2');
   const draft = await saveSkillDraft(base, stateDir);
   const dismissed = await dismissSkillDraft(draft.id, stateDir);
   assert.ok(dismissed.dismissedAt !== null);

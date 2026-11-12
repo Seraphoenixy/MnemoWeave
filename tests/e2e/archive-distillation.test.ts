@@ -58,7 +58,7 @@ test('a distilled draft publishes its fixed text and refuses a stale source', { 
     const draftResponse = await call('POST', '/v1/archive-distillations', {
       source: { workspaceId: WORKSPACE, entryId: archive.entryId, entryVersion: archive.version, contentHash: sourceHash },
       content: '长线缆串口在 9600 波特率下会丢包，提到 115200 后稳定。',
-      knowledgeType: 'Troubleshooting', category: 'decision', importance: 4,
+      category: 'decision', importance: 4,
       reason: '可跨项目复用的排查结论', assessment: 'supported',
     });
     assert.equal(draftResponse.status, 201);
@@ -100,7 +100,7 @@ test('a distilled draft publishes its fixed text and refuses a stale source', { 
     const secondArchive = second.body as { entryId: string; version: number };
     const staleDraft = await call('POST', '/v1/archive-distillations', {
       source: { workspaceId: WORKSPACE, entryId: secondArchive.entryId, entryVersion: secondArchive.version, contentHash: createHash('sha256').update('第二版正文。', 'utf8').digest('hex') },
-      content: '可复用的第二条结论。', knowledgeType: 'Practice', reason: '可复用', assessment: 'supported',
+      content: '可复用的第二条结论。', reason: '可复用', assessment: 'supported',
     });
     assert.equal(staleDraft.status, 201);
     const staleId = (staleDraft.body as { draftId: string }).draftId;

@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdir,mkdtemp} from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {DatabaseSync} from 'node:sqlite';
 import {RememberInput, MnemoWeaveError} from '../../packages/core/contracts/src/index.ts';
@@ -8,10 +8,11 @@ import {SqliteCandidates} from '../../packages/infrastructure/governance/src/ind
 import {VersionWorkflow} from '../../packages/core/application/src/version-workflow.ts';
 import type {VersionProvider} from '../../packages/core/application/src/version-ports.ts';
 import {MemoryApplication} from '../../packages/core/application/src/index.ts';
+import { tempDir } from '../support/temp.ts';
 
 async function fixture(kind:'revise'|'supersede'='revise'){
-  await mkdir('work/tests',{recursive:true});const root=await mkdtemp(resolve('work/tests/version-fault-'));const path=join(root,'governance.db');const repo=new SqliteCandidates(path);
-  const request=(key:string,content:string)=>RememberInput.parse({idempotencyKey:key,content,knowledgeType:'Practice',provenance:{source:'fixture',sourceReference:'version:test',evidence:['test'],verificationStatus:'unverified',confidence:0.5,applicability:'same scoped environment',limitations:'fixture',lastVerified:null}});
+  await mkdir('work/tests',{recursive:true});const root=await tempDir('version-workflow', 'version-fault');const path=join(root,'governance.db');const repo=new SqliteCandidates(path);
+  const request=(key:string,content:string)=>RememberInput.parse({idempotencyKey:key,content,provenance:{source:'fixture',sourceReference:'version:test',evidence:['test'],verificationStatus:'unverified',confidence:0.5,applicability:'same scoped environment',limitations:'fixture',lastVerified:null}});
   const old=repo.submit(request('version-base-001','original immutable version'));repo.review(old.id,'approve','operator','fixture',null);repo.acquire('base-owner',90000);repo.finish(repo.claim('base-owner')!,{id:'base-provider',action:'added'},false);repo.release('base-owner');const base=repo.get(old.id).publication!;
   const input={...request('version-next-001','next immutable version'),change:{kind,targetMemoryId:base.memoryId,expectedRevisionId:base.revisionId,effectiveAt:new Date().toISOString(),reason:'reviewed evolution',evidence:['reviewed fixture']}};
   const candidate=repo.submit(input);repo.review(candidate.id,'approve','operator','fixture',null);

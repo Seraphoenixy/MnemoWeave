@@ -107,12 +107,11 @@ export class MemoryClient {
 
   listMemories(query: {
     query?: string; limit?: number; cursor?: string;
-    category?: string; knowledgeType?: string; entity?: string; sort?: 'newest' | 'oldest' | 'importance';
+    category?: string; entity?: string; sort?: 'newest' | 'oldest' | 'importance';
   } = {}): Promise<ClientResponse<{
     items: MemoryListItem[];
     nextCursor?: string;
     categories?: { value: string; count: number }[];
-    knowledgeTypes?: { value: string; count: number }[];
     entities?: { value: string; count: number }[];
   }>> {
     return this.call('GET', '/v1/memories', undefined, this.timeoutMs, query);
@@ -161,7 +160,7 @@ export class MemoryClient {
 
   /** Create a formal memory directly; the Server publishes it without a review round. */
   createMemory(input: {
-    content: string; knowledgeType: string;
+    content: string;
     category?: string; importance?: number; tags?: string[]; entities?: string[]; reason?: string;
   }): Promise<ClientResponse<{ memoryId: string; revisionId: string; providerMemoryId: string; contentHash: string; entryVersion: number; duplicate?: boolean }>> {
     return this.call('POST', '/v1/memories', input);
@@ -170,7 +169,7 @@ export class MemoryClient {
   /** Edit a formal memory against the version the editor read. */
   editMemory(memoryId: string, input: {
     content: string; reason?: string; entryVersion: number;
-    category?: string; knowledgeType?: string; importance?: number; tags?: string[]; entities?: string[];
+    category?: string; importance?: number; tags?: string[]; entities?: string[];
   }): Promise<ClientResponse<{ memoryId: string; revisionId: string; providerMemoryId: string; contentHash: string; entryVersion: number; duplicate?: boolean }>> {
     return this.call('PATCH', `/v1/memories/${encodeURIComponent(memoryId)}`, input);
   }
@@ -234,7 +233,7 @@ export class MemoryClient {
     return this.call('GET', `/v1/archives/${encodeURIComponent(entryId)}/content`, undefined, this.timeoutMs, input);
   }
 
-  editArchiveState(entryId: string, input: { state: 'active' | 'archived'; baseVersion: number }): Promise<ClientResponse<ArchiveItem>> {
+  editArchiveState(entryId: string, input: { state: 'active' | 'archived'; baseVersion: number; changeId?: string }): Promise<ClientResponse<ArchiveItem>> {
     return this.call('POST', `/v1/archives/${encodeURIComponent(entryId)}/state`, input);
   }
 
@@ -472,7 +471,6 @@ export interface ArchiveDistillation {
   draftId: string;
   source: { workspaceId: string; entryId: string; entryVersion: number; contentHash: string };
   content: string;
-  knowledgeType: string;
   category?: string;
   importance?: number;
   tags?: string[];
@@ -510,7 +508,6 @@ export interface MemoryListItem {
   applicability: string; publishedAt: string; content: string;
   /** Base version for an edit; 0 until the memory has been edited. */
   entryVersion: number;
-  knowledgeType?: string;
   category?: string;
   importance?: number;
   tags?: string[];

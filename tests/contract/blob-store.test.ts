@@ -1,14 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { readdirSync, readFileSync, writeFileSync, utimesSync } from 'node:fs';
 import { SqliteCandidates } from '../../packages/infrastructure/governance/src/index.ts';
 import type { RememberRequest } from '../../packages/core/contracts/src/index.ts';
+import { tempDir } from '../support/temp.ts';
 
 const DAY_MS = 86_400_000;
 const request = (key: string, content: string): RememberRequest => ({
-  idempotencyKey: key, content, knowledgeType: 'Practice', tags: [],
+  idempotencyKey: key, content, tags: [],
   provenance: {
     source: 'blob-test', sourceReference: `fixture:${key}`, evidence: ['fixture'], verificationStatus: 'verified',
     confidence: 0.5, applicability: 'isolated blob fixture', limitations: 'not production knowledge', lastVerified: null,
@@ -17,7 +18,7 @@ const request = (key: string, content: string): RememberRequest => ({
 
 async function fixture() {
   await mkdir('work/tests', { recursive: true });
-  const root = await mkdtemp(resolve('work/tests/blobs-'));
+  const root = await tempDir('blob-store', 'blobs');
   return { root, repo: new SqliteCandidates(join(root, 'governance.db')) };
 }
 

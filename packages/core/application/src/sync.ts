@@ -244,6 +244,10 @@ function errorCode(error: unknown): string {
 }
 
 function acceptedRecord(row: SyncOutboxRecord, accepted: SyncAcceptedValue, at: string): SyncChangeRecordValue {
+  const confirmedAt = accepted.confirmedAt ?? at;
+  const payload = row.entry.kind === 'workspace-archive' && 'workspaceId' in row.entry.payload && accepted.confirmedAt
+    ? { ...row.entry.payload, archivedAt: row.entry.payload.state === 'archived' ? confirmedAt : null }
+    : row.entry.payload;
   return {
     changeId: row.changeId,
     entryId: row.entryId,
@@ -251,9 +255,12 @@ function acceptedRecord(row: SyncOutboxRecord, accepted: SyncAcceptedValue, at: 
     version: accepted.version,
     seq: accepted.seq,
     operation: row.operation,
-    entry: { ...row.entry, version: accepted.version },
+    entry: {
+      ...row.entry, payload, version: accepted.version,
+      ...(accepted.confirmedAt ? { revisions: [{ version: accepted.version, content: row.entry.content, createdAt: confirmedAt }] } : {}),
+    },
     deviceId: 'local',
-    recordedAt: at,
+    recordedAt: confirmedAt,
   };
 }
 
@@ -265,33 +272,36 @@ export class SyncCoordinator {
   private readonly remote: SyncRemotePort;
   private readonly ledger: SyncLedgerPort;
   private readonly now: () => string;
+  private readonly stageSnapshot: ((snapshot: SyncSnapshotValue) => {
+    apply(row: SyncInboxRecord): Promise<ApplyOutcome>;
+    commit(advance: () => void): void;
+  }) | undefined;
 
-  /**
-   * Apply one inbox row at most once at a time.
-   *
-   * The periodic pass and a local write's own `applyStream` can both observe the same `received`
-   * row before either marks it `applied`, which wrote the same Provider memory twice and
-   * appended two local revisions for one remote change. The wait is per row, not per stream: a
-   * stream-wide queue deadlocks the startup pass, which holds the lock while pulling.
-   */
-  private readonly applyingRows = new Map<string, Promise<unknown>>();
+  // A snapshot and incremental apply for the same stream must not interleave.
+  private readonly applyingStreams = new Map<string, Promise<void>>();
 
-  constructor(remote: SyncRemotePort, ledger: SyncLedgerPort, now: () => string = () => new Date().toISOString()) {
+  constructor(
+    remote: SyncRemotePort,
+    ledger: SyncLedgerPort,
+    now: () => string = () => new Date().toISOString(),
+    stageSnapshot?: SyncCoordinator['stageSnapshot'],
+  ) {
     this.remote = remote;
     this.ledger = ledger;
     this.now = now;
+    this.stageSnapshot = stageSnapshot;
   }
 
-  private async claimRow(stream: string, seq: number): Promise<() => void> {
-    const key = `${stream}#${seq}`;
-    const previous = this.applyingRows.get(key);
-    if (previous) await previous.catch(() => undefined);
-    let release: () => void = () => undefined;
-    const held = new Promise<void>((done) => { release = done; });
-    this.applyingRows.set(key, held);
+  private async claimStream(stream: string): Promise<() => void> {
+    const previous = this.applyingStreams.get(stream);
+    let release = () => {};
+    const held = new Promise<void>(done => { release = done; });
+    const turn = previous ? previous.then(() => held) : held;
+    this.applyingStreams.set(stream, turn);
+    await previous;
     return () => {
       release();
-      if (this.applyingRows.get(key) === held) this.applyingRows.delete(key);
+      if (this.applyingStreams.get(stream) === turn) this.applyingStreams.delete(stream);
     };
   }
 
@@ -303,7 +313,7 @@ export class SyncCoordinator {
       try {
         const accepted = await this.remote.push({ changeId: row.changeId, baseVersion: row.baseVersion, operation: row.operation, entry: row.entry });
         this.ledger.markOutbox(row.changeId, 'confirmed', null, at);
-        this.ledger.receive(acceptedRecord(row, accepted, at), at);
+        if (accepted.entryId === row.entryId) this.ledger.receive(acceptedRecord(row, accepted, at), at);
         counts.confirmed += 1;
       } catch (error) {
         if (error instanceof VersionConflictError) {
@@ -344,7 +354,7 @@ export class SyncCoordinator {
         continue;
       }
       this.ledger.markOutbox(row.changeId, 'confirmed', null, at);
-      this.ledger.receive(acceptedRecord(row, accepted, at), at);
+      if (accepted.entryId === row.entryId) this.ledger.receive(acceptedRecord(row, accepted, at), at);
       counts.confirmed += 1;
     }
     return counts;
@@ -356,7 +366,7 @@ export class SyncCoordinator {
     const page = await this.remote.pull(stream, cursor, limit);
     const plan = planPull(page, cursor);
     const at = this.now();
-    if (plan.needsSnapshot) {
+    if (plan.needsSnapshot || (page.snapshotAtStart && this.ledger.state(stream).lastPullAt === null)) {
       this.ledger.setError(stream, 'SNAPSHOT_REQUIRED', at);
       return { received: 0, needsSnapshot: true, gapAt: null, mismatched: plan.mismatched };
     }
@@ -376,10 +386,19 @@ export class SyncCoordinator {
    * snapshot keeps the previous applied state and cursor, so readers never see a partial set.
    */
   async captureSnapshot(stream: string, apply: (row: SyncInboxRecord) => Promise<ApplyOutcome>): Promise<{ applied: number; failed: number; cursor: number }> {
+    const release = await this.claimStream(stream);
+    try { return await this.captureSnapshotLocked(stream, apply); }
+    finally { release(); }
+  }
+
+  private async captureSnapshotLocked(stream: string, apply: (row: SyncInboxRecord) => Promise<ApplyOutcome>): Promise<{ applied: number; failed: number; cursor: number }> {
     const snapshot = SyncSnapshot.parse(await this.remote.snapshot(stream));
     if (snapshot.stream !== stream) throw new MnemoWeaveError('INVALID_INPUT');
     const at = this.now();
     const cursor = snapshotCursor(snapshot);
+    if (cursor < this.ledger.cursor(stream)) return { applied: 0, failed: 0, cursor: this.ledger.cursor(stream) };
+    const stage = this.stageSnapshot?.(snapshot);
+    const applyEntry = stage?.apply ?? apply;
     let applied = 0;
     let failed = 0;
     for (const entry of snapshot.entries) {
@@ -399,20 +418,27 @@ export class SyncCoordinator {
           },
           state: 'received', error: null,
         };
-        const release = await this.claimRow(snapshot.stream, row.seq);
-        let outcome: ApplyOutcome;
-        try { outcome = await apply(row); } finally { release(); }
+        const outcome = await applyEntry(row);
         if (outcome.status === 'applied') applied += 1;
         else failed += 1;
       }
     }
     if (failed > 0) {
       this.ledger.setError(stream, 'SNAPSHOT_APPLY_INCOMPLETE', at);
-      return { applied, failed, cursor: this.ledger.cursor(stream) };
+      return { applied: stage ? 0 : applied, failed, cursor: this.ledger.cursor(stream) };
     }
-    this.ledger.resetScope?.(stream, cursor, at);
-    this.ledger.setCursor(stream, cursor, at);
-    this.ledger.setError(stream, null, at);
+    const advance = () => {
+      this.ledger.resetScope?.(stream, cursor, at);
+      this.ledger.setCursor(stream, cursor, at);
+      this.ledger.setError(stream, null, at);
+    };
+    try {
+      if (stage) stage.commit(advance);
+      else advance();
+    } catch (error) {
+      this.ledger.setError(stream, errorCode(error), at);
+      return { applied: 0, failed: 1, cursor: this.ledger.cursor(stream) };
+    }
     return { applied, failed, cursor: this.ledger.cursor(stream) };
   }
 
@@ -421,18 +447,20 @@ export class SyncCoordinator {
    * rows are not applied out of order and readers keep the last verified version.
    */
   async applyStream(stream: string, apply: (row: SyncInboxRecord) => Promise<ApplyOutcome>, limit = 50): Promise<{ applied: number; cursor: number }> {
+    const release = await this.claimStream(stream);
+    try { return await this.applyStreamLocked(stream, apply, limit); }
+    finally { release(); }
+  }
+
+  private async applyStreamLocked(stream: string, apply: (row: SyncInboxRecord) => Promise<ApplyOutcome>, limit: number): Promise<{ applied: number; cursor: number }> {
     const start = this.ledger.cursor(stream);
     let expected = start + 1;
     let applied = 0;
     for (const row of this.ledger.inbox(stream, limit)) {
       if (row.seq !== expected) break;
-      const release = await this.claimRow(stream, row.seq);
-      let outcome: ApplyOutcome;
-      try {
-        const current = this.ledger.inboxEntry(stream, row.seq);
-        if (!current || current.state === 'applied') { expected += 1; continue; }
-        outcome = await apply(row);
-      } finally { release(); }
+      const current = this.ledger.inboxEntry(stream, row.seq);
+      if (!current || current.state === 'applied') { expected += 1; continue; }
+      const outcome = await apply(row);
       if (outcome.status !== 'applied') {
         this.ledger.markInbox(stream, row.seq, 'needs_review', outcome.error ?? 'APPLY_FAILED');
         break;

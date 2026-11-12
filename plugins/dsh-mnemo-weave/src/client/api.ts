@@ -1,5 +1,5 @@
 import type {
-  MemoriesRequest, RpcResult, UiArchive, UiArchiveCapacity, UiArchiveHistory, UiArchiveSearch, UiCreateInput, UiCreateResult, UiConfigView, UiConnectionTest, UiEditInput, UiEditResult, UiExplore, UiGraph, UiInjection, UiMemoryDetail, UiMemoryList, UiRegisterTest, UiRule, UiRuleArchive, UiRuleCreateInput, UiRuleEditInput, UiRuleUsage, UiSettings, UiStatus, UiSyncPass, UiSyncStatus, UiWakeTest, UiWithdrawInput, UiWithdrawResult, UiWorkspace,
+  MemoriesRequest, RpcResult, UiArchive, UiArchiveCapacity, UiArchiveHistory, UiArchiveSearch, UiCreateInput, UiCreateResult, UiConfigView, UiConnectionTest, UiEditInput, UiEditResult, UiExplore, UiGraph, UiInjection, UiMemoryDetail, UiMemoryList, UiRegisterTest, UiRule, UiRuleCreateInput, UiRuleEditInput, UiRuleUsage, UiSettings, UiStatus, UiSyncPass, UiSyncStatus, UiWakeTest, UiWithdrawInput, UiWithdrawResult, UiWorkspace,
 } from '../shared/contract.ts';
 import { RPC_CHANNEL } from '../shared/contract.ts';
 import type { ClientConnection } from './dsh-types.ts';
@@ -69,7 +69,6 @@ export function createApi(connection: ClientConnection) {
     injection: (signal?: AbortSignal): Promise<UiInjection | null> => call<UiInjection | null>('injection', {}, signal),
     rules: (signal?: AbortSignal): Promise<UiRule[]> => call<UiRule[]>('rules', {}, signal),
     ruleUsage: (signal?: AbortSignal): Promise<UiRuleUsage> => call<UiRuleUsage>('ruleUsage', {}, signal),
-    ruleArchive: (signal?: AbortSignal): Promise<UiRuleArchive[]> => call<UiRuleArchive[]>('ruleArchive', {}, signal),
     createRule: (input: UiRuleCreateInput, signal?: AbortSignal): Promise<UiRule> => call<UiRule>('createRule', input, signal),
     editRule: (input: UiRuleEditInput & { ruleId: string }, signal?: AbortSignal): Promise<UiRule> => call<UiRule>('editRule', input, signal),
     saveArchive: (input: import('../shared/contract.ts').UiArchiveDraft & { entryId?: string; baseVersion?: number }): Promise<UiArchive> => call<UiArchive>('saveArchive', input),
@@ -80,10 +79,14 @@ export function createApi(connection: ClientConnection) {
     /** Capacity maintenance: what would free room, oldest-confirmed first. */
     archiveReleaseCandidates: (workspaceId: string, limit?: number, signal?: AbortSignal): Promise<import('../shared/contract.ts').UiArchiveReleaseCandidates> =>
       call<import('../shared/contract.ts').UiArchiveReleaseCandidates>('archiveReleaseCandidates', { workspaceId, ...(limit === undefined ? {} : { limit }) }, signal),
-    setArchiveState: (input: { entryId: string; state: 'active' | 'archived'; baseVersion: number }): Promise<UiArchive> => call<UiArchive>('setArchiveState', input),
+    setArchiveState: (input: { entryId: string; state: 'active' | 'archived'; baseVersion: number; changeId?: string }): Promise<UiArchive> => call<UiArchive>('setArchiveState', input),
     /** 「提炼为正式记忆」 preview: creates a draft, publishes nothing. */
     distillArchive: (entryId: string, signal?: AbortSignal): Promise<import('../shared/contract.ts').UiDistillationDraft | import('../shared/contract.ts').UiDistillationSkip> =>
       call<import('../shared/contract.ts').UiDistillationDraft | import('../shared/contract.ts').UiDistillationSkip>('distillArchive', { entryId }, signal),
+    readDistillation: (draftId: string): Promise<import('../shared/contract.ts').UiDistillationDraft> =>
+      call<import('../shared/contract.ts').UiDistillationDraft>('readDistillation', { draftId }),
+    reviseDistillation: (input: { draftId: string; content: string; category: string }): Promise<import('../shared/contract.ts').UiDistillationDraft> =>
+      call<import('../shared/contract.ts').UiDistillationDraft>('reviseDistillation', input),
     confirmDistillation: (input: { draftId: string; reason?: string }): Promise<import('../shared/contract.ts').UiDistillationResult> =>
       call<import('../shared/contract.ts').UiDistillationResult>('confirmDistillation', input),
     sync: (signal?: AbortSignal): Promise<UiSyncStatus> => call<UiSyncStatus>('sync', {}, signal),

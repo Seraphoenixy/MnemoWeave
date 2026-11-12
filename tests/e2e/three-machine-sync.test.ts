@@ -67,7 +67,7 @@ test('three machines converge on one revision chain and a stale base is rejected
   const seedRepo = new SqliteCandidates(resolve(join(root, 'a', 'state', 'governance.db')));
   const seedProvider = new MnemonCliProvider({ binary: mnemonBinary(), dataDir: resolve(join(root, 'a', 'provider')), store: 'm_a' });
   const request = RememberInput.parse({
-    idempotencyKey: `seed-${randomUUID()}`, content: '三机共享的初始正文。', knowledgeType: 'Practice', tags: [],
+    idempotencyKey: `seed-${randomUUID()}`, content: '三机共享的初始正文。', tags: [],
     provenance: {
       source: 'local-user', sourceReference: 'e2e:three', evidence: ['seed'], verificationStatus: 'verified',
       confidence: 1, applicability: 'alpha', limitations: '无（验收固定值）', lastVerified: '2026-11-10T11:00:00.000Z',

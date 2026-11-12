@@ -1,15 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { SqliteCandidates } from '../../packages/infrastructure/governance/src/index.ts';
 import { MnemoWeaveError } from '../../packages/core/contracts/src/index.ts';
 import type { RememberRequest } from '../../packages/core/contracts/src/index.ts';
+import { tempDir } from '../support/temp.ts';
 
 const request = (key: string): RememberRequest => ({
   idempotencyKey: key,
   content: 'Quota fixture content for the governance store.',
-  knowledgeType: 'Practice',
   tags: [],
   provenance: {
     source: 'quota-test', sourceReference: 'fixture:quota', evidence: ['fixture'],
@@ -20,7 +20,7 @@ const request = (key: string): RememberRequest => ({
 
 async function fixture(softBytes: number, hardBytes: number) {
   await mkdir('work/tests', { recursive: true });
-  const root = await mkdtemp(resolve('work/tests/quota-'));
+  const root = await tempDir('quota', 'quota');
   return new SqliteCandidates(join(root, 'governance.db'), { softBytes, hardBytes });
 }
 
@@ -47,6 +47,6 @@ test('Soft quota admits new growth and reports soft state', async () => {
 
 test('Quota limits must be ordered soft below hard', async () => {
   await mkdir('work/tests', { recursive: true });
-  const root = await mkdtemp(resolve('work/tests/quota-invalid-'));
+  const root = await tempDir('quota', 'quota-invalid');
   assert.throws(() => new SqliteCandidates(join(root, 'governance.db'), { softBytes: 10, hardBytes: 5 }));
 });

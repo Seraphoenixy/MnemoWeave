@@ -47,7 +47,7 @@ test('every endpoint the page uses answers through the Host channel', async () =
   ];
   for (const [index, shape] of shapes.entries()) {
     const request = RememberInput.parse({
-      idempotencyKey: `page-smoke-${index}`, content: shape.content, knowledgeType: 'Practice', tags: shape.meta.tags ?? [],
+      idempotencyKey: `page-smoke-${index}`, content: shape.content, tags: shape.meta.tags ?? [],
       provenance: {
         source: 'local-user', sourceReference: `page-smoke:${index}`, evidence: ['fixture'], verificationStatus: 'verified',
         confidence: 1, applicability: 'shared collection', limitations: '无', lastVerified: '2026-11-10T00:00:00.000Z',
@@ -154,7 +154,7 @@ test('every endpoint the page uses answers through the Host channel', async () =
 
     // Create, edit and withdraw: the three writes the page offers.
     const created = await ok('create', {
-      content: '页面冒烟：界面新增的正文。', knowledgeType: 'Practice',
+      content: '页面冒烟：界面新增的正文。',
       category: 'decision', importance: 4, tags: ['冒烟'], entities: ['MnemoWeave'],
     }) as { memoryId: string; entryVersion: number };
     const createdDetail = await ok('memory', { memoryId: created.memoryId }) as { content: string; state: string };

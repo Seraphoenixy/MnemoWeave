@@ -1,10 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
+
 import { join, resolve } from 'node:path';
 import { MnemonCliProvider } from '../../packages/providers/mnemon/src/index.ts';
 import { MnemoWeaveError } from '../../packages/core/contracts/src/index.ts';
 import { mnemonBinary } from '../e2e/mnemon-binary.ts';
+import { tempDir } from '../support/temp.ts';
 
 /** `embed --status` is the official coverage report; the adapter must not invent metrics. */
 
@@ -68,8 +69,7 @@ test('a completed backfill reports no error; the caller re-reads coverage for th
   assert.deepEqual(await adapter.embedAll(), { error: null });
 });
 
-test('the real CLI answers the coverage report without an embedding service', async () => {  await mkdtemp(resolve('work')).catch(() => undefined);
-  const dataDir = await mkdtemp(resolve('work', 'embed-real-'));
+test('the real CLI answers the coverage report without an embedding service', async () => {    const dataDir = await tempDir('provider-embedding', 'embed-real');
   const adapter = new MnemonCliProvider({ binary: mnemonBinary(), dataDir, store: 'diagnostics' });
   const status = await adapter.embeddingStatus();
   assert.equal(status.protocol.length > 0, true);

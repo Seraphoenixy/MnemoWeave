@@ -1,15 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { SqliteCandidates } from '../../packages/infrastructure/governance/src/index.ts';
 import { ARCHIVE_RETENTION_DAYS, CANDIDATE_BODY_RETENTION_DAYS, HOT_RETENTION_DAYS } from '../../packages/infrastructure/governance/src/events.ts';
 import { MnemoWeaveError } from '../../packages/core/contracts/src/index.ts';
 import type { RememberRequest } from '../../packages/core/contracts/src/index.ts';
+import { tempDir } from '../support/temp.ts';
 
 const DAY_MS = 86_400_000;
 const request = (key: string, content = 'Retention fixture content for candidate clearing.'): RememberRequest => ({
-  idempotencyKey: key, content, knowledgeType: 'Practice', tags: [],
+  idempotencyKey: key, content, tags: [],
   provenance: { source: 'retention-test', sourceReference: 'fixture:retention', evidence: ['fixture'], verificationStatus: 'unverified', confidence: 0.5, applicability: 'isolated retention fixture', limitations: 'not production knowledge', lastVerified: null },
 });
 
@@ -21,7 +22,7 @@ const hostEvent = (overrides: Record<string, unknown> = {}) => ({
 
 async function fixture() {
   await mkdir('work/tests', { recursive: true });
-  const root = await mkdtemp(resolve('work/tests/retention-'));
+  const root = await tempDir('retention', 'retention');
   const repo = new SqliteCandidates(join(root, 'governance.db'));
   return { root, repo };
 }

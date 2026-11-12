@@ -151,8 +151,6 @@ export function OverviewPanel(props: OverviewProps): ReactNode {
 export interface RuleDraft {
   body: string;
   enabled: boolean;
-  importance?: 'critical' | 'normal' | 'low';
-  pinned?: boolean;
 }
 
 export interface RuntimeProps {
@@ -165,28 +163,26 @@ export interface RuntimeProps {
   /** Publishes a new rule; the page refreshes the list and selects it before resolving. */
   onCreate(draft: RuleDraft): Promise<void>;
   /** Saves body and enabled state; `baseVersion` is the version the form opened at. */
-  onSave(ruleId: string, input: { body: string; enabled: boolean; importance: 'critical' | 'normal' | 'low'; pinned: boolean; baseVersion: number }): Promise<void>;
+  onSave(ruleId: string, input: { body: string; enabled: boolean; baseVersion: number }): Promise<void>;
 }
 
 /**
  * Runtime rules: read, publish and edit.
  *
  * A rule is injected whole. The storage set is maintained under its UTF-8 byte capacity:
- * over-limit writes archive lower-priority rules locally, and an entry that cannot fit is
- * refused rather than trimmed; the refusal is shown as an error, not as a saved version.
+ * over-limit writes are rejected and the existing rules are retained.
  */
 export function RuntimePanel(props: RuntimeProps): ReactNode {
   const { rules, usage, error, selected, language } = props;
   const current = (rules ?? []).find(rule => rule.entryId === selected) ?? null;
   const [creating, setCreating] = useState(false);
-  const [draft, setDraft] = useState<RuleDraft>({ body: '', enabled: true, importance: 'normal', pinned: false });
+  const [draft, setDraft] = useState<RuleDraft>({ body: '', enabled: true });
   const [createError, setCreateError] = useState<string | null>(null);
-  const [edit, setEdit] = useState<{ ruleId: string; body: string; enabled: boolean; importance: 'critical' | 'normal' | 'low'; pinned: boolean; version: number } | null>(null);
+  const [edit, setEdit] = useState<{ ruleId: string; body: string; enabled: boolean; version: number } | null>(null);
   const [editError, setEditError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const editing = edit !== null && current !== null && edit.ruleId === current.entryId;
-  const dirty = editing && (edit.body !== current.body || edit.enabled !== current.enabled
-    || edit.importance !== current.importance || edit.pinned !== current.pinned);
+  const dirty = editing && (edit.body !== current.body || edit.enabled !== current.enabled);
 
   /** A window is open over the list, so selecting a rule simply clears the draft behind it. */
   const select = (id: string): void => {
@@ -204,12 +200,12 @@ export function RuntimePanel(props: RuntimeProps): ReactNode {
     setCreating(false);
     setCreateError(null);
     // Closing discards the draft, so reopening starts from an empty rule.
-    setDraft({ body: '', enabled: true, importance: 'normal', pinned: false });
+    setDraft({ body: '', enabled: true });
   };
 
   const beginEdit = (): void => {
     if (current === null) return;
-    setEdit({ ruleId: current.entryId, body: current.body, enabled: current.enabled, importance: current.importance, pinned: current.pinned, version: current.version });
+    setEdit({ ruleId: current.entryId, body: current.body, enabled: current.enabled, version: current.version });
     setEditError(null);
   };
 
@@ -220,7 +216,7 @@ export function RuntimePanel(props: RuntimeProps): ReactNode {
     try {
       await props.onCreate(draft);
       setCreating(false);
-      setDraft({ body: '', enabled: true, importance: 'normal', pinned: false });
+      setDraft({ body: '', enabled: true });
     } catch (failure) {
       setCreateError(failure instanceof Error ? failure.message : String(failure));
     } finally {
@@ -235,7 +231,7 @@ export function RuntimePanel(props: RuntimeProps): ReactNode {
     setEditError(null);
     try {
       await props.onSave(edit.ruleId, {
-        body: edit.body, enabled: edit.enabled, importance: edit.importance, pinned: edit.pinned, baseVersion: edit.version,
+        body: edit.body, enabled: edit.enabled, baseVersion: edit.version,
       });
       setEdit(null);
     } catch (failure) {
@@ -273,25 +269,6 @@ export function RuntimePanel(props: RuntimeProps): ReactNode {
                   onChange={event => setDraft(currentDraft => ({ ...currentDraft, enabled: event.target.checked }))}
                 />
                 <span>{translate(language, 'runtime.enabledLabel')}</span>
-              </label>
-              <label className="mwui-classify-field">
-                <span>{translate(language, 'runtime.importance')}</span>
-                <select
-                  value={draft.importance ?? 'normal'}
-                  onChange={event => setDraft(currentDraft => ({ ...currentDraft, importance: event.target.value as 'critical' | 'normal' | 'low' }))}
-                >
-                  <option value="critical">critical</option>
-                  <option value="normal">normal</option>
-                  <option value="low">low</option>
-                </select>
-              </label>
-              <label className="mwui-classify-field">
-                <input
-                  type="checkbox"
-                  checked={draft.pinned === true}
-                  onChange={event => setDraft(currentDraft => ({ ...currentDraft, pinned: event.target.checked }))}
-                />
-                <span>{translate(language, 'runtime.pinned')}</span>
               </label>
             </div>
             {createError === null ? null : <div className="mwui-inline-error" role="alert">{createError}</div>}
@@ -333,8 +310,6 @@ export function RuntimePanel(props: RuntimeProps): ReactNode {
                     <span className="mwui-item-meta">
                       <span>{rule.enabled ? translate(language, 'common.enabled') : translate(language, 'common.disabled')}</span>
                       <span>·</span>
-                      <span>{rule.importance}</span>
-                      {rule.pinned ? <><span>·</span><span>{translate(language, 'runtime.pinned')}</span></> : null}
                       <span>·</span>
                       <span>{translate(language, 'common.version')} {rule.version}</span>
                     </span>
@@ -358,8 +333,6 @@ export function RuntimePanel(props: RuntimeProps): ReactNode {
               <div className="mwui-chips">
                 <span className="mwui-chip"><span className="mwui-chip-label">{translate(language, 'common.version')}</span><span className="mwui-chip-value">{current.version}</span></span>
                 <span className="mwui-chip" data-tone={current.enabled ? 'ok' : 'warn'}><span className="mwui-chip-label">{translate(language, 'runtime.state')}</span><span className="mwui-chip-value">{current.enabled ? translate(language, 'common.enabled') : translate(language, 'common.disabled')}</span></span>
-                <span className="mwui-chip"><span className="mwui-chip-label">{translate(language, 'runtime.importance')}</span><span className="mwui-chip-value">{current.importance}</span></span>
-                {current.pinned ? <span className="mwui-chip"><span className="mwui-chip-label">{translate(language, 'runtime.pinned')}</span><span className="mwui-chip-value">✓</span></span> : null}
                 <span className="mwui-chip"><span className="mwui-chip-label">{translate(language, 'runtime.bytes')}</span><span className="mwui-chip-value">{current.bodyBytes}</span></span>
               </div>
               <div>
@@ -396,25 +369,6 @@ export function RuntimePanel(props: RuntimeProps): ReactNode {
                   onChange={event => setEdit(currentEdit => currentEdit === null ? currentEdit : { ...currentEdit, enabled: event.target.checked })}
                 />
                 <span>{translate(language, 'runtime.enabledLabel')}</span>
-              </label>
-              <label className="mwui-classify-field">
-                <span>{translate(language, 'runtime.importance')}</span>
-                <select
-                  value={edit.importance}
-                  onChange={event => setEdit(currentEdit => currentEdit === null ? currentEdit : { ...currentEdit, importance: event.target.value as 'critical' | 'normal' | 'low' })}
-                >
-                  <option value="critical">critical</option>
-                  <option value="normal">normal</option>
-                  <option value="low">low</option>
-                </select>
-              </label>
-              <label className="mwui-classify-field">
-                <input
-                  type="checkbox"
-                  checked={edit.pinned}
-                  onChange={event => setEdit(currentEdit => currentEdit === null ? currentEdit : { ...currentEdit, pinned: event.target.checked })}
-                />
-                <span>{translate(language, 'runtime.pinned')}</span>
               </label>
             </div>
             <div className="mwui-edit-hint" data-tone="muted">{translate(language, 'runtime.editHint')}</div>
@@ -470,10 +424,37 @@ export interface DistillationState {
   onStart(entryId: string): void;
   onConfirm(): void;
   onDiscard(): void;
+  onRevise(content: string, category: string): void;
+  onOpenMemory(memoryId: string): void;
+  confirmed: boolean;
+  complete: boolean;
   /** When the user chose 「提炼后归档」, archive the source after a published or duplicate result. */
   thenArchive: boolean;
   onToggleThenArchive(enabled: boolean): void;
 }
+function DistillationDraftPreview({ state, language }: { state: DistillationState; language: Language }): ReactNode {
+  const [editing, setEditing] = useState(false);
+  const [content, setContent] = useState(state.draft?.content ?? '');
+  const [category, setCategory] = useState(state.draft?.category ?? 'general');
+  if (!editing) return (
+    <>
+      <div className="mwui-content">{state.draft?.content}</div>
+      {!state.confirmed && <button type="button" className="mwui-button" disabled={state.busy} onClick={() => setEditing(true)}>{translate(language, 'archives.distillEdit')}</button>}
+    </>
+  );
+  return (
+    <div>
+      <textarea aria-label={translate(language, 'archives.distillBody')} value={content} onChange={event => setContent(event.target.value)} />
+      <select aria-label={translate(language, 'detail.category')} value={category} onChange={event => setCategory(event.target.value)}>
+        {CATEGORY_VALUES.map(value => <option key={value} value={value}>{value}</option>)}
+      </select>
+      <button type="button" className="mwui-button" disabled={state.busy || state.confirmed || !content.trim()} onClick={() => state.onRevise(content, category)}>
+        {translate(language, 'archives.distillSave')}
+      </button>
+    </div>
+  );
+}
+
 export function ArchivesPanel({ archives, capacities, history, error, selected, language, workspaces, workspace, onWorkspace, onSelect, onSave, onSetState, distillation, releaseCandidates, showReleaseCandidates }: ArchivesProps): ReactNode {
   const [draft, setDraft] = useState<UiArchive | null | undefined>(undefined);
   const [query, setQuery] = useState('');
@@ -646,9 +627,11 @@ export function ArchivesPanel({ archives, capacities, history, error, selected, 
                     )}
                     {distillation.draft === null ? null : (
                       <>
-                        <div className="mwui-content">{distillation.draft.content}</div>
+                        <DistillationDraftPreview key={distillation.draft.draftId} state={distillation} language={language} />
                         <div className="mwui-item-meta">
-                          <span>{distillation.draft.knowledgeType}</span>
+                          <span>{distillation.draft.category ?? 'general'}</span>
+                          {distillation.draft.category && <span>{distillation.draft.category}</span>}
+                          <span>v{distillation.draft.source.entryVersion}</span>
                           <span>·</span>
                           <span>{translate(language, 'archives.distillRange')} {distillation.draft.usedRange.start}–{distillation.draft.usedRange.end}</span>
                           {distillation.draft.usedRange.truncated ? <span>（已截取）</span> : null}
@@ -658,7 +641,7 @@ export function ArchivesPanel({ archives, capacities, history, error, selected, 
                           <input
                             type="checkbox"
                             checked={distillation.thenArchive}
-                            disabled={distillation.busy || distillation.result !== null}
+                            disabled={distillation.busy || distillation.confirmed}
                             onChange={event => distillation.onToggleThenArchive(event.currentTarget.checked)}
                           />
                           <span>{translate(language, 'archives.distillThenArchive')}</span>
@@ -668,12 +651,14 @@ export function ArchivesPanel({ archives, capacities, history, error, selected, 
                             {translate(language, distillation.result.status === 'published' ? 'archives.distillDone'
                               : distillation.result.status === 'duplicate' ? 'archives.distillDuplicate'
                                 : distillation.result.status === 'needs_review' ? 'archives.distillReview'
-                                  : 'archives.distillFailed')}
+                                  : distillation.result.status === 'queued' ? 'archives.distillQueued'
+                                    : distillation.result.status === 'unknown' ? 'archives.distillUnknown' : 'archives.distillFailed')}
                           </div>
                         )}
                         <div className="mwui-edit-actions">
-                          <button type="button" className="mwui-button" disabled={distillation.busy || distillation.result !== null} onClick={() => distillation.onConfirm()}>
-                            {translate(language, 'archives.distillPublish')}
+                          {distillation.result?.memoryId && <button type="button" className="mwui-button" onClick={() => distillation.onOpenMemory(distillation.result!.memoryId!)}>{translate(language, 'archives.distillOpen')}</button>}
+                          <button type="button" className="mwui-button" disabled={distillation.busy || distillation.complete} onClick={() => distillation.onConfirm()}>
+                            {translate(language, distillation.confirmed ? 'archives.distillCheck' : 'archives.distillPublish')}
                           </button>
                           <button type="button" className="mwui-button" disabled={distillation.busy} onClick={() => distillation.onDiscard()}>
                             {translate(language, 'archives.distillDiscard')}
@@ -1264,7 +1249,7 @@ export function GraphSection(props: GraphProps): ReactNode {
                         >
                           <circle cx={item.x} cy={item.y} r={item.radius} />
                           <text x={item.x} y={item.y + item.radius + 11} textAnchor="middle">
-                            {item.category ?? item.knowledgeType ?? item.memoryId.slice(0, 6)}
+                            {item.category ?? item.memoryId.slice(0, 6)}
                           </text>
                         </g>
                       ))}
@@ -1415,12 +1400,11 @@ export function MemoryPageHeader(props: MemoryPageHeaderProps): ReactNode {
  * Create a formal memory.
  *
  * Published directly, without a review round: the user's own text is treated as already-confirmed
- * knowledge. The form still asks for a knowledge type, because a new memory has no previous
- * revision to inherit one from, and it shows the byte budget the Server enforces.
+ * knowledge. The form asks for the classification a new memory cannot inherit from a previous
+ * revision, and it shows the byte budget the Server enforces.
  */
 export interface CreateDraft {
   content: string;
-  knowledgeType: string;
   category: string;
   importance: string;
   tags: string;
@@ -1439,7 +1423,6 @@ export interface CreateMemoryFormProps {
   onOrganize?(): void;
 }
 
-const KNOWLEDGE_TYPES = ['Concept', 'Practice', 'Architecture', 'Troubleshooting', 'Constraint', 'Procedure', 'Reference'] as const;
 const CATEGORY_VALUES = ['preference', 'decision', 'fact', 'insight', 'context', 'general'] as const;
 
 export function CreateMemoryForm(props: CreateMemoryFormProps): ReactNode {
@@ -1457,16 +1440,6 @@ export function CreateMemoryForm(props: CreateMemoryFormProps): ReactNode {
           onChange={event => props.onChange({ content: event.target.value })}
         />
         <div className="mwui-classify">
-          <label className="mwui-classify-field">
-            <span>{translate(language, 'detail.knowledgeType')}</span>
-            <select
-              className="mwui-input mwui-select"
-              value={draft.knowledgeType}
-              onChange={event => props.onChange({ knowledgeType: event.target.value })}
-            >
-              {KNOWLEDGE_TYPES.map(value => <option key={value} value={value}>{value}</option>)}
-            </select>
-          </label>
           <label className="mwui-classify-field">
             <span>{translate(language, 'detail.category')}</span>
             <select

@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
+import { tempDir } from '../support/temp.ts';
 import { MnemoWeaveError, WriteTaskAction } from '../../packages/core/contracts/src/index.ts';
 import { TRIGGER_ACTIONS, TRIGGER_MAX_ACTIONS } from '../../packages/core/application/src/turn-budget.ts';
 import { SqliteCandidates } from '../../packages/infrastructure/governance/src/index.ts';
@@ -16,9 +16,8 @@ import { SqliteCandidates } from '../../packages/infrastructure/governance/src/i
  * each widen what a narrow trigger can do.
  */
 
-function open() {
-  mkdirSync('work/tests', { recursive: true });
-  const dir = mkdtempSync(resolve('work/tests/task-trigger-'));
+async function open(): Promise<SqliteCandidates> {
+  const dir = await tempDir('write-task-trigger', 'task-trigger');
   return new SqliteCandidates(join(dir, 'governance.db'));
 }
 
@@ -109,8 +108,8 @@ test('the organizer accepts up to eight actions and no more', () => {
   assert.deepEqual(TRIGGER_ACTIONS['organize'], ['create', 'edit', 'withdraw', 'skip']);
 });
 
-test('a receipt for one host never exposes another host\'s task', () => {
-  const repo = open();
+test('a receipt for one host never exposes another host\'s task', async () => {
+  const repo = await open();
   try {
     const taskId = randomUUID();
     repo.writeTasks.claim({ hostId: 'host-a', taskId, index: 0, kind: 'formal-memory', action: 'create', requestHash: 'a'.repeat(64) });

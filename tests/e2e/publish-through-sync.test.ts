@@ -47,7 +47,7 @@ test('a memory published by the reviewed worker path is shared with the remote',
     // Submit through the public surface. With no model route configured the worker parks
     // the candidate for a human decision, so wait for that state before approving.
     const submitted = await app.app.remember({
-      idempotencyKey: `publish-${randomUUID()}`, content: '通过授权写入链路发布的正式记忆。', knowledgeType: 'Practice', tags: [],
+      idempotencyKey: `publish-${randomUUID()}`, content: '通过授权写入链路发布的正式记忆。', tags: [],
       provenance: {
         source: 'local-user', sourceReference: 'e2e:publish', evidence: ['publish'], verificationStatus: 'verified',
         confidence: 1, applicability: 'alpha', limitations: '无（验收固定值）', lastVerified: '2026-11-10T12:00:00.000Z',

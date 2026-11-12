@@ -65,7 +65,6 @@ export interface UiMemorySummary {
   content: string;
   entryVersion: number;
   /** Classification of the current revision; absent means it was never recorded. */
-  knowledgeType?: string;
   category?: string;
   importance?: number;
   tags?: string[];
@@ -84,7 +83,6 @@ export interface UiMemoryList {
   nextCursor?: string;
   /** Classification values present in the set, with counts, for the filter picker. */
   categories?: Array<{ value: string; count: number }>;
-  knowledgeTypes?: Array<{ value: string; count: number }>;
   /** Entities named by current revisions, in their recorded spelling. */
   entities?: Array<{ value: string; count: number }>;
 }
@@ -100,11 +98,9 @@ export interface UiMemoryRevision {
   publishedAt: string;
   effectiveAt: string;
   /**
-   * Classification recorded for this revision. `knowledgeType` comes from a local Remember;
-   * `category`, `importance`, `tags` and `entities` arrive with a synced entry. Absent means it
-   * was never recorded — not that it was empty.
+   * Classification recorded for this revision. Absent means it was never recorded — not that it
+   * was empty.
    */
-  knowledgeType?: string;
   category?: string;
   importance?: number;
   tags?: string[];
@@ -168,7 +164,6 @@ export interface UiExploreHit {
   score: number;
   publishedAt: string;
   category?: string;
-  knowledgeType?: string;
   tags?: string[];
 }
 
@@ -179,7 +174,6 @@ export interface UiGraphNode {
   state: 'active' | 'superseded' | 'unverified';
   publishedAt: string;
   category?: string;
-  knowledgeType?: string;
   importance?: number;
 }
 
@@ -213,8 +207,7 @@ export interface UiExplore {
 /** `POST /v1/memories`: publish a new formal memory without a review round. */
 export interface UiCreateInput {
   content: string;
-  /** Required on creation: there is no previous revision to inherit from. */
-  knowledgeType: string;
+  /** Classification for the first revision; absent means none is recorded. */
   category?: string;
   importance?: number;
   tags?: string[];
@@ -241,7 +234,6 @@ export interface UiEditInput {
   entryVersion: number;
   /** Omitted fields are inherited from the revision being edited. */
   category?: string;
-  knowledgeType?: string;
   importance?: number;
   /** An empty array clears the tags; omitting the field keeps them. */
   tags?: string[];
@@ -403,17 +395,6 @@ export interface UiRuleUsage {
   overByBytes: number;
 }
 
-export interface UiRuleArchive {
-  archiveId: string;
-  ruleId: string;
-  ruleVersion: number;
-  body: string;
-  importance: 'critical' | 'normal' | 'low';
-  pinned: boolean;
-  archivedAt: string;
-  reason: 'capacity' | 'manual';
-}
-
 /** `POST /v1/rules`: publish a runtime rule directly, without a review round. */
 export interface UiRuleCreateInput {
   body: string;
@@ -522,7 +503,6 @@ export interface UiDistillationDraft {
   draftId: string;
   source: { workspaceId: string; entryId: string; entryVersion: number; contentHash: string };
   content: string;
-  knowledgeType: string;
   category?: string;
   importance?: number;
   tags?: string[];
@@ -676,7 +656,7 @@ export interface SkillBacktestResult {
 export type UiSaveResult = { kind: 'formal' | 'rule' | 'workspace-archive'; entryId: string }
   | { kind: 'review'; reason: string } | { kind: 'duplicate' };
 
-export type RpcEndpoint = 'status' | 'memories' | 'memory' | 'create' | 'organizeMemory' | 'skillBacktest' | 'skillConversations' | 'skillReview' | 'edit' | 'withdraw' | 'explore' | 'graph' | 'config' | 'injection' | 'rules' | 'ruleUsage' | 'ruleArchive' | 'createRule' | 'editRule' | 'saveArchive' | 'archives' | 'archiveCapacities' | 'archiveSearch' | 'archiveHistory' | 'setArchiveState' | 'workspaces' | 'sync' | 'syncRefresh' | 'registerTask'
+export type RpcEndpoint = 'status' | 'memories' | 'memory' | 'create' | 'organizeMemory' | 'skillBacktest' | 'skillConversations' | 'skillReview' | 'edit' | 'withdraw' | 'explore' | 'graph' | 'config' | 'injection' | 'rules' | 'ruleUsage' | 'createRule' | 'editRule' | 'saveArchive' | 'archives' | 'archiveCapacities' | 'archiveSearch' | 'archiveHistory' | 'setArchiveState' | 'workspaces' | 'sync' | 'syncRefresh' | 'registerTask'
   | 'settings' | 'saveInterface' | 'saveConnection' | 'saveInjection' | 'saveAutoStart' | 'testConnection' | 'testWake';
 
 export interface MemoriesRequest {
@@ -686,7 +666,6 @@ export interface MemoriesRequest {
   cursor?: string;
   /** Keep only memories whose current revision carries this classification. */
   category?: string;
-  knowledgeType?: string;
   /** Case-insensitive match against an entity named by the current revision. */
   entity?: string;
   /** Scan order; a cursor only applies to the order it was issued for. */

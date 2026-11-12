@@ -1,16 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { frontmatter, listSkills } from '../../plugins/dsh-mnemo-weave/src/ui/skills.ts';
+import { tempDir } from '../support/temp.ts';
 
 const skill = (name: string, description: string, body = 'Do the work.'): string =>
   `---\nname: ${name}\ndescription: ${description}\n---\n\n# ${name}\n\n${body}\n`;
 
 test('skill discovery follows DSH precedence and reports shadowed and unloadable files', async () => {
-  const workspace = await mkdtemp(resolve('work', 'skills-ws-'));
-  const home = await mkdtemp(resolve('work', 'skills-home-'));
+  const workspace = await tempDir('skills', 'skills-ws');
+  const home = await tempDir('skills', 'skills-home');
   const write = async (root: string, dir: string, text: string): Promise<void> => {
     await mkdir(join(root, dir), { recursive: true });
     await writeFile(join(root, dir, 'SKILL.md'), text);

@@ -109,7 +109,6 @@ test('a change written on another machine reaches the local Provider and the map
   assert.equal(revision.category, 'fact');
   assert.equal(revision.importance, 3);
   assert.deepEqual(revision.tags, []);
-  assert.equal(revision.knowledgeType, undefined, 'the sync path must not claim a local knowledge type');
 });
 
 test('a later revision replaces the previous one and keeps the supersedes edge', async () => {

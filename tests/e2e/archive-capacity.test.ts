@@ -112,9 +112,15 @@ test('capacity maintenance lists what would free room and archives only on an ex
 
     // With the version read after the edit, the release applies and frees room.
     const current = (edited.body as { version: number }).version;
-    const released = await call('POST', `/v1/archives/${oldest.entryId}/state`, { state: 'archived', baseVersion: current }, operator);
+    const release = { state: 'archived', baseVersion: current, changeId: randomUUID() };
+    const released = await call('POST', `/v1/archives/${oldest.entryId}/state`, release, operator);
     assert.equal(released.status, 200, JSON.stringify(released.body));
     assert.equal((released.body as { state: string }).state, 'archived');
+    const replay = await call('POST', `/v1/archives/${oldest.entryId}/state`, release, operator);
+    assert.deepEqual(replay, released);
+    const altered = await call('POST', `/v1/archives/${oldest.entryId}/state`, { ...release, state: 'active' }, operator);
+    assert.equal(altered.status, 409);
+    assert.equal((altered.body as { code: string }).code, 'IDEMPOTENCY_CONFLICT');
     const after = await call('GET', `/v1/archives/release-candidates?workspaceId=${WORKSPACE}`, undefined, operator);
     const afterView = after.body as { capacity: { exceeded: boolean; activeBytes: number }; items: Array<{ title: string }> };
     assert.equal(afterView.capacity.exceeded, false);

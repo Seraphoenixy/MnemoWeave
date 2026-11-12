@@ -46,7 +46,7 @@ test('an approved supersede publishes a new memory and draws an edge', async () 
   const seed = new SqliteCandidates(resolve(join(root, 'state', 'governance.db')));
   const seedProvider = new MnemonCliProvider({ binary: mnemonBinary(), dataDir: resolve(join(root, 'provider')), store: 'review' });
   const base = RememberInput.parse({
-    idempotencyKey: `review-${randomUUID()}`, content: '被替代的旧正文。', knowledgeType: 'Practice', tags: [],
+    idempotencyKey: `review-${randomUUID()}`, content: '被替代的旧正文。', tags: [],
     provenance: {
       source: 'local-user', sourceReference: 'review:old', evidence: ['fixture'], verificationStatus: 'verified',
       confidence: 1, applicability: 'global', limitations: '无', lastVerified: '2026-11-10T00:00:00.000Z',
@@ -80,7 +80,6 @@ test('an approved supersede publishes a new memory and draws an edge', async () 
       body: JSON.stringify({
         idempotencyKey: `review-supersede-${randomUUID()}`,
         content: '替代旧正文的新正文。',
-        knowledgeType: 'Practice',
         tags: [],
         change: {
           kind: 'supersede',

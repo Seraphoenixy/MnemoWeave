@@ -59,6 +59,6 @@ export async function organizeMemory(
     });
     return { kind: 'workspace-archive', entryId: archive.entryId };
   }
-  const memory = await source.create({ content, knowledgeType: input.knowledgeType, ...(input.category === undefined ? {} : { category: input.category }), ...(input.reason === undefined ? {} : { reason: input.reason }) });
+  const memory = await source.create({ content, ...(input.category === undefined ? {} : { category: input.category }), ...(input.reason === undefined ? {} : { reason: input.reason }) });
   return { kind: 'formal', entryId: memory.memoryId };
 }

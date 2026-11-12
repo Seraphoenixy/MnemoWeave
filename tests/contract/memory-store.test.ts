@@ -1,16 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { MnemoWeaveError } from '../../packages/core/contracts/src/index.ts';
 import { SqliteCandidates } from '../../packages/infrastructure/governance/src/index.ts';
+import { tempDir } from '../support/temp.ts';
 
 const NOW = '2026-11-10T10:00:00.000Z';
 const WORKSPACE = '11111111-1111-4111-8111-111111111111';
 
 async function open() {
   await mkdir('work/tests', { recursive: true });
-  const path = join(await mkdtemp(resolve('work/tests/memory-store-')), 'governance.db');
+  const path = join(await tempDir('memory-store', 'memory-store'), 'governance.db');
   return new SqliteCandidates(path);
 }
 
@@ -213,7 +214,7 @@ test('a session binding is recorded once and cannot be switched mid-session', as
 test('a directory can bind only to one workspace', async () => {
   const repo = await open();
   const other = '33333333-3333-4333-8333-333333333333';
-  const root = await mkdtemp(resolve('work/tests/workspace-root-'));
+  const root = await tempDir('memory-store', 'workspace-root');
   try {
     repo.workspaces.register(WORKSPACE, '甲工作区');
     repo.workspaces.register(other, '乙工作区');

@@ -11,7 +11,7 @@ import { isRecord } from '../shared/contract.ts';
 import type { ServerPhaseReason } from '../shared/contract.ts';
 import type {
   UiArchive, UiArchiveCapacity, UiArchiveHistory, UiArchiveReleaseCandidates, UiArchiveSearch, UiConfigView, UiDistillationDraft, UiDistillationResult, UiEditInput, UiEditResult, UiEmbeddingDiagnostics, UiIdleReviewItem, UiIdleReviewRun, UiIdleReviewSignal, UiInjection, UiMemoryDetail, UiMemoryList,
-  ListSort, UiCreateInput, UiCreateResult, UiExplore, UiExploreHit, UiGraph, UiGraphEdge, UiGraphNode, UiMemoryConflict, UiMemoryRelation, UiMemoryRevision, UiMemorySummary, UiWithdrawInput, UiWithdrawResult, UiRule, UiRuleArchive, UiRuleCreateInput, UiRuleEditInput, UiRuleUsage, UiStatus, UiSyncPass, UiSyncStream, UiSyncStatus, UiWorkspace,
+  ListSort, UiCreateInput, UiCreateResult, UiExplore, UiExploreHit, UiGraph, UiGraphEdge, UiGraphNode, UiMemoryConflict, UiMemoryRelation, UiMemoryRevision, UiMemorySummary, UiWithdrawInput, UiWithdrawResult, UiRule, UiRuleCreateInput, UiRuleEditInput, UiRuleUsage, UiStatus, UiSyncPass, UiSyncStream, UiSyncStatus, UiWorkspace,
 } from '../shared/contract.ts';
 
 const PROTOCOL = 'PROVIDER_PROTOCOL';
@@ -108,7 +108,6 @@ export function parseDistillation(value: unknown): UiDistillationDraft {
       contentHash: asString(source['contentHash'], 'distillation.source.contentHash'),
     },
     content: asString(root['content'], 'distillation.content'),
-    knowledgeType: asString(root['knowledgeType'], 'distillation.knowledgeType'),
     ...(typeof root['category'] === 'string' ? { category: root['category'] } : {}),
     ...(typeof root['importance'] === 'number' ? { importance: root['importance'] } : {}),
     ...(Array.isArray(root['tags']) ? { tags: root['tags'] as string[] } : {}),
@@ -142,18 +141,11 @@ export function parseMemoryList(value: unknown, query: string | undefined, limit
         return { value: asString(row['value'], `memories.entities[${index}].value`), count: asCount(row['count'], `memories.entities[${index}].count`) };
       }),
     }),
-    ...(root['knowledgeTypes'] === undefined ? {} : {
-      knowledgeTypes: asArray(root['knowledgeTypes'], 'memories.knowledgeTypes').map((entry, index) => {
-        const row = asRecord(entry, `memories.knowledgeTypes[${index}]`);
-        return { value: asString(row['value'], `memories.knowledgeTypes[${index}].value`), count: asCount(row['count'], `memories.knowledgeTypes[${index}].count`) };
-      }),
-    }),
   };
 }
 
 function asSummary(value: unknown, what: string): UiMemorySummary {
   const row = asRecord(value, what);
-  const knowledgeType = row['knowledgeType'];
   const category = row['category'];
   const importance = row['importance'];
   const tags = row['tags'];
@@ -167,7 +159,6 @@ function asSummary(value: unknown, what: string): UiMemorySummary {
     content: asString(row['content'], `${what}.content`),
     entryVersion: asInteger(row['entryVersion'], `${what}.entryVersion`),
     // Optional: absence means the revision recorded no classification, not an empty one.
-    ...(knowledgeType === undefined || knowledgeType === null ? {} : { knowledgeType: asString(knowledgeType, `${what}.knowledgeType`) }),
     ...(category === undefined || category === null ? {} : { category: asString(category, `${what}.category`) }),
     ...(importance === undefined || importance === null ? {} : { importance: asInteger(importance, `${what}.importance`) }),
     ...(tags === undefined ? {} : { tags: asArray(tags, `${what}.tags`).map((tag, at) => asString(tag, `${what}.tags[${at}]`)) }),
@@ -190,7 +181,6 @@ export function parseMemoryDetail(value: unknown): UiMemoryDetail {
     const parentId = row['parentId'];
     const contentHash = asString(row['contentHash'], `memory.revisions[${index}].contentHash`);
     const candidateId = asString(row['candidateId'], `memory.revisions[${index}].candidateId`);
-    const knowledgeType = row['knowledgeType'];
     const category = row['category'];
     const importance = row['importance'];
     const tags = row['tags'];
@@ -204,7 +194,6 @@ export function parseMemoryDetail(value: unknown): UiMemoryDetail {
       publishedAt: asString(row['publishedAt'], `memory.revisions[${index}].publishedAt`),
       effectiveAt: asString(row['effectiveAt'], `memory.revisions[${index}].effectiveAt`),
       // Classification is optional in the contract: absent means it was never recorded.
-      ...(knowledgeType === undefined || knowledgeType === null ? {} : { knowledgeType: asString(knowledgeType, `memory.revisions[${index}].knowledgeType`) }),
       ...(category === undefined || category === null ? {} : { category: asString(category, `memory.revisions[${index}].category`) }),
       ...(importance === undefined || importance === null ? {} : { importance: asInteger(importance, `memory.revisions[${index}].importance`) }),
       ...(tags === undefined ? {} : { tags: asArray(tags, `memory.revisions[${index}].tags`).map((tag, at) => asString(tag, `memory.revisions[${index}].tags[${at}]`)) }),
@@ -452,26 +441,6 @@ export function parseArchiveCapacities(value: unknown): UiArchiveCapacity[] {
       activeCount: asCount(row['activeCount'], `${what}.activeCount`),
       archivedCount: asCount(row['archivedCount'], `${what}.archivedCount`),
       exceeded: asBoolean(row['exceeded'], `${what}.exceeded`),
-    };
-  });
-}
-
-export function parseRuleArchive(value: unknown): UiRuleArchive[] {
-  const root = asRecord(value, 'rules');
-  return asArray(root['items'], 'archive.items').map((item, index) => {
-    const what = `archive.items[${index}]`;
-    const row = asRecord(item, what);
-    const importance = row['importance'];
-    if (importance !== 'critical' && importance !== 'normal' && importance !== 'low') throw malformed(`${what}.importance`);
-    const reason = row['reason'];
-    if (reason !== 'capacity' && reason !== 'manual') throw malformed(`${what}.reason`);
-    return {
-      archiveId: asString(row['archiveId'], `${what}.archiveId`),
-      ruleId: asString(row['ruleId'], `${what}.ruleId`),
-      ruleVersion: asInteger(row['ruleVersion'], `${what}.ruleVersion`),
-      body: asString(row['body'], `${what}.body`),
-      importance, pinned: asBoolean(row['pinned'], `${what}.pinned`),
-      archivedAt: asString(row['archivedAt'], `${what}.archivedAt`), reason,
     };
   });
 }
@@ -727,13 +696,12 @@ export class MemorySource {
     });
   }
 
-  async memories(input: { query?: string; limit: number; cursor?: string; category?: string; knowledgeType?: string; entity?: string; sort?: ListSort }): Promise<UiMemoryList> {
+  async memories(input: { query?: string; limit: number; cursor?: string; category?: string; entity?: string; sort?: ListSort }): Promise<UiMemoryList> {
     const response = await this.client.listMemories({
       ...(input.query === undefined ? {} : { query: input.query }),
       limit: input.limit,
       ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
       ...(input.category === undefined ? {} : { category: input.category }),
-      ...(input.knowledgeType === undefined ? {} : { knowledgeType: input.knowledgeType }),
       ...(input.entity === undefined ? {} : { entity: input.entity }),
       ...(input.sort === undefined ? {} : { sort: input.sort }),
     });
@@ -754,14 +722,12 @@ export class MemorySource {
         const row = asRecord(item, `graph.nodes[${index}]`);
         const where = `graph.nodes[${index}]`;
         const category = row['category'];
-        const knowledgeType = row['knowledgeType'];
         const importance = row['importance'];
         return {
           memoryId: asString(row['memoryId'], `${where}.memoryId`),
           state: asState(row['state'], `${where}.state`),
           publishedAt: asString(row['publishedAt'], `${where}.publishedAt`),
           ...(category === undefined || category === null ? {} : { category: asString(category, `${where}.category`) }),
-          ...(knowledgeType === undefined || knowledgeType === null ? {} : { knowledgeType: asString(knowledgeType, `${where}.knowledgeType`) }),
           ...(importance === undefined || importance === null ? {} : { importance: asInteger(importance, `${where}.importance`) }),
         };
       }),
@@ -799,7 +765,6 @@ export class MemorySource {
         const row = asRecord(item, `explore.hits[${index}]`);
         const where = `explore.hits[${index}]`;
         const category = row['category'];
-        const knowledgeType = row['knowledgeType'];
         const tags = row['tags'];
         const score = row['score'];
         if (typeof score !== 'number' || !Number.isFinite(score)) throw malformed(`${where}.score`);
@@ -814,7 +779,6 @@ export class MemorySource {
           score,
           publishedAt: asString(row['publishedAt'], `${where}.publishedAt`),
           ...(category === undefined || category === null ? {} : { category: asString(category, `${where}.category`) }),
-          ...(knowledgeType === undefined || knowledgeType === null ? {} : { knowledgeType: asString(knowledgeType, `${where}.knowledgeType`) }),
           ...(tags === undefined ? {} : { tags: asArray(tags, `${where}.tags`).map((tag, at) => asString(tag, `${where}.tags[${at}]`)) }),
         };
       }),
@@ -839,7 +803,6 @@ export class MemorySource {
   async create(input: UiCreateInput): Promise<UiCreateResult> {
     const response = await this.client.createMemory({
       content: input.content,
-      knowledgeType: input.knowledgeType,
       ...(input.category === undefined ? {} : { category: input.category }),
       ...(input.importance === undefined ? {} : { importance: input.importance }),
       ...(input.tags === undefined ? {} : { tags: input.tags }),
@@ -863,7 +826,6 @@ export class MemorySource {
       ...(input.reason === undefined ? {} : { reason: input.reason }),
       // Only the fields the user changed; the Server inherits the rest.
       ...(input.category === undefined ? {} : { category: input.category }),
-      ...(input.knowledgeType === undefined ? {} : { knowledgeType: input.knowledgeType }),
       ...(input.importance === undefined ? {} : { importance: input.importance }),
       ...(input.tags === undefined ? {} : { tags: input.tags }),
     });
@@ -883,10 +845,6 @@ export class MemorySource {
 
   async ruleUsage(): Promise<UiRuleUsage> {
     return parseRuleUsage(unwrap(await this.client.rules()));
-  }
-
-  async ruleArchive(): Promise<UiRuleArchive[]> {
-    return parseRuleArchive(unwrap(await this.client.ruleArchive()));
   }
 
   /** Publish a runtime rule. The Server treats user input as already confirmed. */
@@ -937,15 +895,14 @@ export class MemorySource {
     return parseArchiveReleaseCandidates(unwrap(await this.client.archiveReleaseCandidates(workspaceId, limit)));
   }
 
-  async setArchiveState(entryId: string, state: 'active' | 'archived', baseVersion: number): Promise<UiArchive> {
-    return parseArchiveList({ items: [unwrap(await this.client.editArchiveState(entryId, { state, baseVersion }))] })[0]!;
+  async setArchiveState(entryId: string, state: 'active' | 'archived', baseVersion: number, changeId?: string): Promise<UiArchive> {
+    return parseArchiveList({ items: [unwrap(await this.client.editArchiveState(entryId, { state, baseVersion, ...(changeId === undefined ? {} : { changeId }) }))] })[0]!;
   }
 
   /** Create one distillation draft; the source version is fixed by the caller. */
   async createDistillation(input: {
     source: { workspaceId: string; entryId: string; entryVersion: number; contentHash: string };
     content: string;
-    knowledgeType: string;
     category?: string;
     importance?: number;
     tags?: string[];

@@ -42,7 +42,7 @@ async function seed(
   };
   const publish = async (content: string, label: string, index: number): Promise<void> => {
     const request = RememberInput.parse({
-      idempotencyKey: `browse-${label}-${index}`, content, knowledgeType: 'Practice', tags: [],
+      idempotencyKey: `browse-${label}-${index}`, content, tags: [],
       provenance: {
         source: 'local-user', sourceReference: `browse:${index}`, evidence: ['browse'], verificationStatus: 'verified',
         confidence: 1, applicability: 'shared collection', limitations: '无（验收固定值）', lastVerified: '2026-11-10T00:00:00.000Z',
@@ -62,7 +62,7 @@ async function seed(
   for (const [index, meta] of (counts.categorized ?? []).entries()) {
     const content = `同步分类条目 ${index}`;
     const request = RememberInput.parse({
-      idempotencyKey: `browse-synced-${index}`, content, knowledgeType: 'Practice', tags: [],
+      idempotencyKey: `browse-synced-${index}`, content, tags: [],
       provenance: {
         source: 'sync', sourceReference: `browse:synced:${index}`, evidence: ['sync'], verificationStatus: 'verified',
         confidence: 1, applicability: 'global', limitations: '无（验收固定值）', lastVerified: '2026-11-10T00:00:00.000Z',

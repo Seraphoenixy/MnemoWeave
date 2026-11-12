@@ -63,7 +63,7 @@ test('an idle-review action is bounded by the run that authorized it', { timeout
     // A review may not write a formal memory, whatever it claims.
     const formal = await call('POST', `/v1/memory-write-tasks/${run.id}/actions/0`, {
       kind: 'formal-memory', trigger: 'idle-review', runId: run.id, sessionId: 's-1',
-      action: 'create', content: '不应写入', knowledgeType: 'Practice', reason: '空闲复盘',
+      action: 'create', content: '不应写入', reason: '空闲复盘',
       evidenceRefs: [signals[0]!.eventId], assessment: 'supported',
     });
     // The payload schema already excludes a formal-memory action from this trigger, and the Server

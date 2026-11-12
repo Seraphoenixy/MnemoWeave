@@ -258,17 +258,13 @@ export function filterEntities(
 /**
  * Classification chips for the revision being viewed.
  *
- * A local Remember records a `knowledgeType`; a synced entry records `category`, `importance`,
- * tags and entities. The two dimensions are shown separately and only when present, so "never
- * recorded" never looks like "recorded as empty".
+ * Each field is shown only when present, so "never recorded" never looks like "recorded as
+ * empty".
  */
 export function classificationMeta(detail: UiMemoryDetail, language: Language): Array<{ key: string; label: string; value: string }> {
   const revision = detail.revisions.find(item => item.revisionId === detail.revisionId);
   if (revision === undefined) return [];
   const rows: Array<{ key: string; label: string; value: string }> = [];
-  if (revision.knowledgeType !== undefined) {
-    rows.push({ key: 'knowledgeType', label: translate(language, 'detail.knowledgeType'), value: revision.knowledgeType });
-  }
   if (revision.category !== undefined) {
     rows.push({ key: 'category', label: translate(language, 'detail.category'), value: translate(language, `category.${revision.category}` as MessageKey) });
   }

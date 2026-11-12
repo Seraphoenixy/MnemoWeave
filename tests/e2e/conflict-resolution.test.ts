@@ -1,19 +1,20 @@
 import { testHostHeaders, awaitServerReady, TEST_OPERATOR } from '../support/server.ts';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdir,mkdtemp} from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {RememberInput} from '../../packages/core/contracts/src/index.ts';
 import type {CandidateRecord,ConflictRecord} from '../../packages/core/contracts/src/index.ts';
 import {startServer,stopProcess,until} from '../support/server.ts';
 import { mnemonBinary } from './mnemon-binary.ts';
+import { tempDir } from '../support/temp.ts';
 
 test('Real conflict decisions preserve history: keep, uncertain, revise, supersede and scope-qualified coexist', {timeout:90000},async()=>{
-  await mkdir('work/e2e',{recursive:true});const root=await mkdtemp(resolve('work/e2e/conflicts-'));
+  await mkdir('work/e2e',{recursive:true});const root=await tempDir('conflict-resolution', 'conflicts');
   const env={MNEMON_BINARY:mnemonBinary(),MNEMON_DATA_DIR:join(root,'provider'),MNEMON_STORE:'conflicts',MNEMOWEAVE_STATE_DIR:join(root,'state'),MNEMOWEAVE_PORT:'0',MNEMOWEAVE_TOKEN:'conflict-host-token-0123456789',MNEMOWEAVE_OPERATOR_TOKEN:'conflict-operator-token-987654321'};
   let server=await startServer(env);
   const headers=testHostHeaders(env.MNEMOWEAVE_TOKEN);const operator={...headers,authorization:`Bearer ${env.MNEMOWEAVE_OPERATOR_TOKEN}`};
-  const request=(key:string,text:string)=>RememberInput.parse({idempotencyKey:key,content:text,knowledgeType:'Practice',provenance:{source:'test',sourceReference:'fixture:conflict',evidence:['isolated fixture'],verificationStatus:'unverified',confidence:0.5,applicability:'same ARM project fixture',limitations:'not verified knowledge',lastVerified:null}});
+  const request=(key:string,text:string)=>RememberInput.parse({idempotencyKey:key,content:text,provenance:{source:'test',sourceReference:'fixture:conflict',evidence:['isolated fixture'],verificationStatus:'unverified',confidence:0.5,applicability:'same ARM project fixture',limitations:'not verified knowledge',lastVerified:null}});
   const submit=async(body:unknown)=>{const r=await fetch(`${server.url}/v1/remember`,{method:'POST',headers,body:JSON.stringify(body)});assert.equal(r.status,202);return await r.json() as CandidateRecord;};
   const get=async(id:string)=>await(await fetch(`${server.url}/v1/candidates/${id}`,{headers})).json() as CandidateRecord;
   const publish=async(body:unknown)=>{const c=await submit(body);await until(()=>get(c.id),v=>v.status==='needs_review');const r=await fetch(`${server.url}/v1/review`,{method:'POST',headers:operator,body:JSON.stringify({candidateId:c.id,decision:'approve',reason:'Operator evaluated isolated fixture'})});assert.equal(r.status,200);return until(()=>get(c.id),v=>v.status==='persisted');};

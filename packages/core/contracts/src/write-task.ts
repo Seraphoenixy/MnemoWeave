@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { Category, KnowledgeType } from './catalog.ts';
+import { Category } from './catalog.ts';
 import { RuleImportance, WorkspaceId } from './workspace.ts';
 import { Provenance } from './catalog.ts';
 
@@ -43,7 +43,6 @@ export const FormalMemoryTaskAction = z.object({
   assessment: z.enum(['supported', 'uncertain', 'conflict']).optional(),
   memoryId: z.uuid().optional(),
   entryVersion: z.number().int().nonnegative().optional(),
-  knowledgeType: KnowledgeType.optional(),
   content: formalBody.optional(),
   ...classification,
   draftId: z.uuid().optional(),
@@ -57,7 +56,7 @@ export const FormalMemoryTaskAction = z.object({
     if (value.sessionId !== undefined || value.turnId !== undefined) context.addIssue({ code: 'custom', message: 'Archive distillation carries no session or turn' });
     // The draft is the single source of the body and classification; supplying either here would
     // publish text that was never previewed.
-    for (const field of ['content', 'knowledgeType', 'category', 'importance', 'tags', 'entities'] as const) {
+    for (const field of ['content', 'category', 'importance', 'tags', 'entities'] as const) {
       if (value[field] !== undefined) context.addIssue({ code: 'custom', message: `a distilled draft supplies ${field}` });
     }
   } else {
@@ -70,7 +69,6 @@ export const FormalMemoryTaskAction = z.object({
     // Only a write needs an assessment: a withdrawal has nothing to judge.
     if (isWrite && value.assessment === undefined) context.addIssue({ code: 'custom', message: 'create and edit require an assessment' });
     if (!isWrite && value.assessment !== undefined) context.addIssue({ code: 'custom', message: `${value.action} forbids assessment` });
-    if (value.knowledgeType !== undefined && !isWrite) context.addIssue({ code: 'custom', message: 'knowledgeType is only for a create or edit' });
   }
   if (value.action !== 'skip' && value.evidenceRefs === undefined) context.addIssue({ code: 'custom', message: `${value.action} requires evidenceRefs` });
   if (value.action === 'skip' && value.evidenceRefs !== undefined) context.addIssue({ code: 'custom', message: 'skip does not carry evidence' });
@@ -98,7 +96,7 @@ export const RuleTaskAction = z.object({
   if (needsTarget && (value.entryId === undefined || value.baseVersion === undefined)) context.addIssue({ code: 'custom', message: `${value.action} requires entryId and baseVersion` });
   if (!needsTarget && (value.entryId !== undefined || value.baseVersion !== undefined)) context.addIssue({ code: 'custom', message: `${value.action} forbids entryId and baseVersion` });
   if (value.action === 'create' && value.body === undefined) context.addIssue({ code: 'custom', message: 'create requires a body' });
-  if (value.action === 'edit' && [value.body, value.enabled, value.importance, value.pinned].every(item => item === undefined)) context.addIssue({ code: 'custom', message: 'edit requires at least one change' });
+  if (value.action === 'edit' && [value.body, value.enabled].every(item => item === undefined)) context.addIssue({ code: 'custom', message: 'edit requires at least one change' });
   if (value.action === 'remove' && [value.body, value.enabled, value.importance, value.pinned].some(item => item !== undefined)) context.addIssue({ code: 'custom', message: 'remove is exclusive with editing' });
   if (value.trigger === 'idle-review' && value.runId === undefined) context.addIssue({ code: 'custom', message: 'idle-review requires runId' });
 });
@@ -168,7 +166,6 @@ export const ArchiveDistillationCreate = z.object({
     contentHash: z.string().regex(/^[a-f0-9]{64}$/),
   }).strict(),
   content: formalBody,
-  knowledgeType: KnowledgeType,
   category: Category.optional(),
   importance: z.number().int().min(1).max(5).optional(),
   tags: z.array(z.string().trim().min(1).max(100)).max(20).optional(),
@@ -187,7 +184,6 @@ export const ArchiveDistillationRecord = z.object({
     contentHash: z.string().regex(/^[a-f0-9]{64}$/),
   }).strict(),
   content: z.string(),
-  knowledgeType: KnowledgeType,
   category: Category.optional(),
   importance: z.number().int().min(1).max(5).optional(),
   tags: z.array(z.string()).optional(),

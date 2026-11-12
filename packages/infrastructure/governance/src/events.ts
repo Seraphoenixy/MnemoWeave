@@ -9,7 +9,6 @@ export type DatabaseSync = import('node:sqlite').DatabaseSync;
 export const HOT_RETENTION_DAYS = 7;
 export const ARCHIVE_RETENTION_DAYS = 90;
 export const CANDIDATE_BODY_RETENTION_DAYS = 30;
-export const DIAGNOSTIC_LOG_RETENTION_DAYS = 30;
 
 /**
  * Default selective-persistence rule (HOST-03): metadata for session boundaries, tool

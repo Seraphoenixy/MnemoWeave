@@ -74,7 +74,6 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SERVER_URL = /^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d{1,5})?\/?$/i;
 // Mirrors the Server's enumerations: an unknown value is refused here, not sent as an empty filter.
 const CATEGORIES = ['preference', 'decision', 'fact', 'insight', 'context', 'general'] as const;
-const KNOWLEDGE_TYPES = ['Concept', 'Practice', 'Architecture', 'Troubleshooting', 'Constraint', 'Procedure', 'Reference'] as const;
 const SORTS = ['newest', 'oldest', 'importance'] as const;
 
 function ok<T>(value: T): RpcResult<T> { return { ok: true, value }; }
@@ -102,10 +101,6 @@ function memoriesRequest(payload: unknown): MemoriesRequest {
   if (category !== undefined && (typeof category !== 'string' || !(CATEGORIES as readonly string[]).includes(category))) {
     invalid(`category must be one of: ${CATEGORIES.join(', ')}`);
   }
-  const knowledgeType = payload['knowledgeType'];
-  if (knowledgeType !== undefined && (typeof knowledgeType !== 'string' || !(KNOWLEDGE_TYPES as readonly string[]).includes(knowledgeType))) {
-    invalid(`knowledgeType must be one of: ${KNOWLEDGE_TYPES.join(', ')}`);
-  }
   const entity = payload['entity'];
   if (entity !== undefined && (typeof entity !== 'string' || entity.trim() === '' || entity.trim().length > 200)) {
     invalid('entity must be a non-empty string of at most 200 characters');
@@ -124,7 +119,6 @@ function memoriesRequest(payload: unknown): MemoriesRequest {
     limit: limit ?? DEFAULT_LIMIT,
     ...(cursor === undefined ? {} : { cursor }),
     ...(category === undefined ? {} : { category: category as (typeof CATEGORIES)[number] }),
-    ...(knowledgeType === undefined ? {} : { knowledgeType: knowledgeType as (typeof KNOWLEDGE_TYPES)[number] }),
     ...(entity === undefined ? {} : { entity: (entity as string).trim() }),
     ...(sort === undefined ? {} : { sort: sort as (typeof SORTS)[number] }),
   };
@@ -228,10 +222,6 @@ function createRequest(payload: unknown): UiCreateInput {
   const content = payload['content'];
   if (typeof content !== 'string' || content.trim() === '') invalid('content must be a non-empty string');
   if (Buffer.byteLength(content, 'utf8') > MAX_CONTENT_BYTES) invalid(`content must be at most ${MAX_CONTENT_BYTES} UTF-8 bytes`);
-  const knowledgeType = payload['knowledgeType'];
-  if (typeof knowledgeType !== 'string' || !(KNOWLEDGE_TYPES as readonly string[]).includes(knowledgeType)) {
-    invalid(`knowledgeType must be one of: ${KNOWLEDGE_TYPES.join(', ')}`);
-  }
   const category = payload['category'];
   if (category !== undefined && (typeof category !== 'string' || !(CATEGORIES as readonly string[]).includes(category))) {
     invalid(`category must be one of: ${CATEGORIES.join(', ')}`);
@@ -257,13 +247,15 @@ function createRequest(payload: unknown): UiCreateInput {
   for (const removed of ['projectId', 'scope', 'workspaceId']) {
     if (payload[removed] !== undefined) invalid(`${removed} was removed: a formal memory carries no workspace`);
   }
+  // The knowledge-type dimension was removed; a caller that still sends one is told, rather
+  // than having the field dropped and believing it was recorded.
+  if (payload['knowledgeType'] !== undefined) invalid('knowledgeType was removed: a formal memory carries no knowledge type');
   const reason = payload['reason'];
   if (reason !== undefined && (typeof reason !== 'string' || reason.trim() === '' || reason.trim().length > MAX_REASON)) {
     invalid(`reason must be a non-empty string of at most ${MAX_REASON} characters`);
   }
   return {
     content,
-    knowledgeType,
     ...(category === undefined ? {} : { category: category as string }),
     ...(importance === undefined ? {} : { importance: importance as number }),
     ...(tags === undefined ? {} : { tags: (tags as string[]).map(tag => tag.trim()) }),
@@ -290,10 +282,6 @@ function editRequest(payload: unknown): UiEditInput {
   if (category !== undefined && (typeof category !== 'string' || !(CATEGORIES as readonly string[]).includes(category))) {
     invalid(`category must be one of: ${CATEGORIES.join(', ')}`);
   }
-  const knowledgeType = payload['knowledgeType'];
-  if (knowledgeType !== undefined && (typeof knowledgeType !== 'string' || !(KNOWLEDGE_TYPES as readonly string[]).includes(knowledgeType))) {
-    invalid(`knowledgeType must be one of: ${KNOWLEDGE_TYPES.join(', ')}`);
-  }
   const importance = payload['importance'];
   if (importance !== undefined && (typeof importance !== 'number' || !Number.isInteger(importance) || importance < 1 || importance > 5)) {
     invalid('importance must be an integer between 1 and 5');
@@ -311,7 +299,6 @@ function editRequest(payload: unknown): UiEditInput {
     entryVersion,
     ...(trimmedReason === undefined || trimmedReason === '' ? {} : { reason: trimmedReason }),
     ...(category === undefined ? {} : { category: category as string }),
-    ...(knowledgeType === undefined ? {} : { knowledgeType: knowledgeType as string }),
     ...(importance === undefined ? {} : { importance: importance as number }),
     ...(tags === undefined ? {} : { tags: (tags as string[]).map(tag => tag.trim()) }),
   };
@@ -442,7 +429,6 @@ export function createRpcHandler(source: MemorySource, settings?: SettingsLike, 
             limit: request.limit ?? DEFAULT_LIMIT,
             ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
             ...(request.category === undefined ? {} : { category: request.category }),
-            ...(request.knowledgeType === undefined ? {} : { knowledgeType: request.knowledgeType }),
             ...(request.entity === undefined ? {} : { entity: request.entity }),
             ...(request.sort === undefined ? {} : { sort: request.sort }),
           }));
@@ -633,6 +619,22 @@ export function createRpcHandler(source: MemorySource, settings?: SettingsLike, 
           if (!isRecord(payload) || typeof payload['entryId'] !== 'string' || !UUID.test(payload['entryId'])) invalid('entryId must be a UUID');
           return ok(await previewDistillation(source, task, payload['entryId'], signal));
         }
+        case 'readDistillation': {
+          if (!isRecord(payload) || typeof payload['draftId'] !== 'string' || !UUID.test(payload['draftId'])) invalid('draftId must be a UUID');
+          return ok(await source.distillation(payload['draftId']));
+        }
+        case 'reviseDistillation': {
+          if (!isRecord(payload) || typeof payload['draftId'] !== 'string' || !UUID.test(payload['draftId'])
+            || typeof payload['content'] !== 'string' || typeof payload['category'] !== 'string') invalid('Invalid distillation revision');
+          const { kind: _kind, draftId: _draftId, usedRange, taskId, ...draft } = await source.distillation(payload['draftId']);
+          if (taskId !== undefined) invalid('The distillation was already confirmed');
+          const revised = await source.createDistillation({
+            ...draft,
+            content: payload['content'],
+            ...(typeof payload['category'] === 'string' ? { category: payload['category'] } : {}),
+          });
+          return ok({ ...revised, usedRange });
+        }
         case 'confirmDistillation': {
           if (!isRecord(payload)) invalid('Invalid distillation confirmation');
           const { draftId } = payload;
@@ -656,7 +658,6 @@ export function createRpcHandler(source: MemorySource, settings?: SettingsLike, 
         case 'injection': return ok(await source.injection());
         case 'rules': return ok(await source.rules());
         case 'ruleUsage': return ok(await source.ruleUsage());
-        case 'ruleArchive': return ok(await source.ruleArchive());
         case 'workspaces': return ok(await source.workspaces());
         case 'archiveCapacities': {
           const workspaceId = workspaceRequest(payload);
@@ -682,10 +683,11 @@ export function createRpcHandler(source: MemorySource, settings?: SettingsLike, 
         }
         case 'setArchiveState': {
           if (!isRecord(payload)) invalid('Invalid archive state request');
-          const { entryId, state, baseVersion } = payload;
+          const { entryId, state, baseVersion, changeId } = payload;
           if (typeof entryId !== 'string' || (state !== 'active' && state !== 'archived')
             || typeof baseVersion !== 'number' || !Number.isSafeInteger(baseVersion) || baseVersion < 1) invalid('Invalid archive state request');
-          return ok(await source.setArchiveState(entryId, state, baseVersion));
+          if (changeId !== undefined && typeof changeId !== 'string') invalid('Invalid archive change ID');
+          return ok(await source.setArchiveState(entryId, state, baseVersion, changeId));
         }
         case 'createRule': return ok(await source.createRule(ruleCreateRequest(payload)));
         case 'editRule': {

@@ -35,7 +35,6 @@ export const httpRoutes: ReadonlyArray<{ method: 'GET' | 'POST' | 'PATCH' | 'PUT
   { method: 'GET', path: '/v1/idle-review/pending' },
   { method: 'POST', path: '/v1/idle-review/runs/{runId}/items' },
   { method: 'POST', path: '/v1/idle-review/runs/{runId}/finish' },
-  { method: 'GET', path: '/v1/reviews/due' },
   { method: 'GET', path: '/v1/candidates/{candidateId}' },
   { method: 'GET', path: '/v1/memories' },
   { method: 'POST', path: '/v1/memories' },
@@ -53,7 +52,6 @@ export const httpRoutes: ReadonlyArray<{ method: 'GET' | 'POST' | 'PATCH' | 'PUT
   { method: 'POST', path: '/v1/retry' },
   { method: 'POST', path: '/v1/conflicts/resolve' },
   { method: 'POST', path: '/v1/versions/cancel' },
-  { method: 'POST', path: '/v1/reviews/complete' },
   { method: 'PATCH', path: '/v1/memories/{memoryId}' },
   { method: 'POST', path: '/v1/memories/{memoryId}/withdraw' },
   { method: 'GET', path: '/v1/sync/status' },
@@ -106,7 +104,6 @@ export interface ClientHttpEndpoints {
   memories(query: {
     query?: string; limit: number; cursor?: string;
     category?: 'preference' | 'decision' | 'fact' | 'insight' | 'context' | 'general';
-    knowledgeType?: 'Concept' | 'Practice' | 'Architecture' | 'Troubleshooting' | 'Constraint' | 'Procedure' | 'Reference';
     entity?: string;
     sort?: 'newest' | 'oldest' | 'importance';
   }): Promise<import('../../../core/contracts/src/index.ts').MemoryListRecord>;
@@ -124,7 +121,7 @@ export interface ClientHttpEndpoints {
   recall?(hostId: string, input: unknown, turn?: TurnIdentity): Promise<import('../../../core/contracts/src/index.ts').RecallResult>;
   related?(hostId: string, input: unknown, turn?: TurnIdentity): Promise<{ memories: Array<{ memoryId: string; content: string; excerpt: boolean }>; truncated: boolean }>;
   explore?(hostId: string, input: { query: string; limit: number; minScore?: number | undefined; hint?: string | undefined }, turn?: TurnIdentity): Promise<{ query: string; hits: Array<Record<string, unknown>>; unregistered: number; truncated: boolean }>;
-  editMemory(memoryId: string, input: { content: string; reason?: string | undefined; entryVersion: number; category?: string | undefined; knowledgeType?: string | undefined; importance?: number | undefined; tags?: string[] | undefined; entities?: string[] | undefined }): Promise<import('../../../core/contracts/src/index.ts').MemoryEditRecord>;
+  editMemory(memoryId: string, input: { content: string; reason?: string | undefined; entryVersion: number; category?: string | undefined; importance?: number | undefined; tags?: string[] | undefined; entities?: string[] | undefined }): Promise<import('../../../core/contracts/src/index.ts').MemoryEditRecord>;
   withdrawMemory?(memoryId: string, input: { reason: string; entryVersion: number }): Promise<{ memoryId: string; revisionId: string; entryVersion: number; withdrawnAt: string }>;
   syncStatus?(): Promise<SyncStatusValue>;
   syncRefresh?(): Promise<SyncRefreshValue>;
@@ -152,7 +149,7 @@ export interface ClientHttpEndpoints {
   readDistillation?(hostId: string, draftId: string): Promise<import('../../../core/contracts/src/index.ts').ArchiveDistillationRecordValue>;
 }
 
-const OPERATOR_ROUTES = new Set(['/v1/review', '/v1/retry', '/v1/conflicts/resolve', '/v1/versions/cancel', '/v1/reviews/complete', '/v1/reviews/due']);
+const OPERATOR_ROUTES = new Set(['/v1/review', '/v1/retry', '/v1/conflicts/resolve', '/v1/versions/cancel']);
 
 export function createHttpServer(app: MemoryApplication, token: string, operatorToken?: string, client?: ClientHttpEndpoints, storage?: () => StorageStatusRecord) {
   if (token.length < 24) throw new Error('MNEMOWEAVE_TOKEN must contain at least 24 characters');
@@ -392,11 +389,11 @@ export function createHttpServer(app: MemoryApplication, token: string, operator
         const cursor = url.searchParams.get('cursor')?.trim() || undefined;
         if (cursor !== undefined && cursor.length > 500) throw new MnemoWeaveError('INVALID_INPUT');
         const CATEGORIES = ['preference', 'decision', 'fact', 'insight', 'context', 'general'] as const;
-        const KNOWLEDGE = ['Concept', 'Practice', 'Architecture', 'Troubleshooting', 'Constraint', 'Procedure', 'Reference'] as const;
         const rawCategory = url.searchParams.get('category')?.trim() || undefined;
         if (rawCategory !== undefined && !(CATEGORIES as readonly string[]).includes(rawCategory)) throw new MnemoWeaveError('INVALID_INPUT');
-        const rawKnowledge = url.searchParams.get('knowledgeType')?.trim() || undefined;
-        if (rawKnowledge !== undefined && !(KNOWLEDGE as readonly string[]).includes(rawKnowledge)) throw new MnemoWeaveError('INVALID_INPUT');
+        // The knowledge-type filter was removed with its domain; a stale client is refused
+        // instead of reading a silently unfiltered set.
+        if (url.searchParams.get('knowledgeType') !== null) throw new MnemoWeaveError('INVALID_INPUT');
         const rawEntity = url.searchParams.get('entity')?.trim() || undefined;
         if (rawEntity !== undefined && rawEntity.length > 200) throw new MnemoWeaveError('INVALID_INPUT');
         const SORTS = ['newest', 'oldest', 'importance'] as const;
@@ -409,7 +406,6 @@ export function createHttpServer(app: MemoryApplication, token: string, operator
           ...(query === undefined ? {} : { query }), limit,
           ...(cursor === undefined ? {} : { cursor }),
           ...(rawCategory === undefined ? {} : { category: rawCategory as (typeof CATEGORIES)[number] }),
-          ...(rawKnowledge === undefined ? {} : { knowledgeType: rawKnowledge as (typeof KNOWLEDGE)[number] }),
           ...(rawEntity === undefined ? {} : { entity: rawEntity }),
           ...(rawSort === undefined ? {} : { sort: rawSort as (typeof SORTS)[number] }),
         }));
@@ -541,10 +537,6 @@ export function createHttpServer(app: MemoryApplication, token: string, operator
       }
 
       // ── Operator governance ──
-      if (req.method === 'GET' && path === '/v1/reviews/due') {
-        if (!isOperator) throw new MnemoWeaveError('UNAUTHORIZED');
-        return reply(200, await app.reviewDue());
-      }
       if (req.method === 'POST' && OPERATOR_ROUTES.has(path)) {
         if (!isOperator) throw new MnemoWeaveError('UNAUTHORIZED');
         const input = await readJson(req);
@@ -552,7 +544,7 @@ export function createHttpServer(app: MemoryApplication, token: string, operator
         if (path === '/v1/retry') return reply(202, await app.retryWrite(input, 'local-operator'));
         if (path === '/v1/conflicts/resolve') return reply(200, await app.resolveConflict(input, 'local-operator'));
         if (path === '/v1/versions/cancel') return reply(200, await app.cancelVersion(input, 'local-operator'));
-        return reply(200, await app.completeReview(input, 'local-operator'));
+        throw new MnemoWeaveError('NOT_FOUND');
       }
       return reply(404, { code: 'NOT_FOUND', traceId });
     } catch (error) {

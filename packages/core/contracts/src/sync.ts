@@ -119,8 +119,9 @@ export const SyncAccepted = z.object({
   entryId: UUID,
   stream: SyncStream,
   version: z.number().int().positive(),
-  seq: z.number().int().positive(),
+  seq: z.number().int().nonnegative(),
   duplicate: z.boolean(),
+  confirmedAt: z.iso.datetime().optional(),
 }).strict();
 
 export const SyncChangeRecord = z.object({
@@ -148,6 +149,7 @@ export const SyncPullPage = z.object({
   hasMore: z.boolean(),
   /** Oldest seq still retained for this stream. A snapshot is required when since + 1 < retentionFloor. */
   retentionFloor: z.number().int().min(0),
+  snapshotAtStart: z.boolean().optional(),
 }).strict();
 
 export const SyncSnapshot = z.object({

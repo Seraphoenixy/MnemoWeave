@@ -52,7 +52,12 @@ export async function submitLocalChange(input: LocalWriteInput, ports: LocalWrit
   const row = ports.ledger.outboxChange(change.changeId);
   if (!row) throw new MnemoWeaveError('INTERNAL');
   if (row.state === 'conflict') throw new MnemoWeaveError('VERSION_CONFLICT');
-  if (row.state === 'needs_review') throw new MnemoWeaveError('NEEDS_REVIEW');
+  if (row.state === 'needs_review') {
+    if (row.lastError === 'RULE_CAPACITY_EXCEEDED' || row.lastError === 'ARCHIVE_CAPACITY_EXCEEDED') {
+      throw new MnemoWeaveError(row.lastError);
+    }
+    throw new MnemoWeaveError('NEEDS_REVIEW');
+  }
   if (row.state === 'unknown') return { state: 'unknown', accepted: null };
   if (row.state !== 'confirmed') return { state: 'queued', accepted: null };
   const record = ports.ledger.inboxChange(change.changeId);
@@ -150,8 +155,6 @@ export function ruleDraft(row: LocalRuleRow): SyncEntryDraftValue {
     content: plain(row.body),
     payload: {
       enabled: row.enabled,
-      ...(row.importance !== undefined && row.importance !== 'normal' ? { importance: row.importance } : {}),
-      ...(row.pinned === true ? { pinned: true } : {}),
     },
     withdrawnAt: row.withdrawnAt,
   };

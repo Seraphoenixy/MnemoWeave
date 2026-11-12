@@ -12,10 +12,10 @@ const TOKEN_A = 'a'.repeat(32);
 const TOKEN_B = 'b'.repeat(32);
 const NOW = '2026-11-10T04:00:00.000Z';
 
-function openStore() {
+function openStore(archiveCapacityBytes?: number) {
   const dir = join('work', 'sync-store-test', randomUUID());
   mkdirSync(dir, { recursive: true });
-  const store = new SyncStore({ path: join(dir, 'sync.db'), now: () => NOW });
+  const store = new SyncStore({ path: join(dir, 'sync.db'), now: () => NOW, ...(archiveCapacityBytes === undefined ? {} : { archiveCapacityBytes }) });
   store.enroll('device-a', TOKEN_A, [
     { stream: 'rules', canRead: true, canWrite: true },
     { stream: 'formal-memories', canRead: true, canWrite: true },
@@ -322,13 +322,15 @@ test('a protocol-1 database is switched to streams without carrying an old curso
   const ruleId = '11111111-1111-4111-8111-111111111111';
   const archiveId = '22222222-2222-4222-8222-222222222222';
   db.prepare("INSERT INTO sync_entries VALUES(?,'runtime',1,?,?,NULL,'2026-11-10T00:00:00.000Z')").run(ruleId, JSON.stringify({ format: 'plain', data: 'x', contentHash: 'a'.repeat(64), byteLength: 1 }), JSON.stringify({ enabled: true }));
-  db.prepare("INSERT INTO sync_entries VALUES(?,'archive',1,?,?,NULL,'2026-11-10T00:00:00.000Z')").run(archiveId, JSON.stringify({ format: 'plain', data: 'y', contentHash: 'b'.repeat(64), byteLength: 1 }), JSON.stringify({ workspaceId: '11111111-1111-4111-8111-111111111111', title: 't' }));
+  db.prepare("INSERT INTO sync_entries VALUES(?,'archive',1,?,?,NULL,'2026-11-10T00:00:00.000Z')").run(archiveId, JSON.stringify({ format: 'plain', data: 'y', contentHash: 'b'.repeat(64), byteLength: 1 }), JSON.stringify({ projectId: 'alpha', title: 't', source: 'user', verification: 'open', evidence: '', tags: [] }));
   db.close();
 
-  const store = new SyncStore({ path });
+  assert.throws(() => new SyncStore({ path }), /Missing workspace migration mapping/);
+  const alpha = { workspaceId: WORKSPACE, name: 'Alpha' };
+  assert.throws(() => new SyncStore({ path, legacyWorkspaces: { alpha, beta: alpha } }), /different device permissions/);
+  const store = new SyncStore({ path, legacyWorkspaces: { alpha } });
   try {
-    // The shared grant becomes one grant per stream; the project grant waits for a mapping.
-    assert.deepEqual(store.streams('a'.repeat(32)).streams.map(item => item.stream).sort(), ['formal-memories', 'rules']);
+    assert.deepEqual(store.streams(TOKEN_A).streams.map(item => item.stream).sort(), ['formal-memories', 'rules', `workspace-archives:${WORKSPACE}`]);
     // Old cursors are gone: each stream starts from a snapshot at zero.
     assert.deepEqual(store.changeRange('rules'), { floor: 0, head: 0, count: 0 });
     assert.deepEqual(store.changeRange('formal-memories'), { floor: 0, head: 0, count: 0 });
@@ -339,5 +341,44 @@ test('a protocol-1 database is switched to streams without carrying an old curso
     assert.equal(rules.entries[0]?.kind, 'rule', 'the legacy kind is renamed to its target name');
     const archiveStream = 'workspace-archives:11111111-1111-4111-8111-111111111111';
     assert.deepEqual(store.changeRange(archiveStream), { floor: 0, head: 0, count: 0 });
+    assert.equal(store.pull(TOKEN_A, { stream: archiveStream, since: 0, limit: 20 }).snapshotAtStart, true);
+    assert.equal(store.snapshot(TOKEN_A, archiveStream).entries[0]?.entryId, archiveId);
+  } finally { store.close(); }
+});
+
+test('remote archive capacity counts active bodies and frees space after confirmed archive', () => {
+  const store = openStore(8);
+  try {
+    const first = archiveDraft({ content: plainContent('12345678') });
+    const second = archiveDraft({ content: plainContent('a') });
+    store.submit(TOKEN_A, create(first));
+    assert.throws(() => store.submit(TOKEN_A, create(second)), { code: 'ARCHIVE_CAPACITY_EXCEEDED' });
+    store.submit(TOKEN_A, update({ ...first, payload: { ...first.payload, state: 'archived' } } as SyncEntryDraftValue, 1));
+    assert.equal(store.submit(TOKEN_A, create(second)).seq, 3);
+  } finally { store.close(); }
+});
+
+test('remote rule capacity includes disabled rules', () => {
+  const store = openStore();
+  try {
+    store.submit(TOKEN_A, create(draft({ payload: { enabled: false }, content: plainContent('a'.repeat(9999)) })));
+    assert.throws(() => store.submit(TOKEN_A, create(draft())), { code: 'RULE_CAPACITY_EXCEEDED' });
+  } finally { store.close(); }
+});
+
+test('remote same-body formal creates reuse the authoritative id and receipt without advancing the stream', () => {
+  const store = openStore();
+  try {
+    const payload = { category: 'fact' as const, importance: 3, tags: [], entities: [], relations: [] };
+    const entry = draft({ kind: 'formal-memory', payload });
+    const first = store.submit(TOKEN_A, create(entry));
+    const second = create({ ...entry, entryId: randomUUID() });
+    const duplicate = store.submit(TOKEN_A, second);
+    assert.equal(duplicate.entryId, first.entryId);
+    assert.equal(duplicate.version, first.version);
+    assert.equal(duplicate.seq, 0);
+    assert.equal(duplicate.duplicate, true);
+    assert.deepEqual(store.receipt(TOKEN_A, second.changeId), duplicate);
+    assert.equal(store.changeRange('formal-memories').head, 1);
   } finally { store.close(); }
 });
