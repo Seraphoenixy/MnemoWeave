@@ -33,10 +33,10 @@ test('the DSH Host half lists, reads, edits and reports injections through a rea
   const seed = new SqliteCandidates(resolve(join(dir, 'state', 'governance.db')));
   const seedProvider = new MnemonCliProvider({ binary: mnemonBinary(), dataDir: resolve(join(dir, 'provider')), store: 'dsh_host' });
   const request = RememberInput.parse({
-    idempotencyKey: `seed-${randomUUID()}`, content: '插件读取的初始正文。', knowledgeType: 'Practice', tags: [], projectId: 'alpha',
+    idempotencyKey: `seed-${randomUUID()}`, content: '插件读取的初始正文。', knowledgeType: 'Practice', tags: [],
     provenance: {
       source: 'local-user', sourceReference: 'e2e:dsh-host', evidence: ['seed'], verificationStatus: 'verified',
-      confidence: 1, applicability: 'alpha', limitations: '无（验收固定值）', lastVerified: '2026-11-10T10:00:00.000Z',
+      confidence: 1, applicability: 'shared collection', limitations: '无（验收固定值）', lastVerified: '2026-11-10T10:00:00.000Z',
     },
   });
   const candidate = seed.submit(request);
@@ -56,7 +56,7 @@ test('the DSH Host half lists, reads, edits and reports injections through a rea
   // the service token alone is refused by the Server.
   // A single-user deployment: the service token plus the Host header is the whole identity, so a
   // second credential for editing would only duplicate the same secret.
-  const client = new MemoryClient({ baseUrl: base, token: TOKEN, hostId: HOST, projectId: 'alpha', timeoutMs: 30_000 });
+  const client = new MemoryClient({ baseUrl: base, token: TOKEN, hostId: HOST, timeoutMs: 30_000 });
   const source = new MemorySource({ client, serverUrl: base, hasToken: true });
   const rpc = createRpcHandler(source);
   try {
@@ -197,25 +197,30 @@ test('the DSH Host half lists, reads, edits and reports injections through a rea
       assert.equal(found.hits.some(hit => hit.memoryId === memoryId), false, 'withdrawn memories are not surfaced');
     }
 
-    // No View yet: the host has never injected, which is a normal first run.
+    // No report yet: the host has never injected, which is a normal first run.
     assert.equal(await source.injection(), null);
 
-    // A View for a project scope requires the project to be registered first.
-    const registration = await fetch(`${base}/v1/runtime/projects`, {
-      method: 'POST', headers: { authorization: `Bearer ${OPERATOR}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ projectId: 'alpha' }),
+    // The rule set is written by a person, then delivered whole on the next turn.
+    const ruleWrite = await fetch(`${base}/v1/rules`, {
+      method: 'POST', headers: { authorization: `Bearer ${TOKEN}`, 'x-mnemoweave-host': HOST, 'content-type': 'application/json' },
+      body: JSON.stringify({ body: '提交前必须运行类型检查。' }),
     });
-    assert.equal(registration.status, 200);
+    assert.equal(ruleWrite.status, 201);
 
     // The default injection budget is 2 s; a loaded machine needs a larger budget to assert
     // the happy path, so the test passes one explicitly instead of weakening the deadline.
-    const view = await client.inject({ query: '初始' }, 20_000);
-    assert.equal(view.ok, true);
+    const injection = await client.inject({ sessionId: 'dsh-half-session' }, 20_000);
+    assert.equal(injection.ok, true);
+    if (injection.ok) {
+      assert.deepEqual(injection.value.rules.map(rule => rule.body), ['提交前必须运行类型检查。']);
+      assert.equal(injection.value.complete, true);
+    }
     const report = await source.injection();
-    assert.ok(report, 'a View call must leave an injection report');
-    assert.equal(typeof report.rulesInjected, 'number');
-    assert.equal(typeof report.memoriesInjected, 'number');
-    assert.equal(report.sessionId.length > 0, true);
+    assert.ok(report, 'an injection call must leave a report');
+    assert.equal(report.ruleCount, 1);
+    assert.ok(report.usedBytes > 0);
+    assert.equal(report.failure, undefined);
+    assert.equal(report.sessionId, 'dsh-half-session');
   } finally {
     await new Promise<void>((done) => { server.closeAllConnections(); server.close(() => done()); });
     await app.close();

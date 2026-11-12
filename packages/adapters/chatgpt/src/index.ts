@@ -14,10 +14,10 @@ export const ChatgptHook = z.object({
 }).passthrough();
 
 /** No transcript scraping and no assumption that an unknown tool response means success. */
-export function normalizeChatgptHook(input: unknown, projectId?: string) {
+export function normalizeChatgptHook(input: unknown) {
   const hook = ChatgptHook.parse(input);
   const now = new Date().toISOString();
-  const base = { protocolVersion: '1', adapterVersion: '0.1.0', eventId: `chatgpt-${randomUUID()}`, sessionId: hook.session_id, ...(hook.turn_id ? { turnId: hook.turn_id } : {}), ...(projectId ? { projectId } : {}), occurredAt: now, receivedAt: now, sourceRef: `chatgpt-hook:${hook.hook_event_name}` };
+  const base = { protocolVersion: '1', adapterVersion: '0.1.0', eventId: `chatgpt-${randomUUID()}`, sessionId: hook.session_id, ...(hook.turn_id ? { turnId: hook.turn_id } : {}), occurredAt: now, receivedAt: now, sourceRef: `chatgpt-hook:${hook.hook_event_name}` };
   switch (hook.hook_event_name) {
     case 'SessionStart': return HostEvent.parse({ ...base, kind: 'session.started', payload: {} });
     case 'SessionEnd': return HostEvent.parse({ ...base, kind: 'session.ended', payload: {} });

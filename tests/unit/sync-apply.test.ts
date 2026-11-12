@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import type { SyncContentValue, SyncEntryValue } from '../../packages/core/contracts/src/index.ts';
+import { streamOf } from '../../packages/core/contracts/src/index.ts';
 import { plainContent } from '../../packages/core/application/src/sync.ts';
 import { applyInboxEntry, decodeContent } from '../../packages/core/application/src/sync-apply.ts';
 import type { FormalMapRow, FormalProviderPort, LocalArchiveRow, LocalRuleRow, MemoryApplyStore } from '../../packages/core/application/src/sync-apply.ts';
@@ -62,8 +63,7 @@ class FakeProvider implements FormalProviderPort {
 function entry(overrides: Partial<SyncEntryValue> = {}): SyncEntryValue {
   return {
     entryId: ENTRY,
-    kind: 'runtime',
-    scope: 'project:alpha',
+    kind: 'rule',
     version: 1,
     content: plainContent('提交前必须运行类型检查。'),
     payload: { enabled: true },
@@ -74,14 +74,16 @@ function entry(overrides: Partial<SyncEntryValue> = {}): SyncEntryValue {
 }
 
 function inbox(overrides: Partial<SyncInboxRecord> = {}): SyncInboxRecord {
+  const applied = overrides.entry ?? entry();
   return {
-    scope: 'project:alpha',
+    // The stream is derived from the entry, exactly as the coordinator checks it.
+    stream: streamOf(applied.kind, applied.payload),
     seq: 1,
     changeId: randomUUID(),
     entryId: ENTRY,
     version: 1,
     operation: 'create',
-    entry: entry(),
+    entry: applied,
     state: 'received',
     error: null,
     ...overrides,
@@ -100,7 +102,7 @@ test('content is verified before anything is stored', () => {
   assert.throws(() => decodeContent(encrypted));
 });
 
-test('a runtime change is written locally', async () => {
+test('a rule change is written locally', async () => {
   const p = ports();
   assert.deepEqual(await applyInboxEntry(inbox(), p), { status: 'applied' });
   assert.equal(p.store.rules.length, 1);
@@ -108,18 +110,19 @@ test('a runtime change is written locally', async () => {
   assert.equal(p.store.rules[0]?.enabled, true);
 });
 
-test('a deleted runtime change withdraws instead of storing', async () => {
+test('a deleted rule change withdraws instead of storing', async () => {
   const p = ports();
   assert.deepEqual(await applyInboxEntry(inbox({ operation: 'delete', entry: entry({ withdrawnAt: NOW }) }), p), { status: 'applied' });
   assert.deepEqual(p.store.withdrawnRules, [ENTRY]);
   assert.equal(p.store.rules.length, 0);
 });
 
-test('an archive change keeps project, verification and evidence', async () => {
+test('an archive change keeps workspace, verification and evidence', async () => {
   const p = ports();
-  const payload = { title: '同步按范围维护游标', source: 'session' as const, verification: 'open' as const, evidence: '三次实验', tags: [] as string[] };
-  assert.deepEqual(await applyInboxEntry(inbox({ entry: entry({ kind: 'archive', payload }) }), p), { status: 'applied' });
-  assert.equal(p.store.archives[0]?.projectId, 'alpha');
+  const workspaceId = '11111111-1111-4111-8111-111111111111';
+  const payload = { workspaceId, title: '同步按工作区维护游标', source: 'session' as const, verification: 'open' as const, evidence: '三次实验', tags: [] as string[] };
+  assert.deepEqual(await applyInboxEntry(inbox({ stream: `workspace-archives:${workspaceId}`, entry: entry({ kind: 'workspace-archive', payload }) }), p), { status: 'applied' });
+  assert.equal(p.store.archives[0]?.workspaceId, workspaceId);
   assert.equal(p.store.archives[0]?.verification, 'open');
   assert.equal(p.store.archives[0]?.evidence, '三次实验');
 });
@@ -127,7 +130,7 @@ test('an archive change keeps project, verification and evidence', async () => {
 test('a formal change is written, read back and only then mapped', async () => {
   const p = ports();
   const payload = { category: 'fact' as const, importance: 3, tags: [], entities: [], relations: [] };
-  const record = inbox({ entry: entry({ kind: 'formal', payload }) });
+  const record = inbox({ entry: entry({ kind: 'formal-memory', payload }) });
   assert.deepEqual(await applyInboxEntry(record, p), { status: 'applied' });
   assert.deepEqual(p.provider.calls, [`find:mnemoweave:${record.changeId}:1`, 'remember', 'show'], 'a missing local row is looked up by source first');
   const map = p.store.maps.get(`${ENTRY}:1`);
@@ -143,7 +146,7 @@ test('a formal change is written, read back and only then mapped', async () => {
 test('a replay after an interrupted write reuses the memory already written', async () => {
   const p = ports();
   const payload = { category: 'fact' as const, importance: 3, tags: [], entities: [], relations: [] };
-  const record = inbox({ entry: entry({ kind: 'formal', payload }) });
+  const record = inbox({ entry: entry({ kind: 'formal-memory', payload }) });
   const source = `mnemoweave:${record.changeId}:1`;
   // Simulate the earlier attempt: written to the Provider, mapping never recorded.
   p.provider.sources.set(source, 'p-existing');
@@ -158,7 +161,7 @@ test('a replay after an interrupted write reuses the memory already written', as
 test('a recovered write whose body disagrees asks for review instead of accepting it', async () => {
   const p = ports();
   const payload = { category: 'fact' as const, importance: 3, tags: [], entities: [], relations: [] };
-  const record = inbox({ entry: entry({ kind: 'formal', payload }) });
+  const record = inbox({ entry: entry({ kind: 'formal-memory', payload }) });
   p.provider.sources.set(`mnemoweave:${record.changeId}:1`, 'p-existing');
   p.provider.contents.set('p-existing', '被别的写入占用了同一个 source。');
 
@@ -170,7 +173,7 @@ test('a later formal revision links to the previous local revision', async () =>
   const p = ports();
   p.store.upsertFormalMap({ entryId: ENTRY, version: 1, providerId: 'p-old', contentHash: 'x'.repeat(64), state: 'applied', appliedAt: NOW });
   const payload = { category: 'fact' as const, importance: 3, tags: [], entities: [], relations: [] };
-  const record = inbox({ seq: 2, version: 2, operation: 'update', entry: entry({ kind: 'formal', version: 2, content: plainContent('第二版正式记忆。'), payload }) });
+  const record = inbox({ seq: 2, version: 2, operation: 'update', entry: entry({ kind: 'formal-memory', version: 2, content: plainContent('第二版正式记忆。'), payload }) });
   assert.deepEqual(await applyInboxEntry(record, p), { status: 'applied' });
   assert.deepEqual(p.provider.links, [{ source: 'p-1', target: 'p-old' }]);
   assert.equal(p.store.formalProviderId(ENTRY, 2), 'p-1');
@@ -180,7 +183,7 @@ test('a mismatched read-back stops before the mapping moves', async () => {
   const p = ports();
   p.provider.show = async (id: string) => ({ id, content: '内容已被外部改写' });
   const payload = { category: 'fact' as const, importance: 3, tags: [], entities: [], relations: [] };
-  assert.deepEqual(await applyInboxEntry(inbox({ entry: entry({ kind: 'formal', payload }) }), p), { status: 'needs_review', error: 'PROVIDER_INTEGRITY' });
+  assert.deepEqual(await applyInboxEntry(inbox({ entry: entry({ kind: 'formal-memory', payload }) }), p), { status: 'needs_review', error: 'PROVIDER_INTEGRITY' });
   assert.equal(p.store.maps.size, 0);
 });
 
@@ -188,7 +191,7 @@ test('a withdrawn formal memory keeps its Provider body and is only retired from
   const p = ports();
   p.store.upsertFormalMap({ entryId: ENTRY, version: 1, providerId: 'p-old', contentHash: 'x'.repeat(64), state: 'applied', appliedAt: NOW });
   const payload = { category: 'fact' as const, importance: 3, tags: [], entities: [], relations: [] };
-  const record = inbox({ seq: 2, version: 2, operation: 'delete', entry: entry({ kind: 'formal', version: 2, payload, withdrawnAt: NOW }) });
+  const record = inbox({ seq: 2, version: 2, operation: 'delete', entry: entry({ kind: 'formal-memory', version: 2, payload, withdrawnAt: NOW }) });
   assert.deepEqual(await applyInboxEntry(record, p), { status: 'applied' });
   // Withdrawal is a new version, not physical deletion: `forget` would erase the row, break
   // `show` and drop edges pointing at it, contradicting the protocol's readable history.

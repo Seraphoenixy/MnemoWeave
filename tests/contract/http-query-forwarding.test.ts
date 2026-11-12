@@ -31,7 +31,9 @@ async function harness(client: Partial<ClientHttpEndpoints>): Promise<{ base: st
   };
 }
 
-const auth = { authorization: `Bearer ${TOKEN}`, 'x-mnemoweave-host': 'probe', connection: 'close' };
+// A model-facing read also names the turn, so the per-turn budget has something to charge.
+const turn = { 'x-mnemoweave-session-id': 's-1', 'x-mnemoweave-turn-id': 'turn-1' };
+const auth = { authorization: `Bearer ${TOKEN}`, 'x-mnemoweave-host': 'probe', ...turn, connection: 'close' };
 
 test('the list route forwards every query parameter it documents', async () => {
   const seen: Array<Record<string, unknown>> = [];

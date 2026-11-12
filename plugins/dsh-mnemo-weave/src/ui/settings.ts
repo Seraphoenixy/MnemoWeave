@@ -52,7 +52,7 @@ export interface Snapshot {
   serverUrl: string;
   hostId: string;
   token: string | undefined;
-  projectId: string | undefined;
+  workspaceId: string | undefined;
   injectTimeoutMs: number;
   autoStart: boolean;
   client: MemoryClient;
@@ -85,7 +85,7 @@ export class SettingsService {
       serverUrl: resolved.serverUrl,
       hostId: resolved.hostId,
       token: resolved.token,
-      projectId: resolved.projectId,
+      workspaceId: resolved.workspaceId,
       injectTimeoutMs: resolved.injectTimeoutMs,
       autoStart: resolved.autoStart,
       client: new MemoryClient({
@@ -135,9 +135,9 @@ export class SettingsService {
         source: 'preference',
       },
       injection: {
-        projectId: description.projectId,
+        workspaceId: description.workspaceId,
         injectTimeoutMs: description.injectTimeoutMs,
-        source: sources.projectId,
+        source: sources.workspaceId,
         timeoutSource: sources.injectTimeoutMs,
       },
       diagnostics: {

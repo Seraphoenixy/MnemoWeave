@@ -2,7 +2,7 @@ import { SkillBacktestPanel, SkillListPanel } from './skill-backtest.tsx';
 import { diffLines, type DiffLine } from '../shared/skills-diff.ts';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CreateDraft } from './panels.tsx';
-import type { ListSort, UiArchive, UiArchiveCapacity, UiArchiveHistory, UiConfigView, UiConnectionTest, UiEmbeddingDiagnostics, UiExplore, UiGraph, UiInjection, UiMemoryDetail, UiMemoryList, UiMemorySummary, UiOrganizeItem, UiRegisterTest, UiRule, UiRuleUsage, UiSettings, UiSkillDraft, UiSkillEntry, UiSkillReport, UiSkillVersion, UiStatus, UiSyncPass, UiSyncStatus, UiTrashEntry, UiWakeTest } from '../shared/contract.ts';
+import type { ListSort, UiArchive, UiArchiveCapacity, UiArchiveHistory, UiConfigView, UiConnectionTest, UiEmbeddingDiagnostics, UiExplore, UiGraph, UiInjection, UiMemoryDetail, UiMemoryList, UiMemorySummary, UiOrganizeItem, UiRegisterTest, UiRule, UiRuleUsage, UiSettings, UiSkillDraft, UiSkillEntry, UiSkillReport, UiSkillVersion, UiStatus, UiSyncPass, UiSyncStatus, UiTrashEntry, UiWakeTest, UiWorkspace } from '../shared/contract.ts';
 import { createApi, RpcFailure } from './api.ts';
 import type { ClientConnection, LocaleService } from './dsh-types.ts';
 import { normalizeLanguage, translate, type Language, type MessageKey } from './i18n.ts';
@@ -33,7 +33,6 @@ const CATEGORY_VALUES = ['preference', 'decision', 'fact', 'insight', 'context',
 /** The empty creation draft, restored whenever the create window closes without publishing. */
 const EMPTY_CREATE_DRAFT: CreateDraft = {
   content: '', knowledgeType: 'Practice', category: '', importance: '', tags: '', entities: '',
-  projectId: '',
   reason: '',
 };
 
@@ -98,7 +97,6 @@ function MemoryCard({ item, active, language, now, onSelect }: { item: UiMemoryS
         {excerpt === '' ? null : <span className="mwui-memcard-excerpt">{excerpt}</span>}
         <span className="mwui-memcard-meta">
           {label === undefined ? null : <span className="mwui-chip-slim" data-tone="category">{label}</span>}
-          <span className="mwui-chip-slim" data-tone="category">{item.projectId ?? translate(language, 'memory.general')}</span>
           <span className="mwui-chip-slim">{translate(language, 'detail.revision')} v{item.entryVersion}</span>
           {item.tags === undefined || item.tags.length === 0 ? null : (
             <span className="mwui-memcard-tags">{item.tags.slice(0, 3).map(tag => `#${tag}`).join(' ')}</span>
@@ -582,11 +580,21 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
   const [archives, setArchives] = useState<UiArchive[] | null | undefined>(undefined);
   const [archiveCapacities, setArchiveCapacities] = useState<UiArchiveCapacity[] | null | undefined>(undefined);
   const [archiveHistory, setArchiveHistory] = useState<UiArchiveHistory[] | null | undefined>(undefined);
+  /** Capacity maintenance: only loaded once the workspace is over its active capacity. */
+  const [releaseCandidates, setReleaseCandidates] = useState<import('../shared/contract.ts').UiArchiveReleaseCandidates | null | undefined>(undefined);
+  /** Set when a save was refused for capacity: that is when the release list is offered. */
+  const [capacityRefused, setCapacityRefused] = useState(false);
   const [sync, setSync] = useState<UiSyncStatus | null | undefined>(undefined);
   /** Provider embedding coverage; undefined while loading, null when the read failed. */
   const [diagnostics, setDiagnostics] = useState<UiEmbeddingDiagnostics | null | undefined>(undefined);
   const [rulesError, setRulesError] = useState<string | null>(null);
   const [archivesError, setArchivesError] = useState<string | null>(null);
+  /**
+   * Workspaces this Host may reach, and the one the archive page is looking at. The selection
+   * is a management-page choice: it does not change any session's binding.
+   */
+  const [workspaces, setWorkspaces] = useState<UiWorkspace[]>([]);
+  const [selectedWorkspace, setSelectedWorkspace] = useState<string | null>(null);
   const [syncError, setSyncError] = useState<string | null>(null);
   const [syncPass, setSyncPass] = useState<UiSyncPass | null>(null);
   const [ruleId, setRuleId] = useState<string | null>(null);
@@ -602,14 +610,6 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
   const [entityFilter, setEntityFilter] = useState<string>('');
   /** Scan order; changing it restarts the scan, because a cursor belongs to one order. */
   const [sort, setSort] = useState<ListSort>('newest');
-  /**
-   * The management page's project: undefined shows every project, null shows general memory,
-   * a string shows that project. This is not the conversation's project; it only narrows this
-   * page's queries and edits.
-   */
-  const [projectFilter, setProjectFilter] = useState<string | null | undefined>(undefined);
-  /** Projects known to the Server, used for the selector and the create form. */
-  const [projects, setProjects] = useState<Array<{ projectId: string | null; count: number }>>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   /** Which revision the detail panel is showing; undefined means the current one. */
   const [viewedRevisionId, setViewedRevisionId] = useState<string | undefined>(undefined);
@@ -656,11 +656,7 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     setGraphLoading(true);
     setGraphError(null);
     try {
-      const project = projectRef.current;
-      setGraph(await api.graph({
-        limit: 500,
-        ...(project === undefined ? {} : project === null ? { includeGlobal: false } : { projectId: project, includeGlobal: true }),
-      }));
+      setGraph(await api.graph({ limit: 500 }));
     } catch (failure) {
       setGraphError(failureText(failure, language));
     } finally {
@@ -727,20 +723,68 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     return () => controller.abort();
   }, [api, archiveId]);
 
+  /** Read every workspace this Host may reach; keep the current choice when it still exists. */
+  const loadWorkspaces = useCallback(async (signal?: AbortSignal): Promise<void> => {
+    try {
+      const items = await api.workspaces(signal);
+      if (signal?.aborted) return;
+      setWorkspaces(items);
+      setSelectedWorkspace(current => current !== null && items.some(item => item.workspaceId === current)
+        ? current
+        : items[0]?.workspaceId ?? null);
+    } catch {
+      if (!signal?.aborted) { setWorkspaces([]); setSelectedWorkspace(null); }
+    }
+  }, [api]);
+
+  /**
+   * Read one workspace's archives and capacity. A workspace is mandatory on the Server side, so
+   * this clears the panes when no workspace is selected instead of requesting an unscoped list.
+   */
+  const loadArchives = useCallback(async (signal?: AbortSignal): Promise<void> => {
+    const workspaceId = workspaceRef.current;
+    if (workspaceId === null) { setArchives(null); setArchiveCapacities(null); setReleaseCandidates(null); return; }
+    try {
+      const [items, capacities] = await Promise.all([api.archives(workspaceId, signal), api.archiveCapacities(workspaceId, signal)]);
+      if (signal?.aborted) return;
+      setArchives(items);
+      setArchiveCapacities(capacities);
+      setArchivesError(null);
+      // The release list only matters once the workspace is over capacity; asking otherwise would
+      // report suggestions for a problem the user does not have.
+      // Loaded on every visit: a refused write must be able to offer the rows that would free
+      // room, and the refusal itself is what makes the section relevant, not a prior overflow.
+      setReleaseCandidates(await api.archiveReleaseCandidates(workspaceId, undefined, signal).catch(() => null));
+    } catch (failure) {
+      if (signal?.aborted) return;
+      setArchives(null);
+      setArchiveCapacities(null);
+      setReleaseCandidates(null);
+      setArchivesError(failureText(failure, language));
+    }
+  }, [api, language]);
+
+  // The archive panes follow the management-page workspace selection.
+  useEffect(() => {
+    workspaceRef.current = selectedWorkspace;
+    const controller = new AbortController();
+    setArchiveId(null);
+    void loadArchives(controller.signal);
+    return () => controller.abort();
+  }, [selectedWorkspace, loadArchives]);
+
   const loadStatus = useCallback(async (signal?: AbortSignal): Promise<void> => {
     // The injection report is informational: a host that never injected, or a Server that
     // cannot answer, must not turn the whole status row into an error.
     const settle = async <T,>(promise: Promise<T>): Promise<{ value?: T; error?: string }> => {
       try { return { value: await promise }; } catch (error) { return { error: error instanceof RpcFailure ? error.code : 'RPC_FAILED' }; }
     };
-    const [nextStatus, nextConfig, nextInjection, nextRules, nextRuleUsage, nextArchives, nextCapacities, nextSync] = await Promise.all([
+    const [nextStatus, nextConfig, nextInjection, nextRules, nextRuleUsage, nextSync] = await Promise.all([
       api.status(signal),
       api.config(signal),
       api.injection(signal).catch(() => null),
       settle(api.rules(signal)),
       settle(api.ruleUsage(signal)),
-      settle(api.archives(signal)),
-      settle(api.archiveCapacities(signal)),
       settle(api.sync(signal)),
     ]);
     setStatus(nextStatus);
@@ -749,12 +793,10 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     setRules(nextRules.value ?? null);
     setRulesError(nextRules.error ?? null);
     setRuleUsage(nextRuleUsage.value ?? null);
-    setArchives(nextArchives.value ?? null);
-    setArchivesError(nextArchives.error ?? null);
-    setArchiveCapacities(nextCapacities.value ?? null);
     setSync(nextSync.value ?? null);
     setSyncError(nextSync.error ?? null);
-  }, [api]);
+    await loadWorkspaces(signal);
+  }, [api, loadWorkspaces]);
 
   /**
    * Load one page. `append` continues the current list with the returned cursor; otherwise the
@@ -765,10 +807,12 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
    * identity — that would re-run the search effect and fetch the first page a second time.
    */
   const pageSizeRef = useRef<number>(LIST_LIMIT);
-  /** Read by `loadList` so changing the project does not change the callback's identity. */
-  const projectRef = useRef<string | null | undefined>(undefined);
+  /** Read by `loadArchives` so changing the workspace does not change the callback's identity. */
+  const workspaceRef = useRef<string | null>(null);
+  /** The archive list the confirm handler reads: a stale version must not be archived blindly. */
+  const archivesRef = useRef<UiArchive[] | null | undefined>(null);
+  archivesRef.current = archives;
   const loadList = useCallback(async (options: { query: string; category?: string; entity?: string; sort?: ListSort; cursor?: string; append: boolean }, signal?: AbortSignal): Promise<void> => {
-    const project = projectRef.current;
     const page = await api.memories({
       ...(options.query.trim() === '' ? {} : { query: options.query.trim() }),
       limit: pageSizeRef.current,
@@ -776,9 +820,6 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
       ...(options.entity === undefined || options.entity === '' ? {} : { entity: options.entity }),
       ...(options.sort === undefined ? {} : { sort: options.sort }),
       ...(options.cursor === undefined ? {} : { cursor: options.cursor }),
-      // A project view keeps general knowledge; the general view is expressed as
-      // includeGlobal=false with no project id.
-      ...(project === undefined ? {} : project === null ? { includeGlobal: false } : { projectId: project, includeGlobal: true }),
     }, signal);
     setList(current => {
       if (!options.append || current === null) return page;
@@ -833,12 +874,7 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
       })();
     }, 280);
     return () => { clearTimeout(timer); controller.abort(); };
-  }, [query, categoryFilter, entityFilter, sort, projectFilter, loadList, language]);
-
-  // The project index travels with every list read, so the selector keeps its counts current.
-  useEffect(() => {
-    if (list?.projects !== undefined) setProjects(list.projects);
-  }, [list]);
+  }, [query, categoryFilter, entityFilter, sort, loadList, language]);
 
   // Embedding coverage is a Provider fact, read once per page open; the settings card shows it.
   useEffect(() => {
@@ -933,10 +969,10 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
   const [createError, setCreateError] = useState<string | null>(null);
   const [createDraft, setCreateDraft] = useState<CreateDraft>(EMPTY_CREATE_DRAFT);
 
-  /** 「整理记忆」: a natural-language instruction plus the scope it may act on. */
+  /** 「整理记忆」: a natural-language instruction plus a workspace for an archive write. */
   const [organizing, setOrganizing] = useState(false);
   const [organizeInstruction, setOrganizeInstruction] = useState('');
-  const [organizeScope, setOrganizeScope] = useState<string | null>(null);
+  const [organizeWorkspace, setOrganizeWorkspace] = useState<string | null>(null);
   const [organizeBusy, setOrganizeBusy] = useState(false);
   const [organizeError, setOrganizeError] = useState<string | null>(null);
   const [organizeItems, setOrganizeItems] = useState<UiOrganizeItem[] | null>(null);
@@ -969,7 +1005,6 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
         ...(createDraft.importance === '' ? {} : { importance: Number(createDraft.importance) }),
         ...(toList(createDraft.tags).length === 0 ? {} : { tags: toList(createDraft.tags) }),
         ...(toList(createDraft.entities).length === 0 ? {} : { entities: toList(createDraft.entities) }),
-        ...(createDraft.projectId === '' ? {} : { projectId: createDraft.projectId }),
         ...(createDraft.reason.trim() === '' ? {} : { reason: createDraft.reason.trim() }),
       };
       const result = organize
@@ -986,12 +1021,11 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
         await loadList({ query, category: categoryFilter, entity: entityFilter, sort, append: false });
         setMemoryView('content');
         setSelectedId(result.entryId);
-      } else if (result.kind === 'runtime') {
+      } else if (result.kind === 'rule') {
         await Promise.all([api.rules(), api.ruleUsage()]).then(([items, usage]) => { setRules(items); setRuleUsage(usage); setRulesError(null); },
           failure => { setRules(null); setRulesError(failureText(failure, language)); });
       } else {
-        await Promise.all([api.archives(), api.archiveCapacities()]).then(([items, capacities]) => { setArchives(items); setArchiveCapacities(capacities); setArchivesError(null); },
-          failure => { setArchives(null); setArchivesError(failureText(failure, language)); });
+        await loadArchives();
         setArchiveId(result.entryId);
       }
     } catch (failure) {
@@ -1128,14 +1162,13 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     } finally { setSkillBusy(false); }
   }, [api, language, loadSkills]);
 
-  const beginOrganize = useCallback((): void => {    setOrganizeInstruction('');
-    // The page's current project filter is the default scope; "all projects" is not a scope the
-    // task can act in, so it falls back to general memory.
-    setOrganizeScope(typeof projectFilter === 'string' ? projectFilter : null);
+  const beginOrganize = useCallback((): void => {
+    setOrganizeInstruction('');
+    setOrganizeWorkspace(selectedWorkspace);
     setOrganizeItems(null);
     setOrganizeError(null);
     setOrganizing(true);
-  }, [projectFilter]);
+  }, [selectedWorkspace]);
 
   const runOrganize = useCallback(async (): Promise<void> => {
     const instruction = organizeInstruction.trim();
@@ -1143,7 +1176,7 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     setOrganizeBusy(true);
     setOrganizeError(null);
     try {
-      const result = await api.organizeMemories({ instruction, ...(organizeScope === null ? {} : { projectId: organizeScope }) });
+      const result = await api.organizeMemories({ instruction, ...(organizeWorkspace === null ? {} : { workspaceId: organizeWorkspace }) });
       setOrganizeItems(result.items);
       await loadList({ query, category: categoryFilter, entity: entityFilter, sort, append: false });
     } catch (failure) {
@@ -1151,7 +1184,7 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     } finally {
       setOrganizeBusy(false);
     }
-  }, [api, organizeInstruction, organizeBusy, organizeScope, query, categoryFilter, entityFilter, sort, loadList, language]);
+  }, [api, organizeInstruction, organizeBusy, organizeWorkspace, query, categoryFilter, entityFilter, sort, loadList, language]);
 
   /**
    * Rule writes use the same identity as memory writes: the service token plus this Host. The
@@ -1195,13 +1228,70 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     const updated = await api.setArchiveState({ entryId, state, baseVersion });
     setArchives(previous => previous?.map(item => item.entryId === entryId ? updated : item));
     setNotice(translate(language, state === 'archived' ? 'archives.archive' : 'archives.restore'));
+    const workspaceId = updated.workspaceId;
     const [capacities, history] = await Promise.all([
-      api.archiveCapacities().catch(() => null),
+      api.archiveCapacities(workspaceId).catch(() => null),
       api.archiveHistory(entryId).catch(() => null),
     ]);
     if (capacities !== null) setArchiveCapacities(capacities);
     setArchiveHistory(history);
   }, [api, language]);
+
+  /**
+   * 「提炼为正式记忆」 state. A preview creates a draft and writes nothing; the confirmation is the
+   * only publishing action, and the task id is minted once so a retry returns the original receipt.
+   */
+  const [distillation, setDistillation] = useState<{
+    draft: import('../shared/contract.ts').UiDistillationDraft | null;
+    skip: import('../shared/contract.ts').UiDistillationSkip | null;
+    busy: boolean;
+    result: import('../shared/contract.ts').UiDistillationResult | null;
+    error: string | null;
+    /** 「提炼后归档」: the user confirmed the archive of the source as well as the draft. */
+    thenArchive: boolean;
+  } | null>(null);
+  const startDistillation = useCallback(async (entryId: string): Promise<void> => {
+    setDistillation({ draft: null, skip: null, busy: true, result: null, error: null, thenArchive: false });
+    try {
+      const answer = await api.distillArchive(entryId);
+      setDistillation(answer.kind === 'skip'
+        ? { draft: null, skip: answer, busy: false, result: null, error: null, thenArchive: false }
+        : { draft: answer, skip: null, busy: false, result: null, error: null, thenArchive: false });
+    } catch (error) {
+      setDistillation({ draft: null, skip: null, busy: false, result: null, error: error instanceof Error ? error.message : String(error), thenArchive: false });
+    }
+  }, [api]);
+  const confirmDistillation = useCallback(async (): Promise<void> => {
+    if (distillation?.draft === null || distillation?.draft === undefined) return;
+    const { draft, thenArchive } = distillation;
+    setDistillation(previous => previous === null ? previous : { ...previous, busy: true, error: null });
+    try {
+      // The draft id is the task id, so a retry after a transport failure returns the first receipt.
+      const result = await api.confirmDistillation({ draftId: draft.draftId });
+      setDistillation(previous => previous === null ? previous : { ...previous, busy: false, result });
+      if (result.status !== 'published' && result.status !== 'duplicate') {
+        // A queued, unknown, review or failed result does not advance the archive step: the
+        // source keeps its capacity until the memory is actually published or confirmed a duplicate.
+        return;
+      }
+      setNotice(translate(language, result.status === 'published' ? 'archives.distillDone' : 'archives.distillDuplicate'));
+      if (!thenArchive) return;
+      // The user confirmed both steps. The archive carries the version read at preview time, so a
+      // source edited in between keeps its newest text and the conflict is reported.
+      const source = archivesRef.current?.find(item => item.entryId === draft.source.entryId);
+      if (source === undefined) return;
+      try {
+        const archived = await api.setArchiveState({ entryId: source.entryId, state: 'archived', baseVersion: source.version });
+        setArchives(previous => previous?.map(item => item.entryId === archived.entryId ? archived : item));
+        setNotice(translate(language, 'archives.archive'));
+        void loadArchives();
+      } catch (failure) {
+        setArchivesError(failureText(failure, language));
+      }
+    } catch (error) {
+      setDistillation(previous => previous === null ? previous : { ...previous, busy: false, error: error instanceof Error ? error.message : String(error) });
+    }
+  }, [api, distillation, language, loadArchives]);
 
   /**
    * Load the entity index for the current filters. A one-row page is enough: the Server builds
@@ -1370,15 +1460,6 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
    */
   const selectMemory = useCallback((memoryId: string): void => {
     setSelectedId(memoryId);
-  }, []);
-
-  /**
-   * Change the management page's project. The ref is updated before React renders so the next
-   * list read already carries the new filter; the debounced search effect then reloads.
-   */
-  const changeProject = useCallback((next: string | null | undefined): void => {
-    projectRef.current = next;
-    setProjectFilter(next);
   }, []);
 
   const changeTab = useCallback((next: Tab): void => {
@@ -1590,11 +1671,9 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     setExploreError(null);
     try {
       setExploreLimit(limit);
-      const project = projectRef.current;
-      setExplore(await api.explore({
-        query: text, limit, minScore: exploreMinScore,
-        ...(project === undefined || project === null ? {} : { projectId: project }),
-      }));
+      // No project or workspace narrowing exists: the exploratory search covers the shared
+      // collection. Keep whatever the user typed as the query.
+      setExplore(await api.explore({ query: text, limit, minScore: exploreMinScore }));
     } catch (failure) {
       setExploreError(failureText(failure, language));
     } finally {
@@ -1679,9 +1758,6 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
           active={memoryView}
           creating={creating}
           saving={saving}
-          projects={projects}
-          project={projectFilter}
-          onProject={changeProject}
           onSelect={changeMemoryView}
           onCreate={beginCreate}
           onOrganize={beginOrganize}
@@ -1889,15 +1965,15 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
               />
             </label>
             <label className="mwui-field">
-              <span>{translate(language, 'organize.scope')}</span>
+              <span>{translate(language, 'organize.workspace')}</span>
               <select
                 className="mwui-input mwui-select"
-                value={organizeScope ?? ''}
-                onChange={event => setOrganizeScope(event.target.value === '' ? null : event.target.value)}
+                value={organizeWorkspace ?? ''}
+                onChange={event => setOrganizeWorkspace(event.target.value === '' ? null : event.target.value)}
               >
-                <option value="">{translate(language, 'organize.general')}</option>
-                {projects.filter(entry => entry.projectId !== null).map(entry => (
-                  <option key={entry.projectId!} value={entry.projectId!}>{entry.projectId!}</option>
+                <option value="">{translate(language, 'organize.noWorkspace')}</option>
+                {workspaces.map(workspace => (
+                  <option key={workspace.workspaceId} value={workspace.workspaceId}>{workspace.name}</option>
                 ))}
               </select>
             </label>
@@ -1945,7 +2021,6 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
             busy={saving}
             error={createError}
             language={language}
-            projects={projects}
             onChange={patch => setCreateDraft(current => ({ ...current, ...patch }))}
             onCancel={closeCreate}
             onSubmit={() => { void submitCreate(); }}
@@ -2011,12 +2086,31 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
       ) : tab === 'runtime' ? (
         <RuntimePanel rules={rules} usage={ruleUsage} error={rulesError} selected={ruleId} language={language} onSelect={setRuleId} onCreate={submitRule} onSave={saveRule} />
       ) : tab === 'archives' ? (
-        <ArchivesPanel archives={archives} capacities={archiveCapacities} history={archiveHistory} error={archivesError} selected={archiveId} language={language} onSelect={setArchiveId} onSetState={changeArchiveState} onSave={async (draft, target) => {
-          const saved = await api.saveArchive({ ...draft, ...(target ? { entryId: target.entryId, baseVersion: target.version } : {}) });
-          setArchives(previous => previous?.some(item => item.entryId === saved.entryId)
-            ? previous.map(item => item.entryId === saved.entryId ? saved : item)
-            : [saved, ...(previous ?? [])]);
-          setArchiveId(saved.entryId);
+        <ArchivesPanel archives={archives} capacities={archiveCapacities} history={archiveHistory} error={archivesError} selected={archiveId} language={language} workspaces={workspaces} workspace={selectedWorkspace} onWorkspace={setSelectedWorkspace} onSelect={entryId => { setArchiveId(entryId); setDistillation(null); }} onSetState={changeArchiveState} distillation={distillation === null ? null : {
+          draft: distillation.draft, skip: distillation.skip, busy: distillation.busy,
+          result: distillation.result, error: distillation.error,
+          onStart: entryId => { void startDistillation(entryId); },
+          onConfirm: () => { void confirmDistillation(); },
+          onDiscard: () => { setDistillation(null); },
+          thenArchive: distillation.thenArchive,
+          onToggleThenArchive: enabled => { setDistillation(previous => previous === null ? previous : { ...previous, thenArchive: enabled }); },
+        }} releaseCandidates={releaseCandidates} showReleaseCandidates={capacityRefused || (releaseCandidates?.capacity.exceeded ?? false)} onSave={async (draft, target) => {
+          try {
+            const saved = await api.saveArchive({ ...draft, ...(target ? { entryId: target.entryId, baseVersion: target.version } : {}) });
+            setArchives(previous => previous?.some(item => item.entryId === saved.entryId)
+              ? previous.map(item => item.entryId === saved.entryId ? saved : item)
+              : [saved, ...(previous ?? [])]);
+            setArchiveId(saved.entryId);
+            setCapacityRefused(false);
+          } catch (failure) {
+            // A refused write keeps the draft in the form; the capacity section then offers the
+            // archives whose release would make room.
+            if (failure instanceof Error && failure.message.includes('ARCHIVE_CAPACITY_EXCEEDED')) {
+              setCapacityRefused(true);
+              void loadArchives();
+            }
+            throw failure;
+          }
         }} />
       ) : tab === 'skills' ? (
         <>
@@ -2028,7 +2122,7 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
             selected={selectedSkill?.path ?? null}
             onSelect={entry => { void selectSkill(entry); }}
             versions={skillVersionsState}
-            roots={skillsReport?.roots}
+            roots={skillsReport?.roots ?? []}
             onRestore={versionId => { void restoreSkillVersion(versionId); }}
             onCreate={input => { void createSkillFile(input); }}
             busy={skillBusy}

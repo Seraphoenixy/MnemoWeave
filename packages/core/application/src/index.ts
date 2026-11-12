@@ -1,67 +1,73 @@
-import { mayRead, mayReadMemory, assertGrant, assertProjectReadable } from './access.ts';
+import { createHash } from 'node:crypto';
+import { MnemoWeaveError } from '../../contracts/src/index.ts';
+import {
+  CandidateIdInput, ConflictIdInput, ConflictResolutionInput, HumanReviewInput, MemoryIdInput,
+  PublishedMemoryOutput, RecallInput, RecallOutput, RememberInput, RetryInput, CancelVersionInput,
+  ReviewCompleteInput, ReviewDueItem, ReviewDueOutput, EmbeddingDiagnostics, ProviderHealth,
+} from '../../contracts/src/index.ts';
+import type {
+  CandidateRecord, ConflictResolutionRequest, EmbeddingDiagnosticsRecord, Health, ProviderEmbeddingStatusRecord,
+  RecallResult, RememberRequest, ReviewDueItemRecord,
+} from '../../contracts/src/index.ts';
+import type { MemoryCatalogReader } from './catalog-ports.ts';
+import type { WorkflowRepository } from './workflow-ports.ts';
 
 export * from './sync.ts';
 export * from './sync-apply.ts';
 export * from './rules.ts';
 export * from './idle-review.ts';
 export * from './local-write.ts';
-import type { ReadGrantRecord } from '../../contracts/src/index.ts';
-import { MnemoWeaveError, RecallInput, RecallOutput, ProviderHealth, RememberInput, CandidateIdInput, HumanReviewInput, RetryInput, MemoryIdInput, PublishedMemoryOutput,ConflictResolutionInput,ConflictIdInput,CancelVersionInput, ReviewCompleteInput, ReviewDueItem, ReviewDueOutput, EmbeddingDiagnostics } from '../../contracts/src/index.ts';
-import type {ConflictResolutionRequest} from '../../contracts/src/index.ts';
-import type { EmbeddingDiagnosticsRecord, ProviderEmbeddingStatusRecord, ReviewDueItemRecord } from '../../contracts/src/index.ts';
-import { createHash } from 'node:crypto';
-import type { MemoryCatalogReader } from './catalog-ports.ts';
-import type { WorkflowRepository } from './workflow-ports.ts';
-import type { RecallRequest, RecallResult, Health } from '../../contracts/src/index.ts';
-import type { CandidateRecord, RememberRequest } from '../../contracts/src/index.ts';
+export * from './turn-budget.ts';
 
 export interface MemoryProvider {
   health(): Promise<Health>;
-  recall(request: RecallRequest): Promise<RecallResult>;
+  recall(request: { query: string; limit: number }): Promise<RecallResult>;
   /** Official embedding coverage report; absent when the Provider has no such interface. */
   embeddingStatus?(): Promise<ProviderEmbeddingStatusRecord>;
   /** Backfill missing vectors; absent when the Provider cannot do it. */
   embedAll?(): Promise<{ error: string | null }>;
   readMemory?(id: string): Promise<{ id: string; content: string }>;
-  /**
-   * Read several bodies in one call. Optional so a test provider can omit it; the list view uses
-   * it to avoid one process per visible row.
-   */
+  /** Read several bodies in one call, so a page does not pay one process per visible row. */
   readMany?(ids: string[]): Promise<{ id: string; content: string }[]>;
 }
-/** Owns only candidate/governance data; never reads Provider tables. */
+/** Owns candidate and governance data; never reads Provider tables. */
 export interface CandidateRepository {
   submit(request: RememberRequest): CandidateRecord;
   get(candidateId: string): CandidateRecord;
   readonly catalog?: MemoryCatalogReader;
-  /** Synced version of a logical memory; absent when sync has never applied it (version 0). */
   entryVersion?(memoryId: string): number;
 }
 export interface ReviewRepository extends CandidateRepository, WorkflowRepository {
   amend(id: string, request: RememberRequest, actor: string, reason: string): CandidateRecord;
-  resolveConflict(input:ConflictResolutionRequest,actor:string):CandidateRecord;
-  cancelVersion(candidateId:string,actor:string,reason:string):CandidateRecord;
-  /** KNOWLEDGE-01 review queue and completion (optional so test stores can omit it). */
+  resolveConflict(input: ConflictResolutionRequest, actor: string): CandidateRecord;
+  cancelVersion(candidateId: string, actor: string, reason: string): CandidateRecord;
   reviewDue?(now?: Date): ReviewDueItemRecord[];
   completeReview?(memoryId: string, actor: string, reason: string, now?: Date): ReviewDueItemRecord;
 }
+
+/**
+ * Application Core.
+ *
+ * Formal memories are one shared collection: recall, listing, the graph and detail never take a
+ * workspace and never filter by one. The Provider ranks and the catalog maps, so what a caller
+ * reads is the same set on every authorized device.
+ */
 export class MemoryApplication {
   private readonly provider: MemoryProvider;
   private readonly candidates: CandidateRepository | undefined;
   private readonly reviewRepository: ReviewRepository | undefined;
-  constructor(provider: MemoryProvider, candidates?: CandidateRepository, reviewRepository?: ReviewRepository) { this.provider = provider; this.candidates = candidates; this.reviewRepository = reviewRepository; }
+  constructor(provider: MemoryProvider, candidates?: CandidateRepository, reviewRepository?: ReviewRepository) {
+    this.provider = provider; this.candidates = candidates; this.reviewRepository = reviewRepository;
+  }
   get acceptsCandidates(): boolean { return this.candidates !== undefined; }
-  /** Publication metadata reader for View assembly; undefined without candidate storage. */
   get catalogReader(): MemoryCatalogReader | undefined { return this.candidates?.catalog; }
   async health(): Promise<Health> { return ProviderHealth.parse(await this.provider.health()); }
 
   /**
    * Recall diagnosis: what the Provider reports about its embedding backend, interpreted into a
-   * recall mode. The Server does not probe the embedding service itself; it only reports the
-   * Provider's own answer and says `unknown` when the interface cannot answer.
+   * recall mode. The Server does not probe the embedding service itself.
    */
-  async embeddingDiagnostics(grant?: ReadGrantRecord): Promise<EmbeddingDiagnosticsRecord> {
-    if (grant) { assertGrant(grant); if (!mayRead(grant)) throw new MnemoWeaveError('UNAUTHORIZED'); }
+  async embeddingDiagnostics(): Promise<EmbeddingDiagnosticsRecord> {
     const checkedAt = new Date().toISOString();
     const unknown = (lastError: string) => EmbeddingDiagnostics.parse({
       provider: 'mnemon', model: 'unknown', protocol: 'unknown', serviceAvailable: false, modelAvailable: false,
@@ -89,118 +95,88 @@ export class MemoryApplication {
       checkedAt,
     });
   }
-  async recall(input: unknown, grant?: ReadGrantRecord): Promise<RecallResult> {
-    const { unregistered: _unregistered, ...result } = await this.recallDetailed(input, grant);
+
+  async recall(input: unknown): Promise<RecallResult> {
+    const { unregistered: _unregistered, ...result } = await this.recallDetailed(input);
     return result;
   }
 
   /**
-   * Recall plus the Provider ids this machine never published. The View reports them as
-   * `excluded: 'unregistered'` instead of dropping them silently; `/v1/recall` keeps the
-   * wire shape and does not expose the extra list.
+   * Recall plus the Provider ids this machine never published. Provider hits that have no
+   * catalog entry are reported rather than silently dropped; withdrawn and superseded catalog
+   * entries are excluded before the Provider window is walked, so a page is not consumed by
+   * rows the caller could not read anyway.
    */
-  async recallDetailed(input: unknown, grant?: ReadGrantRecord): Promise<RecallResult & { unregistered: string[] }> {
-    if (grant) assertGrant(grant);
+  async recallDetailed(input: unknown): Promise<RecallResult & { unregistered: string[] }> {
     const request = RecallInput.parse(input);
-    if (grant) assertProjectReadable(grant, request.projectId);
-    /**
-     * General knowledge plus the requested project. A project memory is never returned to a
-     * session working elsewhere, even when the Provider ranked it highly. A catalogue that does
-     * not record attribution (older test doubles) is treated as general-only.
-     */
-    const ownerOf = (logicalId: string): string | null => this.candidates?.catalog?.memoryProject?.(logicalId) ?? null;
-    const inScope = (logicalId: string): boolean => {
-      const owner = ownerOf(logicalId);
-      if (owner === null) return true;
-      return owner === request.projectId;
-    };
-    if (this.candidates?.catalog) {
-      // Filter-first pagination: expand the Provider window until the requested page is
-      // filled from the visible set or the Provider list is exhausted, so a large visible
-      // pool can no longer push matching results out of a fixed 100-record fetch.
-      const catalog = this.candidates.catalog;
-      const visible = new Set(catalog.visibleProviderIds().filter(id => !grant || catalog.currentMemoryIds(id).some(logicalId => {
-        if (!mayReadMemory(grant, ownerOf(logicalId))) return false;
-        return inScope(logicalId);
-      })));
-      const unmatched = new Set<string>();
-      const page = 100;
-      const maxWindow = 1000;
-      const selected: RecallResult['memories'] = [];
-      const picked = new Set<string>();
-      let window = page;
-      let exhausted = false;
-      while (selected.length < request.limit && !exhausted && window <= maxWindow) {
-        const raw = await this.provider.recall({ query: request.query, limit: window });
-        exhausted = raw.memories.length < window;
-        for (const memory of raw.memories) {
-          if (selected.length >= request.limit) break;
-          if (!visible.has(memory.id)) { if (catalog.currentMemoryIds(memory.id).length === 0) unmatched.add(memory.id); continue; }
-          if (picked.has(memory.id)) continue;
-          picked.add(memory.id);
-          selected.push(memory);
+    if (!this.candidates?.catalog) return { ...RecallOutput.parse(await this.provider.recall(request)), unregistered: [] };
+    const catalog = this.candidates.catalog;
+    // A Provider id is visible when it anchors at least one active logical memory.
+    const visible = new Set(catalog.visibleProviderIds());
+    const unmatched = new Set<string>();
+    const page = 100;
+    const maxWindow = 1000;
+    const selected: RecallResult['memories'] = [];
+    const picked = new Set<string>();
+    let window = page;
+    let exhausted = false;
+    while (selected.length < request.limit && !exhausted && window <= maxWindow) {
+      const raw = await this.provider.recall({ query: request.query, limit: window });
+      exhausted = raw.memories.length < window;
+      for (const memory of raw.memories) {
+        if (selected.length >= request.limit) break;
+        if (!visible.has(memory.id)) {
+          if (catalog.currentMemoryIds(memory.id).length === 0) unmatched.add(memory.id);
+          continue;
         }
-        window += page;
+        if (picked.has(memory.id)) continue;
+        picked.add(memory.id);
+        selected.push(memory);
       }
-      if (grant) assertGrant(grant);
-      const authorized = selected.flatMap((memory) => {
-        const logicalIds = catalog.currentMemoryIds(memory.id);
-        const readable = grant
-          ? logicalIds.filter(id => catalog.get(id).state === 'active' && mayReadMemory(grant, ownerOf(id)))
-          : logicalIds;
-        const chosen = readable.find(id => inScope(id));
-        if (chosen === undefined) return [];
-        return [{ ...memory, projectId: ownerOf(chosen) }];
-      });
-      return { ...RecallOutput.parse({ memories: authorized, complete: exhausted }), unregistered: [...unmatched] };
+      window += page;
     }
-    if (grant) throw new MnemoWeaveError('REVIEW_REQUIRED');
-    return { ...RecallOutput.parse(await this.provider.recall(request)), unregistered: [] };
+    const authorized = selected.filter(memory => catalog.currentMemoryIds(memory.id)
+      .some(id => catalog.get(id).state === 'active'));
+    return { ...RecallOutput.parse({ memories: authorized, complete: exhausted }), unregistered: [...unmatched] };
   }
-  async remember(input: unknown, grant?: ReadGrantRecord): Promise<CandidateRecord> {
+
+  /** A candidate submission; the caller must already have a trusted turn binding. */
+  async remember(input: unknown): Promise<CandidateRecord> {
     if (!this.candidates) throw new MnemoWeaveError('REVIEW_REQUIRED');
-    const request = RememberInput.parse(input);
-    if (grant && !mayRead(grant)) throw new MnemoWeaveError('UNAUTHORIZED');
-    // Attribution is a write into that project's scope, so the writing Host must hold it.
-    if (grant) assertProjectReadable(grant, request.projectId ?? undefined);
-    if (grant && request.change) { if (!this.candidates.catalog?.get(request.change.targetMemoryId) || !mayRead(grant)) throw new MnemoWeaveError('UNAUTHORIZED'); }
-    return this.candidates.submit(request);
+    return this.candidates.submit(RememberInput.parse(input));
   }
-  async candidateStatus(input: unknown, grant?: ReadGrantRecord): Promise<CandidateRecord> {
+  async candidateStatus(input: unknown): Promise<CandidateRecord> {
     if (!this.candidates) throw new MnemoWeaveError('REVIEW_REQUIRED');
-    const candidate = this.candidates.get(CandidateIdInput.parse(input).candidateId);
-    if (grant) { assertGrant(grant); if (!mayRead(grant)) throw new MnemoWeaveError('UNAUTHORIZED'); }
-    return candidate;
+    return this.candidates.get(CandidateIdInput.parse(input).candidateId);
   }
-  async readMemory(input: unknown, grant?: ReadGrantRecord) {
+  async readMemory(input: unknown) {
     if (!this.candidates?.catalog || !this.provider.readMemory) throw new MnemoWeaveError('REVIEW_REQUIRED');
     const request = MemoryIdInput.parse(input);
     const descriptor = this.candidates.catalog.get(request.memoryId);
-    if (grant) { assertGrant(grant); if (!mayReadMemory(grant, descriptor.projectId ?? null)) throw new MnemoWeaveError('UNAUTHORIZED'); }
     const revisionId = request.revisionId ?? descriptor.currentRevisionId;
     const revision = descriptor.revisions.find(value => value.id === revisionId);
     if (!revision) throw new MnemoWeaveError('NOT_FOUND');
     const actual = await this.provider.readMemory(revision.providerMemoryId);
     if (actual.id !== revision.providerMemoryId || createHash('sha256').update(actual.content).digest('hex') !== revision.contentHash) throw new MnemoWeaveError('PROVIDER_INTEGRITY');
-    if (grant) assertGrant(grant);
-    const visible = descriptor;
-    return PublishedMemoryOutput.parse({ ...visible, selectedRevisionId: revisionId,selectedRevision:revision, content: actual.content, entryVersion: this.candidates.entryVersion?.(request.memoryId) ?? 0 });
+    return PublishedMemoryOutput.parse({
+      ...descriptor, selectedRevisionId: revisionId, selectedRevision: revision, content: actual.content,
+      entryVersion: this.candidates.entryVersion?.(request.memoryId) ?? 0,
+    });
   }
-  async readConflict(input:unknown, grant?: ReadGrantRecord){
-    if(!this.candidates?.catalog)throw new MnemoWeaveError('REVIEW_REQUIRED');
-    const record = this.candidates.catalog.getConflict(ConflictIdInput.parse(input).caseId);
-    if (grant) { assertGrant(grant); if (!mayRead(grant)) throw new MnemoWeaveError('UNAUTHORIZED'); }
-    return record;
+  async readConflict(input: unknown) {
+    if (!this.candidates?.catalog) throw new MnemoWeaveError('REVIEW_REQUIRED');
+    return this.candidates.catalog.getConflict(ConflictIdInput.parse(input).caseId);
   }
-  async resolveConflict(input:unknown,operator:string){
-    if(!this.reviewRepository)throw new MnemoWeaveError('REVIEW_REQUIRED');
-    return this.reviewRepository.resolveConflict(ConflictResolutionInput.parse(input),operator);
+  async resolveConflict(input: unknown, operator: string) {
+    if (!this.reviewRepository) throw new MnemoWeaveError('REVIEW_REQUIRED');
+    return this.reviewRepository.resolveConflict(ConflictResolutionInput.parse(input), operator);
   }
-  async cancelVersion(input:unknown,operator:string){
-    if(!this.reviewRepository)throw new MnemoWeaveError('REVIEW_REQUIRED');
-    const request=CancelVersionInput.parse(input);return this.reviewRepository.cancelVersion(request.candidateId,operator,request.reason);
+  async cancelVersion(input: unknown, operator: string) {
+    if (!this.reviewRepository) throw new MnemoWeaveError('REVIEW_REQUIRED');
+    const request = CancelVersionInput.parse(input);
+    return this.reviewRepository.cancelVersion(request.candidateId, operator, request.reason);
   }
-  /** KNOWLEDGE-01: due reviews stay visible and valid; completion only reschedules. */
+  /** Due reviews stay visible and valid; completion only reschedules. */
   async reviewDue() {
     if (!this.reviewRepository?.reviewDue) throw new MnemoWeaveError('REVIEW_REQUIRED');
     return ReviewDueOutput.parse({ items: this.reviewRepository.reviewDue() });
@@ -222,10 +198,7 @@ export class MemoryApplication {
         const record = value as { assessment?: { conflict?: string } | null };
         return record.assessment?.conflict && record.assessment.conflict !== 'none' && record.assessment.conflict !== 'different_scope';
       });
-      // Revision/replacement writes need their own design; do not turn unresolved conflicts into independent facts.
       if (conflicting && !candidate.request.change) throw new MnemoWeaveError('REVIEW_REQUIRED');
-      // Interception must not depend on review records: an unresolved conflict case on the
-      // target memory blocks any other candidate's new conclusion until it is adjudicated.
       const catalog = this.reviewRepository?.catalog ?? this.candidates?.catalog;
       if (candidate.request.change && catalog) {
         const target = catalog.get(candidate.request.change.targetMemoryId);

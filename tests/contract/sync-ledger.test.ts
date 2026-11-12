@@ -34,8 +34,7 @@ async function openLedger() {
 function draft(): SyncEntryDraftValue {
   return {
     entryId: randomUUID(),
-    kind: 'runtime',
-    scope: 'project:alpha',
+    kind: 'rule',
     content: plainContent('提交前必须运行类型检查。'),
     payload: { enabled: true },
     withdrawnAt: null,
@@ -47,7 +46,7 @@ function record(seq: number, overrides: Partial<SyncChangeRecordValue> = {}): Sy
   return {
     changeId: randomUUID(),
     entryId: entry.entryId,
-    scope: 'project:alpha',
+    stream: 'rules',
     version: seq,
     seq,
     operation: 'update',
@@ -58,10 +57,10 @@ function record(seq: number, overrides: Partial<SyncChangeRecordValue> = {}): Sy
   };
 }
 
-test('a scope cursor starts at zero, moves forward only and records errors', async () => {
+test('a stream cursor starts at zero, moves forward only and records errors', async () => {
   const { db, ledger } = await openLedger();
   try {
-    assert.deepEqual(ledger.state('project:alpha'), { scope: 'project:alpha', cursor: 0, lastPullAt: null, lastError: null });
+    assert.deepEqual(ledger.state('rules'), { stream: 'rules', cursor: 0, lastPullAt: null, lastError: null });
     ledger.setCursor('project:alpha', 4, NOW);
     assert.equal(ledger.cursor('project:alpha'), 4);
     ledger.setCursor('project:alpha', 2, NOW);
@@ -103,28 +102,28 @@ test('received changes are deduplicated and applied in sequence order', async ()
     assert.equal(ledger.receive(first, NOW), true);
     assert.equal(ledger.receive(first, NOW), false);
     ledger.receive(second, NOW);
-    assert.deepEqual(ledger.inbox('project:alpha').map((row) => row.seq), [1, 2]);
-    assert.equal(ledger.inbox('project:alpha')[0]?.entry.version, 1);
-    ledger.markInbox('project:alpha', 1, 'applied');
-    assert.deepEqual(ledger.inbox('project:alpha').map((row) => row.seq), [2]);
-    assert.deepEqual(ledger.progress('project:alpha', 0), [{ seq: 1, applied: true }, { seq: 2, applied: false }]);
-    ledger.markInbox('project:alpha', 2, 'needs_review', 'WRITE_UNKNOWN');
-    assert.deepEqual(ledger.progress('project:alpha', 0), [{ seq: 1, applied: true }, { seq: 2, applied: false }]);
-    assert.equal(ledger.inbox('project:alpha')[0]?.state, 'needs_review');
+    assert.deepEqual(ledger.inbox('rules').map((row) => row.seq), [1, 2]);
+    assert.equal(ledger.inbox('rules')[0]?.entry.version, 1);
+    ledger.markInbox('rules', 1, 'applied');
+    assert.deepEqual(ledger.inbox('rules').map((row) => row.seq), [2]);
+    assert.deepEqual(ledger.progress('rules', 0), [{ seq: 1, applied: true }, { seq: 2, applied: false }]);
+    ledger.markInbox('rules', 2, 'needs_review', 'WRITE_UNKNOWN');
+    assert.deepEqual(ledger.progress('rules', 0), [{ seq: 1, applied: true }, { seq: 2, applied: false }]);
+    assert.equal(ledger.inbox('rules')[0]?.state, 'needs_review');
   } finally {
     db.close();
   }
 });
 
-test('scopes keep independent cursors and inboxes', async () => {
+test('streams keep independent cursors and inboxes', async () => {
   const { db, ledger } = await openLedger();
   try {
-    ledger.setCursor('global', 3, NOW);
-    ledger.receive(record(1, { scope: 'global' }), NOW);
-    assert.equal(ledger.cursor('global'), 3);
-    assert.equal(ledger.cursor('project:alpha'), 0);
-    assert.equal(ledger.inbox('project:alpha').length, 0);
-    assert.equal(ledger.inbox('global').length, 1);
+    ledger.setCursor('formal-memories', 3, NOW);
+    ledger.receive(record(1, { stream: 'formal-memories' }), NOW);
+    assert.equal(ledger.cursor('formal-memories'), 3);
+    assert.equal(ledger.cursor('rules'), 0);
+    assert.equal(ledger.inbox('rules').length, 0);
+    assert.equal(ledger.inbox('formal-memories').length, 1);
   } finally {
     db.close();
   }
@@ -135,13 +134,13 @@ test('a snapshot reset drops covered inbox rows and clears the previous error', 
   try {
     ledger.receive(record(1), NOW);
     ledger.receive(record(2), NOW);
-    ledger.receive(record(3, { scope: 'global' }), NOW);
-    ledger.setError('project:alpha', 'SNAPSHOT_REQUIRED', NOW);
-    ledger.resetScope('project:alpha', 2, NOW);
-    assert.equal(ledger.cursor('project:alpha'), 2);
-    assert.equal(ledger.inbox('project:alpha').length, 0);
-    assert.equal(ledger.inbox('global').length, 1, 'other scopes keep their rows');
-    assert.equal(ledger.state('project:alpha').lastError, null);
+    ledger.receive(record(3, { stream: 'formal-memories' }), NOW);
+    ledger.setError('rules', 'SNAPSHOT_REQUIRED', NOW);
+    ledger.resetScope('rules', 2, NOW);
+    assert.equal(ledger.cursor('rules'), 2);
+    assert.equal(ledger.inbox('rules').length, 0);
+    assert.equal(ledger.inbox('formal-memories').length, 1, 'other streams keep their rows');
+    assert.equal(ledger.state('rules').lastError, null);
   } finally {
     db.close();
   }

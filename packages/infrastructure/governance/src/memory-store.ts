@@ -3,17 +3,16 @@ import { randomUUID } from 'node:crypto';
 import { DiagnosticJob, MnemoWeaveError, RememberInput } from '../../../core/contracts/src/index.ts';
 import type { DiagnosticJobRecord, InjectionReportRecord } from '../../../core/contracts/src/index.ts';
 import type { FormalMapRow, LocalArchiveRow, LocalRuleRow, MemoryApplyStore, SyncedPublish } from '../../../core/application/src/sync-apply.ts';
-import { archiveActiveBytes, archiveUsage, maintain, ruleUsage } from '../../../core/application/src/rules.ts';
-import type { RuleArchiveRow, RuleLimits, RuleMaintenancePlan } from '../../../core/application/src/rules.ts';
+import { archiveActiveBytes, archiveUsage, ruleUsage } from '../../../core/application/src/rules.ts';
+import type { RuleArchiveRow, RuleLimits } from '../../../core/application/src/rules.ts';
 import type { SqliteMemoryCatalog } from './catalog.ts';
 
 /**
- * Local storage for the three memory classes (schema v16).
+ * Local storage for the three memory classes.
  *
- * Runtime rules and project archives live here as the working copy; the remote
- * keeps the confirmed version. Formal memories keep only this machine's mapping
- * from logical revision to the local Mnemon id — never the body, which stays
- * authoritative in Mnemon.
+ * Rules and workspace archives live here as the working copy; the remote keeps the confirmed
+ * version. Formal memories keep only this machine's mapping from logical revision to the local
+ * Mnemon id — never the body, which stays authoritative in Mnemon.
  */
 
 type Transaction = <T>(operation: () => T) => T;
@@ -24,12 +23,12 @@ interface RuleDbRow {
 }
 
 interface ArchiveDbRow {
-  entry_id: string; project_id: string; title: string; body: string; source: string; verification: string;
+  entry_id: string; workspace_id: string; title: string; body: string; source: string; verification: string;
   evidence: string; version: number; withdrawn_at: string | null; state: string; archived_at: string | null; updated_at: string;
 }
 
 interface ArchiveRevisionDbRow {
-  revision_id: string; entry_id: string; project_id: string; version: number; title: string; body: string; source: string;
+  revision_id: string; entry_id: string; workspace_id: string; version: number; title: string; body: string; source: string;
   verification: string; evidence: string; state: string; archived_at: string | null; recorded_at: string;
 }
 
@@ -47,7 +46,7 @@ function ruleFrom(row: RuleDbRow): LocalRuleRow {
 
 function archiveFrom(row: ArchiveDbRow): LocalArchiveRow {
   return {
-    entryId: row.entry_id, projectId: row.project_id, title: row.title, body: row.body,
+    entryId: row.entry_id, workspaceId: row.workspace_id, title: row.title, body: row.body,
     source: row.source, verification: row.verification as LocalArchiveRow['verification'],
     evidence: row.evidence, version: row.version, withdrawnAt: row.withdrawn_at,
     state: row.state as LocalArchiveRow['state'], archivedAt: row.archived_at, updatedAt: row.updated_at,
@@ -92,8 +91,8 @@ export class SqliteMemoryStore implements MemoryApplyStore {
   }
 
   /**
-   * A synced formal revision becomes a local catalog revision, so the memory is
-   * visible and editable on this machine. Provenance records that it arrived by sync.
+   * A synced formal revision becomes a local catalog revision, so the memory is visible and
+   * editable on this machine. Provenance records that it arrived by sync.
    */
   publishSynced(input: SyncedPublish): void {
     if (!this.catalog) return;
@@ -102,21 +101,19 @@ export class SqliteMemoryStore implements MemoryApplyStore {
       content: input.content,
       knowledgeType: 'Practice',
       tags: input.tags,
-      ...(input.projectId === null ? {} : { projectId: input.projectId }),
       provenance: {
         source: 'sync',
         sourceReference: `mnemoweave:${input.entryId}:${input.version}`,
         evidence: [`synced from the shared server at ${input.at}`],
         verificationStatus: 'verified',
         confidence: 1,
-        applicability: 'global',
+        applicability: 'shared collection',
         limitations: '内容由其他设备写入，本机未重新审核',
         lastVerified: input.at,
       },
     });
-    // The classification comes from the entry payload, not from the synthetic request: a synced
-    // entry knows its category, importance and entities, and the `knowledgeType: 'Practice'` above
-    // is only a schema placeholder that must not become the recorded classification.
+    // The classification comes from the entry payload, not from the synthetic request: the
+    // `knowledgeType: 'Practice'` above is only a schema placeholder.
     this.catalog.publishSynced(input.entryId, request, input.providerId, input.contentHash, input.at, 'sync', `synced revision ${input.version}`, {
       category: input.category,
       ...(input.importance === undefined ? {} : { importance: input.importance }),
@@ -133,7 +130,7 @@ export class SqliteMemoryStore implements MemoryApplyStore {
     this.db.prepare(`
       INSERT INTO runtime_rules(entry_id, body, scope, project_id, enabled, version, withdrawn_at, updated_at, importance, pinned, created_at, archived_at)
       VALUES(?, ?, 'global', NULL, ?, ?, ?, ?, ?, ?, ?, NULL)
-      ON CONFLICT(entry_id) DO UPDATE SET body=excluded.body, scope=excluded.scope, project_id=excluded.project_id,
+      ON CONFLICT(entry_id) DO UPDATE SET body=excluded.body, scope='global', project_id=NULL,
         enabled=excluded.enabled, version=excluded.version, withdrawn_at=excluded.withdrawn_at, updated_at=excluded.updated_at,
         importance=excluded.importance, pinned=excluded.pinned, archived_at=NULL
     `).run(row.entryId, row.body, row.enabled ? 1 : 0, row.version, row.withdrawnAt, at, row.importance ?? 'normal', row.pinned === true ? 1 : 0, row.createdAt ?? at);
@@ -143,31 +140,22 @@ export class SqliteMemoryStore implements MemoryApplyStore {
     this.transaction(() => this.persistRule(row, at));
   }
 
-  /** Apply a synced rule and archive lower-priority entries when the active set is full. */
-  applyRuleWithCapacity(row: LocalRuleRow, at: string, limits: RuleLimits): RuleArchiveRow[] {
-    return this.transaction(() => {
-      const existing = this.allRules();
-      const others = existing.filter(entry => entry.entryId !== row.entryId);
-      const plan = maintain([...others, { ...row, createdAt: row.createdAt ?? at }], row.entryId, limits, at);
-      this.persistRulePlan(plan, at);
-      return plan.archived;
+  /**
+   * Apply a synced rule. An inbound set that exceeds capacity is refused, not trimmed: local
+   * capacity maintenance is gone, so an over-capacity set is a protocol error to report rather
+   * than text to silently drop.
+   */
+  applyRuleWithCapacity(row: LocalRuleRow, at: string, limits: RuleLimits): void {
+    this.transaction(() => {
+      const merged = [...this.allRules().filter(entry => entry.entryId !== row.entryId), { ...row, createdAt: row.createdAt ?? at }];
+      if (ruleUsage(merged, limits).exceeded) throw new MnemoWeaveError('RULE_CAPACITY_EXCEEDED');
+      this.persistRule({ ...row, createdAt: row.createdAt ?? at }, at);
     });
   }
 
-  private persistRulePlan(plan: RuleMaintenancePlan, at: string): void {
-    for (const row of plan.active) this.persistRule(row, at);
-    for (const archived of plan.archived) {
-      this.db.prepare('UPDATE runtime_rules SET archived_at = ?, updated_at = ? WHERE entry_id = ?').run(archived.archivedAt, at, archived.ruleId);
-      this.db.prepare(`
-        INSERT OR IGNORE INTO runtime_rule_archive(archive_id, rule_id, rule_version, body, importance, pinned, archived_at, reason)
-        VALUES(?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(archived.archiveId, archived.ruleId, archived.ruleVersion, archived.body, archived.importance, archived.pinned ? 1 : 0, archived.archivedAt, archived.reason);
-    }
-  }
-
-  /** Persist a planned human write, including rules the maintenance pass moved out. */
-  saveRulePlan(plan: RuleMaintenancePlan, at: string): void {
-    this.transaction(() => this.persistRulePlan(plan, at));
+  /** Persist one user write: the rule row only; capacity is checked before this is called. */
+  saveRule(row: LocalRuleRow, at: string): void {
+    this.transaction(() => this.persistRule(row, at));
   }
 
   withdrawRule(entryId: string, at: string): void {
@@ -176,7 +164,7 @@ export class SqliteMemoryStore implements MemoryApplyStore {
     });
   }
 
-  /** Exact archived rule rows, newest first. */
+  /** Exact rule rows taken out of the resident set, newest first. */
   ruleArchive(): RuleArchiveRow[] {
     const rows = this.db.prepare(`
       SELECT archive_id, rule_id, rule_version, body, importance, pinned, archived_at, reason
@@ -189,56 +177,33 @@ export class SqliteMemoryStore implements MemoryApplyStore {
     }));
   }
 
+  /** Keep the exact text of a rule that left the resident set, so history stays readable. */
+  recordRuleArchive(row: RuleArchiveRow): void {
+    this.db.prepare(`
+      INSERT OR IGNORE INTO runtime_rule_archive(archive_id, rule_id, rule_version, body, importance, pinned, archived_at, reason)
+      VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(row.archiveId, row.ruleId, row.ruleVersion, row.body, row.importance, row.pinned ? 1 : 0, row.archivedAt, row.reason);
+  }
+
   private recordArchiveRevision(row: LocalArchiveRow, at: string): void {
     this.db.prepare(`
-      INSERT INTO project_archive_revisions(revision_id, entry_id, version, project_id, title, body, source, verification, evidence, state, archived_at, recorded_at)
+      INSERT INTO project_archive_revisions(revision_id, entry_id, version, workspace_id, title, body, source, verification, evidence, state, archived_at, recorded_at)
       VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(entry_id, version) DO UPDATE SET
         state=excluded.state, archived_at=excluded.archived_at, recorded_at=excluded.recorded_at
-    `).run(randomUUID(), row.entryId, row.version, row.projectId, row.title, row.body, row.source, row.verification, row.evidence, row.state ?? 'active', row.archivedAt ?? null, at);
+    `).run(randomUUID(), row.entryId, row.version, row.workspaceId, row.title, row.body, row.source, row.verification, row.evidence, row.state ?? 'active', row.archivedAt ?? null, at);
   }
 
   upsertArchive(row: LocalArchiveRow, at: string): void {
     this.transaction(() => {
       this.db.prepare(`
-        INSERT INTO project_archives(entry_id, project_id, title, body, source, verification, evidence, version, withdrawn_at, updated_at, state, archived_at)
+        INSERT INTO project_archives(entry_id, workspace_id, title, body, source, verification, evidence, version, withdrawn_at, updated_at, state, archived_at)
         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(entry_id) DO UPDATE SET project_id=excluded.project_id, title=excluded.title, body=excluded.body,
+        ON CONFLICT(entry_id) DO UPDATE SET workspace_id=excluded.workspace_id, title=excluded.title, body=excluded.body,
           source=excluded.source, verification=excluded.verification, evidence=excluded.evidence, version=excluded.version,
           withdrawn_at=excluded.withdrawn_at, updated_at=excluded.updated_at, state=excluded.state, archived_at=excluded.archived_at
-      `).run(row.entryId, row.projectId, row.title, row.body, row.source, row.verification, row.evidence, row.version, row.withdrawnAt, at, row.state ?? 'active', row.archivedAt ?? null);
+      `).run(row.entryId, row.workspaceId, row.title, row.body, row.source, row.verification, row.evidence, row.version, row.withdrawnAt, at, row.state ?? 'active', row.archivedAt ?? null);
       this.recordArchiveRevision(row, at);
-    });
-  }
-
-  /**
-   * Apply a synced archive. If the incoming body does not fit, least-recently-updated active
-   * archives of that project are archived locally until it does; the incoming text is never
-   * dropped. The local archive keeps every body and version.
-   */
-  applyArchiveWithCapacity(row: LocalArchiveRow, at: string, limitBytes: number): LocalArchiveRow[] {
-    return this.transaction(() => {
-      const projectRows = this.archivesFor(row.projectId, true);
-      const others = projectRows.filter(entry => entry.entryId !== row.entryId);
-      const activeOthers = others.filter(entry => entry.state !== 'archived');
-      if (row.state !== 'archived' && archiveActiveBytes(activeOthers) + Buffer.byteLength(row.body, 'utf8') > limitBytes) {
-        const archived: LocalArchiveRow[] = [];
-        let used = archiveActiveBytes(activeOthers);
-        const candidates = activeOthers
-          .slice()
-          .sort((left, right) => (left.updatedAt ?? '').localeCompare(right.updatedAt ?? '') || left.entryId.localeCompare(right.entryId));
-        for (const candidate of candidates) {
-          if (used + Buffer.byteLength(row.body, 'utf8') <= limitBytes) break;
-          const next: LocalArchiveRow = { ...candidate, state: 'archived', archivedAt: at, updatedAt: at };
-          this.upsertArchive(next, at);
-          archived.push(next);
-          used -= Buffer.byteLength(candidate.body, 'utf8');
-        }
-        this.upsertArchive(row, at);
-        return archived;
-      }
-      this.upsertArchive(row, at);
-      return [];
     });
   }
 
@@ -281,8 +246,8 @@ export class SqliteMemoryStore implements MemoryApplyStore {
 
   /**
    * The lowest mapped version above `baseVersion`, or null when this entry gained no mapping.
-   * A synced write is only successful once its revision has a local Provider mapping, so this
-   * is what an edit checks instead of trusting a possibly-dropped inbox row.
+   * A synced write is only successful once its revision has a local Provider mapping, so this is
+   * what an edit checks instead of trusting a possibly-dropped inbox row.
    */
   nextMappedVersion(entryId: string, baseVersion: number): number | null {
     const row = this.db.prepare(
@@ -293,9 +258,9 @@ export class SqliteMemoryStore implements MemoryApplyStore {
   }
 
   /**
-   * Provider id already recorded for this exact body, under any version. The origin machine
-   * writes the Provider before the remote assigns a version, so the same publication can be
-   * filed under different version numbers on the way out and back.
+   * Provider id already recorded for this exact body, under any version. The origin machine writes
+   * the Provider before the remote assigns a version, so the same publication can be filed under
+   * different version numbers on the way out and back.
    */
   formalProviderIdByHash(entryId: string, contentHash: string): string | null {
     const row = this.db.prepare(
@@ -309,7 +274,7 @@ export class SqliteMemoryStore implements MemoryApplyStore {
     return rows.map((row) => ({ entryId: row.entry_id, version: row.version, providerId: row.provider_id, contentHash: row.content_hash, state: row.state as FormalMapRow['state'], appliedAt: row.applied_at }));
   }
 
-  /** Enabled, non-withdrawn, non-archived rules; every rule applies to every session. */
+  /** Enabled, non-withdrawn rules; every rule applies to every session and is injected whole. */
   rulesFor(): LocalRuleRow[] {
     const rows = this.db.prepare(`
       SELECT entry_id, body, enabled, version, withdrawn_at, importance, pinned, created_at, archived_at FROM runtime_rules
@@ -319,7 +284,7 @@ export class SqliteMemoryStore implements MemoryApplyStore {
     return rows.map(ruleFrom);
   }
 
-  /** Every non-archived rule, disabled included: operator listing and budget checks need them. */
+  /** Every resident rule, disabled included: listing and the capacity check need them. */
   allRules(): LocalRuleRow[] {
     const rows = this.db.prepare(`
       SELECT entry_id, body, enabled, version, withdrawn_at, importance, pinned, created_at, archived_at FROM runtime_rules
@@ -329,15 +294,7 @@ export class SqliteMemoryStore implements MemoryApplyStore {
     return rows.map(ruleFrom);
   }
 
-  /** Every rule still in the active set, disabled included: the operator list shows them. */
-  everyRule(): LocalRuleRow[] {
-    const rows = this.db.prepare(`
-      SELECT entry_id, body, enabled, version, withdrawn_at, importance, pinned, created_at, archived_at FROM runtime_rules
-      WHERE withdrawn_at IS NULL AND archived_at IS NULL
-      ORDER BY created_at ASC, entry_id ASC
-    `).all() as unknown as RuleDbRow[];
-    return rows.map(ruleFrom);
-  }
+  everyRule(): LocalRuleRow[] { return this.allRules(); }
 
   rule(entryId: string): LocalRuleRow | null {
     const row = this.db.prepare('SELECT entry_id, body, enabled, version, withdrawn_at, importance, pinned, created_at, archived_at FROM runtime_rules WHERE entry_id = ? AND withdrawn_at IS NULL AND archived_at IS NULL').get(entryId) as RuleDbRow | undefined;
@@ -347,34 +304,34 @@ export class SqliteMemoryStore implements MemoryApplyStore {
   ruleUsage(limits?: RuleLimits) { return ruleUsage(this.allRules(), limits); }
 
   archive(entryId: string): LocalArchiveRow | null {
-    const row = this.db.prepare('SELECT entry_id, project_id, title, body, source, verification, evidence, version, withdrawn_at, state, archived_at, updated_at FROM project_archives WHERE entry_id = ?').get(entryId) as ArchiveDbRow | undefined;
+    const row = this.db.prepare('SELECT entry_id, workspace_id, title, body, source, verification, evidence, version, withdrawn_at, state, archived_at, updated_at FROM project_archives WHERE entry_id = ?').get(entryId) as ArchiveDbRow | undefined;
     return row ? archiveFrom(row) : null;
   }
 
-  archivesFor(projectId: string, includeWithdrawn = false): LocalArchiveRow[] {
+  archivesFor(workspaceId: string, includeWithdrawn = false): LocalArchiveRow[] {
     const rows = this.db.prepare(`
-      SELECT entry_id, project_id, title, body, source, verification, evidence, version, withdrawn_at, state, archived_at, updated_at FROM project_archives
-      WHERE project_id = ? ${includeWithdrawn ? '' : 'AND withdrawn_at IS NULL'}
+      SELECT entry_id, workspace_id, title, body, source, verification, evidence, version, withdrawn_at, state, archived_at, updated_at FROM project_archives
+      WHERE workspace_id = ? ${includeWithdrawn ? '' : 'AND withdrawn_at IS NULL'}
       ORDER BY updated_at DESC
-    `).all(projectId) as unknown as ArchiveDbRow[];
+    `).all(workspaceId) as unknown as ArchiveDbRow[];
     return rows.map(archiveFrom);
   }
 
-  /** Every archive across all projects, newest first. */
+  /** Every archive across all workspaces, grouped by workspace then newest first. */
   allArchives(includeWithdrawn = false): LocalArchiveRow[] {
     const rows = this.db.prepare(`
-      SELECT entry_id, project_id, title, body, source, verification, evidence, version, withdrawn_at, state, archived_at, updated_at FROM project_archives
+      SELECT entry_id, workspace_id, title, body, source, verification, evidence, version, withdrawn_at, state, archived_at, updated_at FROM project_archives
       ${includeWithdrawn ? '' : 'WHERE withdrawn_at IS NULL'}
-      ORDER BY project_id ASC, updated_at DESC
+      ORDER BY workspace_id ASC, updated_at DESC
     `).all() as unknown as ArchiveDbRow[];
     return rows.map(archiveFrom);
   }
 
-  archiveUsage(projectId: string, limitBytes?: number) { return archiveUsage(projectId, this.archivesFor(projectId, true), limitBytes); }
+  archiveUsage(workspaceId: string, limitBytes?: number) { return archiveUsage(workspaceId, this.archivesFor(workspaceId, true), limitBytes); }
 
   /** Search metadata without loading every body; the caller bounds excerpts and totals. */
-  searchArchives(projectId: string, query: string, includeArchived = false): LocalArchiveRow[] {
-    return this.archivesFor(projectId, false)
+  searchArchives(workspaceId: string, query: string, includeArchived = false): LocalArchiveRow[] {
+    return this.archivesFor(workspaceId, false)
       .filter(entry => includeArchived || entry.state !== 'archived')
       .filter(entry => entry.title.toLowerCase().includes(query.toLowerCase())
         || entry.body.toLowerCase().includes(query.toLowerCase())
@@ -387,11 +344,10 @@ export class SqliteMemoryStore implements MemoryApplyStore {
   }
 
   archiveHistory(entryId: string): ArchiveRevisionDbRow[] {
-    const rows = this.db.prepare(`
-      SELECT revision_id, entry_id, project_id, version, title, body, source, verification, evidence, state, archived_at, recorded_at
+    return this.db.prepare(`
+      SELECT revision_id, entry_id, workspace_id, version, title, body, source, verification, evidence, state, archived_at, recorded_at
       FROM project_archive_revisions WHERE entry_id = ? ORDER BY version DESC
     `).all(entryId) as unknown as ArchiveRevisionDbRow[];
-    return rows;
   }
 
   /** Append what one injection delivered; the newest row is the operator view. */

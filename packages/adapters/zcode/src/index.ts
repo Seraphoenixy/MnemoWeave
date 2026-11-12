@@ -52,7 +52,8 @@ export interface HandlerOptions {
   serverUrl: string;
   token: string;
   hostId: string;
-  projectId?: string;
+  /** Workspace display name, used only as a recall cue in the query text. */
+  workspaceHint?: string;
   /** Monotonic foreground deadline for the additionalContext assembly (HOST-06). */
   deadlineMs?: number;
   /**
@@ -61,8 +62,8 @@ export interface HandlerOptions {
    * injection instead of failing.
    */
   ensureReachable?: (budgetMs: number) => Promise<boolean>;
-  /** Async recall used to build the injected context; wired to the Server. */
-  recallAndAssemble: (query: string | null, context?: InjectionContext) => Promise<{ text: string; viewId: string } | undefined>;
+  /** Reads the complete resident rule set; undefined when delivery failed or was incomplete. */
+  readRules: (context: InjectionContext) => Promise<string | undefined>;
 }
 
 /** Session/turn identity for Bridge-hosted injection (HOST-05 trigger selection). */
@@ -108,18 +109,18 @@ export async function forwardEvent(options: HandlerOptions, event: HostEventReco
 }
 
 /**
- * SessionStart / UserPromptSubmit handler: within the HOST-06 deadline, recall the
- * local-first context and emit `{ additionalContext }` — the installed ZCode's
- * supported automatic injection entry. Deadline misses emit nothing (HOST-04).
+ * SessionStart / UserPromptSubmit handler: within the deadline, read the complete rule set and
+ * emit `{ additionalContext }` — the installed ZCode's supported automatic injection entry.
+ * A deadline miss, a failed request or an incomplete set emits nothing; the turn continues.
  */
-export async function injectContext(options: HandlerOptions, query: string | null, turnId: string, context?: InjectionContext): Promise<{ additionalContext: string } | undefined> {
+export async function injectContext(options: HandlerOptions, turnId: string, context: InjectionContext): Promise<{ additionalContext: string } | undefined> {
   const deadline = Date.now() + (options.deadlineMs ?? 2_000);
-  const assembled = await Promise.race([
-    options.recallAndAssemble(query, context),
+  const delivered = await Promise.race([
+    options.readRules(context),
     new Promise<undefined>(resolve => setTimeout(() => resolve(undefined), Math.max(0, deadline - Date.now()))),
   ]);
-  if (assembled === undefined) return undefined; // explicit miss; ordinary tasks continue
-  return { additionalContext: `[MnemoWeave view ${assembled.viewId} @ turn ${turnId}]\n${assembled.text}` };
+  if (delivered === undefined) return undefined; // explicit miss; ordinary tasks continue
+  return { additionalContext: `[MnemoWeave rules @ turn ${turnId}]\n${delivered}` };
 }
 
 const WorkspaceHookEvents = ['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'PostToolUseFailure', 'Stop'] as const;
@@ -194,7 +195,7 @@ export function runHookStdin(options: HandlerOptions): void {
   let parsed: ZCodeHookInput;
   try { parsed = HookInput.parse(JSON.parse(raw)); } catch { process.exit(1); }
   const normalized = normalizeHookEvent(parsed, new Date().toISOString());
-  const event = HostEvent.parse({ ...normalized, ...(options.projectId ? { projectId: options.projectId } : {}) });
+  const event = HostEvent.parse(normalized);
   const started = performance.now();
   void (async () => {
     // The local Server may still be starting (it is hosted by a scheduled task). Wake it only
@@ -211,8 +212,7 @@ export function runHookStdin(options: HandlerOptions): void {
       sessionId: parsed.session_id, turnId: parsed.turn_id ?? event.eventId,
       trigger: event.kind === 'session.started' ? 'session_started' : event.kind === 'tool.completed' ? 'tool_failure' : 'message_user',
     };
-    const query = event.kind === 'message.user' ? (parsed.prompt ?? '').slice(0, 2000) : null;
-    const output = await injectContext({ ...options, deadlineMs: remaining }, query, context.turnId, context);
+    const output = await injectContext({ ...options, deadlineMs: remaining }, context.turnId, context);
     if (output) process.stdout.write(`${JSON.stringify(output)}\n`);
   })().then(() => process.exit(0)).catch(() => process.exit(0));
 }

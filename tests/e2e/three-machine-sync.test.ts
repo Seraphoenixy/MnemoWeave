@@ -14,11 +14,11 @@ import { MnemoWeaveError, RememberInput } from '../../packages/core/contracts/sr
 import { mnemonBinary } from './mnemon-binary.ts';
 
 /**
- * Three machines share one scope: a stale base is rejected, the loser re-reads and
+ * Three machines share one stream: a stale base is rejected, the loser re-reads and
  * retries, and every machine converges on the same revision chain.
  */
 
-const scopes = [{ scope: 'project:alpha', canRead: true, canWrite: true }, { scope: 'global', canRead: true, canWrite: true }];
+const streams = [{ stream: 'formal-memories', canRead: true, canWrite: true }, { stream: 'rules', canRead: true, canWrite: true }];
 
 /**
  * An explicit refresh that overlaps the startup pass is answered with `skipped`, which is
@@ -54,9 +54,9 @@ test('three machines converge on one revision chain and a stale base is rejected
   mkdirSync(root, { recursive: true });
   const tokens = { a: 'a'.repeat(32), b: 'b'.repeat(32), c: 'c'.repeat(32) };
   const remote = new SyncStore({ path: join(root, 'remote.db') });
-  remote.enroll('a', tokens.a, scopes);
-  remote.enroll('b', tokens.b, scopes);
-  remote.enroll('c', tokens.c, scopes);
+  remote.enroll('a', tokens.a, streams);
+  remote.enroll('b', tokens.b, streams);
+  remote.enroll('c', tokens.c, streams);
   const server: Server = createSyncServer({ gateway: remote });
   await new Promise<void>((done) => server.listen(0, '127.0.0.1', () => done()));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -67,7 +67,7 @@ test('three machines converge on one revision chain and a stale base is rejected
   const seedRepo = new SqliteCandidates(resolve(join(root, 'a', 'state', 'governance.db')));
   const seedProvider = new MnemonCliProvider({ binary: mnemonBinary(), dataDir: resolve(join(root, 'a', 'provider')), store: 'm_a' });
   const request = RememberInput.parse({
-    idempotencyKey: `seed-${randomUUID()}`, content: '三机共享的初始正文。', knowledgeType: 'Practice', tags: [], projectId: 'alpha',
+    idempotencyKey: `seed-${randomUUID()}`, content: '三机共享的初始正文。', knowledgeType: 'Practice', tags: [],
     provenance: {
       source: 'local-user', sourceReference: 'e2e:three', evidence: ['seed'], verificationStatus: 'verified',
       confidence: 1, applicability: 'alpha', limitations: '无（验收固定值）', lastVerified: '2026-11-10T11:00:00.000Z',
@@ -115,7 +115,7 @@ test('three machines converge on one revision chain and a stale base is rejected
     }
 
     // The remote holds exactly one create and two updates, in that order.
-    const changes = remote.pull(tokens.a, { scope: 'project:alpha', since: 0, limit: 20 }).changes;
+    const changes = remote.pull(tokens.a, { stream: 'formal-memories', since: 0, limit: 20 }).changes;
     assert.deepEqual(changes.map((change) => [change.operation, change.version]), [['create', 1], ['update', 2], ['update', 3]]);
 
     // Each machine keeps its own Provider mapping for all three revisions.

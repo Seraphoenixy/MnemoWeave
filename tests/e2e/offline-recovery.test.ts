@@ -20,7 +20,7 @@ import { mnemonBinary } from './mnemon-binary.ts';
  */
 
 const TOKEN = 'f'.repeat(32);
-const SCOPE = 'project:alpha';
+const STREAM = 'formal-memories';
 
 /** A port that is free right now, so a refused connection is a real refusal. */
 async function freePort(): Promise<number> {
@@ -55,7 +55,7 @@ async function seedPublishedMemory(root: string): Promise<string> {
   const repo = new SqliteCandidates(resolve(join(state, 'governance.db')));
   const provider = new MnemonCliProvider({ binary: mnemonBinary(), dataDir: providerDir, store: 'offline' });
   const request = RememberInput.parse({
-    idempotencyKey: `seed-${randomUUID()}`, content: '断网前的初始正文。', knowledgeType: 'Practice', tags: [], projectId: 'alpha',
+    idempotencyKey: `seed-${randomUUID()}`, content: '断网前的初始正文。', knowledgeType: 'Practice', tags: [],
     provenance: {
       source: 'local-user', sourceReference: 'e2e:offline', evidence: ['seed'], verificationStatus: 'verified',
       confidence: 1, applicability: 'alpha', limitations: '无（验收固定值）', lastVerified: '2026-11-10T12:00:00.000Z',
@@ -73,7 +73,7 @@ test('an edit that never reaches the remote is queued, not applied, and drains a
   const root = resolve('work', 'offline-never-reached', randomUUID());
   mkdirSync(root, { recursive: true });
   const remote = new SyncStore({ path: join(root, 'remote.db') });
-  remote.enroll('device-local', TOKEN, [{ scope: SCOPE, canRead: true, canWrite: true }]);
+  remote.enroll('device-local', TOKEN, [{ stream: STREAM, canRead: true, canWrite: true }]);
   const memoryId = await seedPublishedMemory(root);
   const app = machine(root, `http://127.0.0.1:${port}`);
   let server: Server | undefined;
@@ -84,9 +84,9 @@ test('an edit that never reaches the remote is queued, not applied, and drains a
     );
     const unchanged = (await app.client!.memories({ query: '初始', limit: 5 })).items[0];
     assert.equal(unchanged?.entryVersion, 0, 'a queued edit must not be published');
-    const scope = (await app.client!.syncStatus!()).scopes.find(item => item.scope === SCOPE);
-    assert.equal(scope?.pending, 1);
-    assert.equal(scope?.unknown, 0);
+    const stream = (await app.client!.syncStatus!()).streams.find(item => item.stream === STREAM);
+    assert.equal(stream?.pending, 1);
+    assert.equal(stream?.unknown, 0);
 
     server = createSyncServer({ gateway: remote });
     await new Promise<void>((done) => server!.listen(port, '127.0.0.1', () => done()));
@@ -94,8 +94,8 @@ test('an edit that never reaches the remote is queued, not applied, and drains a
 
     const applied = (await app.client!.memories({ query: '第一次写入', limit: 5 })).items[0];
     assert.equal(applied?.entryVersion, 1);
-    assert.equal((await app.client!.syncStatus!()).scopes.find(item => item.scope === SCOPE)?.pending, 0);
-    assert.deepEqual(remote.pull(TOKEN, { scope: SCOPE, since: 0, limit: 10 }).changes.map(change => change.version), [1]);
+    assert.equal((await app.client!.syncStatus!()).streams.find(item => item.stream === STREAM)?.pending, 0);
+    assert.deepEqual(remote.pull(TOKEN, { stream: STREAM, since: 0, limit: 10 }).changes.map(change => change.version), [1]);
   } finally {
     await app.close();
     if (server) await new Promise<void>((done) => server!.close(() => done()));
@@ -107,7 +107,7 @@ test('an edit lost after a successful write becomes pending confirmation and sti
   const root = resolve('work', 'offline-lost-connection', randomUUID());
   mkdirSync(root, { recursive: true });
   const remote = new SyncStore({ path: join(root, 'remote.db') });
-  remote.enroll('device-local', TOKEN, [{ scope: SCOPE, canRead: true, canWrite: true }]);
+  remote.enroll('device-local', TOKEN, [{ stream: STREAM, canRead: true, canWrite: true }]);
   const start = async (fixed?: number) => {
     const server: Server = createSyncServer({ gateway: remote });
     await new Promise<void>((done) => server.listen(fixed ?? 0, '127.0.0.1', () => done()));
@@ -131,10 +131,10 @@ test('an edit lost after a successful write becomes pending confirmation and sti
     );
     const duringOutage = (await app.client!.memories({ query: '在线时写入', limit: 5 })).items[0];
     assert.equal(duringOutage?.entryVersion, 1, 'a refused edit must not change the published memory');
-    const pendingScope = (await app.client!.syncStatus!()).scopes.find(item => item.scope === SCOPE);
-    assert.equal((pendingScope?.pending ?? 0) + (pendingScope?.unknown ?? 0), 1, 'the refused change must stay in the ledger');
-    if (outageCode === 'SYNC_OUTCOME_UNKNOWN') assert.equal(pendingScope?.unknown, 1);
-    else assert.equal(pendingScope?.pending, 1);
+    const pendingStream = (await app.client!.syncStatus!()).streams.find(item => item.stream === STREAM);
+    assert.equal((pendingStream?.pending ?? 0) + (pendingStream?.unknown ?? 0), 1, 'the refused change must stay in the ledger');
+    if (outageCode === 'SYNC_OUTCOME_UNKNOWN') assert.equal(pendingStream?.unknown, 1);
+    else assert.equal(pendingStream?.pending, 1);
 
     ({ server } = await start(port));
     assert.equal((server.address() as AddressInfo).port, port, 'the remote must return on the same address');
@@ -143,11 +143,11 @@ test('an edit lost after a successful write becomes pending confirmation and sti
     const after = (await app.client!.memories({ query: '断网时尝试', limit: 5 })).items[0];
     assert.equal(after?.content, '断网时尝试的第二版。');
     assert.equal(after?.entryVersion, 2);
-    const drained = (await app.client!.syncStatus!()).scopes.find(item => item.scope === SCOPE);
+    const drained = (await app.client!.syncStatus!()).streams.find(item => item.stream === STREAM);
     assert.equal(drained?.pending, 0);
     assert.equal(drained?.unknown, 0);
     assert.deepEqual(
-      remote.pull(TOKEN, { scope: SCOPE, since: 0, limit: 10 }).changes.map(change => [change.operation, change.version]),
+      remote.pull(TOKEN, { stream: STREAM, since: 0, limit: 10 }).changes.map(change => [change.operation, change.version]),
       [['create', 1], ['update', 2]],
     );
   } finally {

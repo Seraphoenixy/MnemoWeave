@@ -5,9 +5,10 @@ import type { RpcHandler } from './types.ts';
 import { reviewSkill } from './skill-review.ts';
 import { backtestSkill } from './skill-backtest.ts';
 import { organizeMemory } from './organize-memory.ts';
+import { confirmDistillation, previewDistillation } from './archive-distillation.ts';
 import type { createTaskRunner } from './task-runner.ts';
 import { runIdleReview } from './idle-review-task.ts';
-import { organizeMemories } from './organize-memory-task.ts';
+import { applyOrganizeMemories, previewOrganizeMemories } from './organize-memory-task.ts';
 import { listSkills } from './skills.ts';
 import { adoptSkill, createSkill, readSkillText, readVersionText, restoreSkill, skillVersions } from './skills-write.ts';
 import { autoAdoptSkill, parseAdoptionReview, readSkillPreferences, saveSkillPreferences } from './skills-adopt.ts';
@@ -113,12 +114,11 @@ function memoriesRequest(payload: unknown): MemoriesRequest {
   if (sort !== undefined && (typeof sort !== 'string' || !(SORTS as readonly string[]).includes(sort))) {
     invalid(`sort must be one of: ${SORTS.join(', ')}`);
   }
-  const projectId = payload['projectId'];
-  if (projectId !== undefined && (typeof projectId !== 'string' || projectId.trim() === '' || projectId.trim().length > 200)) {
-    invalid('projectId must be a non-empty string of at most 200 characters');
+  // The shared collection has no workspace filter. A client that still sends one is refused
+  // rather than silently shown an unfiltered list that looks filtered.
+  for (const removed of ['projectId', 'includeGlobal']) {
+    if (payload[removed] !== undefined) invalid(`${removed} was removed: formal memories are one shared collection`);
   }
-  const includeGlobal = payload['includeGlobal'];
-  if (includeGlobal !== undefined && typeof includeGlobal !== 'boolean') invalid('includeGlobal must be a boolean');
   return {
     ...(query === undefined ? {} : { query }),
     limit: limit ?? DEFAULT_LIMIT,
@@ -127,8 +127,6 @@ function memoriesRequest(payload: unknown): MemoriesRequest {
     ...(knowledgeType === undefined ? {} : { knowledgeType: knowledgeType as (typeof KNOWLEDGE_TYPES)[number] }),
     ...(entity === undefined ? {} : { entity: (entity as string).trim() }),
     ...(sort === undefined ? {} : { sort: sort as (typeof SORTS)[number] }),
-    ...(projectId === undefined ? {} : { projectId: (projectId as string).trim() }),
-    ...(includeGlobal === undefined ? {} : { includeGlobal: includeGlobal as boolean }),
   };
 }
 
@@ -152,28 +150,21 @@ function memoryRequest(payload: unknown): MemoryRequest {
  * reason is what the history shows later about why.
  */
 /** The graph is a whole-catalog read; only the node cap is an argument. */
-function graphRequest(payload: unknown): { projectId?: string; includeGlobal?: boolean; limit?: number } {
+function graphRequest(payload: unknown): { limit?: number } {
   if (payload === undefined) return {};
   if (!isRecord(payload)) invalid('graph payload must be an object');
   const limit = payload['limit'];
   if (limit !== undefined && (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1 || limit > 500)) {
     invalid('limit must be an integer between 1 and 500');
   }
-  const projectId = payload['projectId'];
-  if (projectId !== undefined && (typeof projectId !== 'string' || projectId.trim() === '' || projectId.trim().length > 200)) {
-    invalid('projectId must be a non-empty string of at most 200 characters');
+  for (const removed of ['projectId', 'includeGlobal']) {
+    if (payload[removed] !== undefined) invalid(`${removed} was removed: the graph covers the shared collection`);
   }
-  const includeGlobal = payload['includeGlobal'];
-  if (includeGlobal !== undefined && typeof includeGlobal !== 'boolean') invalid('includeGlobal must be a boolean');
-  return {
-    ...(limit === undefined ? {} : { limit }),
-    ...(projectId === undefined ? {} : { projectId: (projectId as string).trim() }),
-    ...(includeGlobal === undefined ? {} : { includeGlobal: includeGlobal as boolean }),
-  };
+  return { ...(limit === undefined ? {} : { limit }) };
 }
 
 /** Explore is a read: a query is required, and the page size stays small by design. */
-function exploreRequest(payload: unknown): { query: string; limit: number; minScore: number; projectId?: string } {
+function exploreRequest(payload: unknown): { query: string; limit: number; minScore: number; hint?: string } {
   if (!isRecord(payload)) invalid('explore payload must be an object');
   const query = payload['query'];
   if (typeof query !== 'string' || query.trim() === '') invalid('query must be a non-empty string');
@@ -186,14 +177,34 @@ function exploreRequest(payload: unknown): { query: string; limit: number; minSc
   if (minScore !== undefined && (typeof minScore !== 'number' || !Number.isFinite(minScore) || minScore < 0 || minScore > 1)) {
     invalid('minScore must be a number between 0 and 1');
   }
-  const projectId = payload['projectId'];
-  if (projectId !== undefined && (typeof projectId !== 'string' || projectId.trim() === '' || projectId.trim().length > 200)) {
-    invalid('projectId must be a non-empty string of at most 200 characters');
+  // An optional workspace name: a recall cue appended to the query, never a filter.
+  const hint = payload['hint'];
+  if (hint !== undefined && (typeof hint !== 'string' || hint.trim() === '' || hint.trim().length > 200)) {
+    invalid('hint must be a non-empty string of at most 200 characters');
   }
   return {
     query: query.trim(), limit: limit ?? 20, minScore: minScore ?? 0,
-    ...(projectId === undefined ? {} : { projectId: (projectId as string).trim() }),
+    ...(hint === undefined ? {} : { hint: (hint as string).trim() }),
   };
+}
+
+/** A management archive request must name the workspace it is scoped to. */
+function workspaceRequest(payload: unknown): string {
+  if (!isRecord(payload) || typeof payload['workspaceId'] !== 'string' || !UUID.test(payload['workspaceId'])) {
+    invalid('workspaceId must be a UUID');
+  }
+  return payload['workspaceId'];
+}
+
+/** One user-confirmed save: a formal memory or a workspace archive, chosen by the user. */
+function organizeSaveRequest(payload: unknown): UiCreateInput {
+  const request = createRequest(payload);
+  if (!isRecord(payload)) invalid('Invalid organize request');
+  const target = payload['target'];
+  if (target !== undefined && target !== 'formal-memory' && target !== 'workspace-archive' && target !== 'rule') {
+    invalid('target must be formal-memory, workspace-archive or rule');
+  }
+  return { ...request, ...(target === undefined ? {} : { target }) };
 }
 
 function withdrawRequest(payload: unknown): UiWithdrawInput {
@@ -243,12 +254,8 @@ function createRequest(payload: unknown): UiCreateInput {
       if (typeof entity !== 'string' || entity.trim() === '' || entity.trim().length > 200) invalid('each entity must be 1–200 characters');
     }
   }
-  const scope = payload['scope'];
-  if (scope !== undefined && scope !== 'global' && scope !== 'project') invalid('scope must be global or project');
-  const projectId = payload['projectId'];
-  if (scope === 'project' && typeof projectId !== 'string') invalid('scope=project requires projectId');
-  if (projectId !== undefined && (typeof projectId !== 'string' || projectId.trim() === '' || projectId.trim().length > 200)) {
-    invalid('projectId must be a non-empty string of at most 200 characters');
+  for (const removed of ['projectId', 'scope', 'workspaceId']) {
+    if (payload[removed] !== undefined) invalid(`${removed} was removed: a formal memory carries no workspace`);
   }
   const reason = payload['reason'];
   if (reason !== undefined && (typeof reason !== 'string' || reason.trim() === '' || reason.trim().length > MAX_REASON)) {
@@ -261,8 +268,6 @@ function createRequest(payload: unknown): UiCreateInput {
     ...(importance === undefined ? {} : { importance: importance as number }),
     ...(tags === undefined ? {} : { tags: (tags as string[]).map(tag => tag.trim()) }),
     ...(entities === undefined ? {} : { entities: (entities as string[]).map(entity => entity.trim()) }),
-    ...(scope === undefined ? {} : { scope }),
-    ...(projectId === undefined ? {} : { projectId: (projectId as string).trim() }),
     ...(reason === undefined ? {} : { reason: (reason as string).trim() }),
   };
 }
@@ -341,16 +346,31 @@ function ruleEditRequest(payload: unknown): { ruleId: string } & UiRuleEditInput
   }
   const enabled = payload['enabled'];
   if (enabled !== undefined && typeof enabled !== 'boolean') invalid('enabled must be a boolean');
-  if (body === undefined && enabled === undefined) invalid('editRule requires body or enabled');
+  const importance = payload['importance'];
+  if (importance !== undefined && importance !== 'critical' && importance !== 'normal' && importance !== 'low') {
+    invalid('importance must be critical, normal or low');
+  }
+  const pinned = payload['pinned'];
+  if (pinned !== undefined && typeof pinned !== 'boolean') invalid('pinned must be a boolean');
+  const remove = payload['remove'];
+  if (remove !== undefined && remove !== true) invalid('remove must be true when present');
+  const changes = [body, enabled, importance, pinned, remove].filter(item => item !== undefined).length;
+  if (changes === 0) invalid('editRule requires a change');
+  if (remove === true && changes > 1) invalid('removing a rule is exclusive with editing it');
+  // The version the editor was opened at is mandatory: without it a concurrent change from another
+  // host would be overwritten silently.
   const baseVersion = payload['baseVersion'];
-  if (baseVersion !== undefined && (typeof baseVersion !== 'number' || !Number.isInteger(baseVersion) || baseVersion < 0)) {
-    invalid('baseVersion must be a non-negative integer');
+  if (typeof baseVersion !== 'number' || !Number.isInteger(baseVersion) || baseVersion < 1) {
+    invalid('baseVersion must be a positive integer read before editing');
   }
   return {
     ruleId: payload['ruleId'],
     ...(body === undefined ? {} : { body: (body as string).trim() }),
     ...(enabled === undefined ? {} : { enabled: enabled as boolean }),
-    ...(baseVersion === undefined ? {} : { baseVersion: baseVersion as number }),
+    ...(importance === undefined ? {} : { importance }),
+    ...(pinned === undefined ? {} : { pinned: pinned as boolean }),
+    ...(remove === true ? { remove: true as const } : {}),
+    baseVersion,
   };
 }
 
@@ -425,8 +445,6 @@ export function createRpcHandler(source: MemorySource, settings?: SettingsLike, 
             ...(request.knowledgeType === undefined ? {} : { knowledgeType: request.knowledgeType }),
             ...(request.entity === undefined ? {} : { entity: request.entity }),
             ...(request.sort === undefined ? {} : { sort: request.sort }),
-            ...(request.projectId === undefined ? {} : { projectId: request.projectId }),
-            ...(request.includeGlobal === undefined ? {} : { includeGlobal: request.includeGlobal }),
           }));
         }
         case 'memory': {
@@ -582,28 +600,54 @@ export function createRpcHandler(source: MemorySource, settings?: SettingsLike, 
         }
         case 'organizeMemory':
           if (!task) return fail('DSH memory tasks are unavailable.', 'PROVIDER_UNAVAILABLE');
-          return ok(await organizeMemory(source, task, createRequest(payload), signal));
+          return ok(await organizeMemory(source, task, organizeSaveRequest(payload), signal));
         case 'create': return ok(await source.create(createRequest(payload)));
         case 'edit': return ok(await source.edit(editRequest(payload)));
         case 'withdraw': return ok(await source.withdraw(withdrawRequest(payload)));
         case 'graph': return ok(await source.graph(graphRequest(payload)));
-        case 'projects': return ok(await source.projects());
         case 'embeddingDiagnostics': return ok(await source.embeddingDiagnostics());
         case 'organizeMemories': {
           if (task === undefined) return fail('task agents are unavailable in this build', 'PROVIDER_UNAVAILABLE');
           if (!isRecord(payload)) invalid('Invalid organize request');
           const instruction = typeof payload['instruction'] === 'string' ? payload['instruction'].trim() : '';
           if (instruction === '' || instruction.length > 2000) invalid('instruction is required');
-          const projectId = typeof payload['projectId'] === 'string' && payload['projectId'].trim() !== '' ? payload['projectId'].trim() : undefined;
-          return ok(await organizeMemories(source, task, { instruction, ...(projectId === undefined ? {} : { projectId }) }, signal));
+          if (payload['projectId'] !== undefined) invalid('projectId was removed: formal memories are one shared collection');
+          const workspaceId = typeof payload['workspaceId'] === 'string' && payload['workspaceId'].trim() !== '' ? payload['workspaceId'].trim() : undefined;
+          if (workspaceId !== undefined && !UUID.test(workspaceId)) invalid('workspaceId must be a UUID');
+          if (payload['apply'] === true) {
+            // Only confirmed items run; the plan carries the versions the Agent was shown so a
+            // change made in between stops that one item instead of overwriting it.
+            const plan = isRecord(payload['plan']) ? payload['plan'] : null;
+            const confirmed = Array.isArray(payload['confirmed'])
+              ? payload['confirmed'].filter((item): item is number => typeof item === 'number' && Number.isInteger(item) && item >= 0).slice(0, 8)
+              : [];
+            if (plan === null) invalid('A confirmed plan is required');
+            return ok(await applyOrganizeMemories(source, plan as never, confirmed));
+          }
+          return ok(await previewOrganizeMemories(source, task, { instruction }, signal));
+        }
+        case 'distillArchive': {
+          // Preview only: the draft is created, nothing is published. Management code reads the
+          // full body through the history route; the model segment tool is not used here.
+          if (task === undefined) return fail('task agents are unavailable in this build', 'PROVIDER_UNAVAILABLE');
+          if (!isRecord(payload) || typeof payload['entryId'] !== 'string' || !UUID.test(payload['entryId'])) invalid('entryId must be a UUID');
+          return ok(await previewDistillation(source, task, payload['entryId'], signal));
+        }
+        case 'confirmDistillation': {
+          if (!isRecord(payload)) invalid('Invalid distillation confirmation');
+          const { draftId } = payload;
+          if (typeof draftId !== 'string' || !UUID.test(draftId)) invalid('draftId must be a UUID');
+          const reason = typeof payload['reason'] === 'string' && payload['reason'].trim() !== ''
+            ? payload['reason'].trim().slice(0, 500) : '用户确认从档案提炼';
+          return ok(await confirmDistillation(source, { draftId, reason }));
         }
         case 'idleReviewRun': {
           if (task === undefined) return fail('task agents are unavailable in this build', 'PROVIDER_UNAVAILABLE');
           const input = isRecord(payload) ? payload : {};
           const sessionId = typeof input['sessionId'] === 'string' ? input['sessionId'].trim() : '';
           if (sessionId === '') invalid('sessionId is required.');
-          const projectId = typeof input['projectId'] === 'string' && input['projectId'].trim() !== '' ? input['projectId'].trim() : undefined;
-          return ok(await runIdleReview(source, task, sessionId, projectId, signal));
+          if (input['projectId'] !== undefined) invalid('projectId was removed: formal memories are one shared collection');
+          return ok(await runIdleReview(source, task, sessionId, undefined, signal));
         }
         case 'explore': {
           const request = exploreRequest(payload);
@@ -613,14 +657,24 @@ export function createRpcHandler(source: MemorySource, settings?: SettingsLike, 
         case 'rules': return ok(await source.rules());
         case 'ruleUsage': return ok(await source.ruleUsage());
         case 'ruleArchive': return ok(await source.ruleArchive());
-        case 'archiveCapacities': return ok(await source.archiveCapacities());
+        case 'workspaces': return ok(await source.workspaces());
+        case 'archiveCapacities': {
+          const workspaceId = workspaceRequest(payload);
+          return ok(await source.archiveCapacities(workspaceId));
+        }
+        case 'archiveReleaseCandidates': {
+          const workspaceId = workspaceRequest(payload);
+          const limit = isRecord(payload) && typeof payload['limit'] === 'number' ? payload['limit'] : undefined;
+          if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1 || limit > 100)) invalid('Invalid release candidate limit');
+          return ok(await source.archiveReleaseCandidates(workspaceId, limit));
+        }
         case 'archiveSearch': {
           if (!isRecord(payload)) invalid('Invalid archive search');
-          const { projectId, query, limit, includeArchived } = payload;
-          if (typeof projectId !== 'string' || projectId.trim() === '' || typeof query !== 'string' || query.trim() === '') invalid('Invalid archive search');
+          const { workspaceId, query, limit, includeArchived } = payload;
+          if (typeof workspaceId !== 'string' || !UUID.test(workspaceId) || typeof query !== 'string' || query.trim() === '') invalid('Invalid archive search');
           if (limit !== undefined && (typeof limit !== 'number' || !Number.isSafeInteger(limit) || limit < 1 || limit > 50)) invalid('Invalid archive search limit');
           if (includeArchived !== undefined && typeof includeArchived !== 'boolean') invalid('Invalid archive search scope');
-          return ok(await source.searchArchives({ projectId, query, ...(limit === undefined ? {} : { limit }), ...(includeArchived === undefined ? {} : { includeArchived }) }));
+          return ok(await source.searchArchives({ workspaceId, query, ...(limit === undefined ? {} : { limit }), ...(includeArchived === undefined ? {} : { includeArchived }) }));
         }
         case 'archiveHistory': {
           if (!isRecord(payload) || typeof payload['entryId'] !== 'string') invalid('Invalid archive history request');
@@ -641,16 +695,16 @@ export function createRpcHandler(source: MemorySource, settings?: SettingsLike, 
         }
         case 'saveArchive': {
           if (!isRecord(payload)) invalid('Invalid archive');
-          const { entryId, baseVersion, projectId, title, body, verification, evidence } = payload;
-          if (typeof projectId !== 'string' || typeof title !== 'string' || typeof body !== 'string'
+          const { entryId, baseVersion, workspaceId, title, body, verification, evidence } = payload;
+          if (typeof workspaceId !== 'string' || !UUID.test(workspaceId) || typeof title !== 'string' || typeof body !== 'string'
             || typeof evidence !== 'string' || (verification !== 'open' && verification !== 'verified' && verification !== 'refuted')) invalid('Invalid archive fields');
-          const input = { projectId, title, body, verification, evidence } as const;
+          const input = { workspaceId, title, body, verification, evidence } as const;
           if (entryId === undefined && baseVersion === undefined) return ok(await source.saveArchive(input));
           if (typeof entryId !== 'string' || !UUID.test(entryId) || typeof baseVersion !== 'number'
             || !Number.isSafeInteger(baseVersion) || baseVersion < 1) invalid('Invalid archive version');
           return ok(await source.saveArchive(input, { entryId, baseVersion }));
         }
-        case 'archives': return ok(await source.archives());
+        case 'archives': return ok(await source.archives(workspaceRequest(payload)));
         case 'sync': return ok(await source.sync());
         case 'syncRefresh': return ok(await source.refreshSync());
         default: return fail(`unknown MnemoWeave RPC endpoint: ${String(endpoint).slice(0, 80)}`, 'UNKNOWN_ENDPOINT');

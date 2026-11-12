@@ -70,8 +70,6 @@ export interface UiMemorySummary {
   importance?: number;
   tags?: string[];
   entities?: string[];
-  /** Owning project; null is general knowledge. */
-  projectId: string | null;
 }
 
 /** Orders the list can be scanned in. */
@@ -89,8 +87,6 @@ export interface UiMemoryList {
   knowledgeTypes?: Array<{ value: string; count: number }>;
   /** Entities named by current revisions, in their recorded spelling. */
   entities?: Array<{ value: string; count: number }>;
-  /** Owning projects present in the set; null is general knowledge. */
-  projects?: Array<{ projectId: string | null; count: number }>;
 }
 
 export interface UiMemoryRevision {
@@ -154,8 +150,6 @@ export interface UiMemoryDetail {
   providerMemoryId: string;
   applicability: string;
   state: 'active' | 'superseded' | 'unverified';
-  /** Owning project; null is general knowledge. */
-  projectId: string | null;
   content: string;
   publishedAt: string;
   revisions: UiMemoryRevision[];
@@ -173,7 +167,6 @@ export interface UiExploreHit {
   content: string;
   score: number;
   publishedAt: string;
-  projectId: string | null;
   category?: string;
   knowledgeType?: string;
   tags?: string[];
@@ -185,7 +178,6 @@ export interface UiGraphNode {
   /** A supersede edge points at a retired memory, so those are nodes too. */
   state: 'active' | 'superseded' | 'unverified';
   publishedAt: string;
-  projectId: string | null;
   category?: string;
   knowledgeType?: string;
   importance?: number;
@@ -227,12 +219,9 @@ export interface UiCreateInput {
   importance?: number;
   tags?: string[];
   entities?: string[];
-  /**
-   * Only the archive branch of a task-organized save needs a project; the formal memory and the
-   * runtime rule it can also produce are global.
-   */
-  projectId?: string;
   reason?: string;
+  /** Which memory class a task-organized save writes; the user chooses it in the form. */
+  target?: 'formal-memory' | 'workspace-archive' | 'rule';
 }
 
 export interface UiCreateResult {
@@ -287,15 +276,13 @@ export interface UiRegisterTest {
 }
 
 /** What the last View for this host delivered; `null` when the host never injected. */
+/** Last injection result: how many rules the resident block carried, and why it failed if it did. */
 export interface UiInjection {
   id: string;
   sessionId: string;
-  rulesInjected: number;
-  rulesOmitted: 'budget_exceeded' | null;
-  rulesOmittedCount?: number;
-  rulesOmissionReason?: string;
-  memoriesInjected: number;
-  usedTokens: number;
+  ruleCount: number;
+  usedBytes: number;
+  failure?: 'deadline' | 'output_limit' | 'request_failed';
   createdAt: string;
 }
 
@@ -319,11 +306,12 @@ export interface UiEmbeddingDiagnostics {
 
 export interface UiIdleReviewSignal {
   id: string; sessionId: string; turnId: number; eventId: string; text: string;
-  projectId: string | null; reason: 'correction' | 'standing-instruction' | 'durable-fact'; createdAt: string;
+  reason: 'correction' | 'standing-instruction' | 'durable-fact'; createdAt: string;
 }
 
 export interface UiIdleReviewItem {
-  index: number; action: 'create' | 'edit' | 'archive' | 'unarchive' | 'withdraw' | 'skip';
+  index: number; action: 'create' | 'edit' | 'remove' | 'skip';
+  kind: 'rule' | 'workspace-archive' | 'formal-memory';
   state: 'applied' | 'failed' | 'skipped'; targetId?: string; detail?: Record<string, unknown>;
 }
 
@@ -409,7 +397,6 @@ export interface UiRule {
 export interface UiRuleUsage {
   limitBytes: number;
   itemMaxBytes: number;
-  targetBytes: number;
   usedBytes: number;
   entryCount: number;
   exceeded: boolean;
@@ -435,21 +422,23 @@ export interface UiRuleCreateInput {
   pinned?: boolean;
 }
 
-/** `PATCH /v1/rules/{ruleId}`: body and enabled state; `baseVersion` refuses a stale write. */
+/** `PATCH /v1/rules/{ruleId}`: body and state; `baseVersion` is the version the editor read. */
 export interface UiRuleEditInput {
   body?: string;
   enabled?: boolean;
   importance?: 'critical' | 'normal' | 'low';
   pinned?: boolean;
-  baseVersion?: number;
+  /** Removing appends a version and takes the text out of the resident set. */
+  remove?: true;
+  baseVersion: number;
 }
 
 /** One project archive: `ArchiveRecord` from the Server contract. */
-export type UiArchiveDraft = Pick<UiArchive, 'projectId' | 'title' | 'body' | 'verification' | 'evidence'>;
+export type UiArchiveDraft = Pick<UiArchive, 'workspaceId' | 'title' | 'body' | 'verification' | 'evidence'>;
 
 export interface UiArchive {
   entryId: string;
-  projectId: string;
+  workspaceId: string;
   title: string;
   body: string;
   source: 'session' | 'tool' | 'user';
@@ -463,7 +452,7 @@ export interface UiArchive {
 }
 
 export interface UiArchiveCapacity {
-  projectId: string;
+  workspaceId: string;
   activeBytes: number;
   limitBytes: number;
   activeCount: number;
@@ -471,17 +460,34 @@ export interface UiArchiveCapacity {
   exceeded: boolean;
 }
 
+/** One archive offered for capacity release, oldest-confirmed first. */
+export interface UiArchiveReleaseCandidate {
+  entryId: string;
+  title: string;
+  bodyBytes: number;
+  version: number;
+  updatedAt: string;
+}
+
+/** Capacity maintenance view: what would free room, plus the current capacity. */
+export interface UiArchiveReleaseCandidates {
+  workspaceId: string;
+  capacity: UiArchiveCapacity;
+  items: UiArchiveReleaseCandidate[];
+  remaining: number;
+}
+
 export interface UiArchiveSearchHit {
   entryId: string;
-  projectId: string;
+  workspaceId: string;
   title: string;
   state: 'active' | 'archived';
   version: number;
   verification: 'verified' | 'open' | 'refuted';
   excerpt: string;
-  excerptBytes: number;
+  excerptChars: number;
   excerptTruncated: boolean;
-  bodyBytes: number;
+  bodyChars: number;
   score: number;
 }
 
@@ -489,10 +495,9 @@ export interface UiArchiveSearch {
   query: string;
   total: number;
   results: UiArchiveSearchHit[];
-  totalBytes: number;
+  totalChars: number;
   truncated: boolean;
-  excerptLimitBytes: number;
-  totalLimitBytes: number;
+  totalLimitChars: number;
   callsLimit: number;
 }
 
@@ -500,7 +505,7 @@ export interface UiArchiveSearch {
 export interface UiArchiveHistory {
   revisionId: string;
   entryId: string;
-  projectId: string;
+  workspaceId: string;
   version: number;
   title: string;
   body: string;
@@ -508,9 +513,58 @@ export interface UiArchiveHistory {
   recordedAt: string;
 }
 
-/** One scope of this local Server's sync relationship with the remote sync Server. */
-export interface UiSyncScope {
-  scope: string;
+/**
+ * A distillation preview: the draft text the user is about to share, its classification, and the
+ * source version it was derived from. Nothing has been published at this point.
+ */
+export interface UiDistillationDraft {
+  kind: 'draft';
+  draftId: string;
+  source: { workspaceId: string; entryId: string; entryVersion: number; contentHash: string };
+  content: string;
+  knowledgeType: string;
+  category?: string;
+  importance?: number;
+  tags?: string[];
+  entities?: string[];
+  reason: string;
+  assessment: 'supported' | 'uncertain' | 'conflict';
+  /** The part of the source body the draft was produced from, as a character range. */
+  usedRange: { start: number; end: number; truncated: boolean };
+  /** Present when a task was already created for this draft. */
+  taskId?: string;
+}
+
+/** A distillation that produced no draft; the reason is shown to the user. */
+export interface UiDistillationSkip {
+  kind: 'skip';
+  reason: string;
+}
+
+/** One published or pending result of a confirmed distillation. */
+export interface UiDistillationResult {
+  kind: 'receipt';
+  taskId: string;
+  index: number;
+  status: 'published' | 'duplicate' | 'queued' | 'unknown' | 'needs_review' | 'failed' | 'applied';
+  memoryId?: string;
+  entryVersion?: number;
+  candidateId?: string;
+  errorCode?: string;
+}
+
+/** One registered workspace; a host sees the id and name, never a local path. */
+export interface UiWorkspace {
+  workspaceId: string;
+  name: string;
+  createdAt: string;
+  /** Present only for an operator view: how many local roots are bound. */
+  boundRootCount?: number;
+}
+
+/** One stream of this local Server's sync relationship with the remote sync Server. */
+export interface UiSyncStream {
+  stream: string;
   cursor: number;
   lastPullAt: string | null;
   lastError: string | null;
@@ -521,13 +575,14 @@ export interface UiSyncScope {
 
 export interface UiSyncStatus {
   enabled: boolean;
-  scopes: UiSyncScope[];
+  protocol: number;
+  streams: UiSyncStream[];
   updatedAt: string;
 }
 
 /** Result of one manual sync pass. */
 export interface UiSyncPass {
-  scopes: string[];
+  streams: string[];
   pulled: number;
   applied: number;
   errors: string[];
@@ -550,7 +605,7 @@ export type UiConfigSource = 'preference' | 'profile' | 'environment' | 'default
 export interface UiPreferences {
   defaultTab: string;
   pageSize: number;
-  /** The injection wait budget; a session no longer names a project for injection. */
+  /** The injection wait budget; a session names no project and no memory for injection. */
   injectTimeoutMs: number;
   autoStart: boolean;
 }
@@ -569,8 +624,8 @@ export interface UiSettings {
   };
   /** Local Server auto-start on a refused connection. */
   autoStart: { enabled: boolean; taskName: string; source: UiConfigSource };
-  /** Injection settings; applied as a group with the project and budget together. */
-  injection: { projectId: string | null; injectTimeoutMs: number; source: UiConfigSource; timeoutSource: UiConfigSource };
+  /** Injection settings: the wait budget and the optional explicit workspace binding. */
+  injection: { workspaceId: string | null; injectTimeoutMs: number; source: UiConfigSource; timeoutSource: UiConfigSource };
   /** Read-only diagnostics; the settings page's sync section owns the actions. */
   diagnostics: { serverReady: boolean; providerReady: boolean; syncEnabled: boolean; settingsPath: string };
 }
@@ -618,10 +673,10 @@ export interface SkillBacktestResult {
   regressions: string[];
 }
 
-export type UiSaveResult = { kind: 'formal' | 'runtime' | 'archive'; entryId: string }
+export type UiSaveResult = { kind: 'formal' | 'rule' | 'workspace-archive'; entryId: string }
   | { kind: 'review'; reason: string } | { kind: 'duplicate' };
 
-export type RpcEndpoint = 'status' | 'memories' | 'memory' | 'create' | 'organizeMemory' | 'skillBacktest' | 'skillConversations' | 'skillReview' | 'edit' | 'withdraw' | 'explore' | 'graph' | 'graph' | 'config' | 'injection' | 'rules' | 'ruleUsage' | 'ruleArchive' | 'createRule' | 'editRule' | 'saveArchive' | 'archives' | 'archiveCapacities' | 'archiveSearch' | 'archiveHistory' | 'setArchiveState' | 'sync' | 'syncRefresh' | 'registerTask'
+export type RpcEndpoint = 'status' | 'memories' | 'memory' | 'create' | 'organizeMemory' | 'skillBacktest' | 'skillConversations' | 'skillReview' | 'edit' | 'withdraw' | 'explore' | 'graph' | 'config' | 'injection' | 'rules' | 'ruleUsage' | 'ruleArchive' | 'createRule' | 'editRule' | 'saveArchive' | 'archives' | 'archiveCapacities' | 'archiveSearch' | 'archiveHistory' | 'setArchiveState' | 'workspaces' | 'sync' | 'syncRefresh' | 'registerTask'
   | 'settings' | 'saveInterface' | 'saveConnection' | 'saveInjection' | 'saveAutoStart' | 'testConnection' | 'testWake';
 
 export interface MemoriesRequest {
@@ -636,10 +691,6 @@ export interface MemoriesRequest {
   entity?: string;
   /** Scan order; a cursor only applies to the order it was issued for. */
   sort?: ListSort;
-  /** Management-page project filter; the conversation's project is not affected. */
-  projectId?: string;
-  /** Keep general memory in a project view; false with no projectId means general only. */
-  includeGlobal?: boolean;
 }
 export interface MemoryRequest {
   memoryId: string;

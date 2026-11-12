@@ -5,15 +5,17 @@ import type { AddressInfo } from 'node:net';
 import { createHttpServer } from '../../packages/protocols/http/src/index.ts';
 
 /**
- * Every provider read must say who is asking.
+ * Every model-facing read must say who is asking and which turn it belongs to.
  *
- * `/v1/recall` used to reach the application directly: the service token alone was enough, and no
- * grant was built, so the visibility rule the View enforces was bypassed. Recall now goes through
- * the same host-scoped client as injection.
+ * `/v1/recall` used to reach the application directly: the service token alone was enough, so any
+ * caller could spend the model budget and no turn was identified. A read now carries the Host and
+ * the turn identity the Host read from its own tool-execution context.
  */
 
 const TOKEN = 't'.repeat(32);
 const OPERATOR = 'o'.repeat(32);
+/** The turn identity a Host supplies; model parameters never carry these. */
+const TURN = { 'x-mnemoweave-session-id': 's-1', 'x-mnemoweave-turn-id': 'turn-1' };
 
 async function harness(): Promise<{ recalls: string[]; base: string; close: () => Promise<void> }> {
   const recalls: string[] = [];
@@ -45,16 +47,36 @@ test('recall without a Host header is refused and never reaches the Provider', a
   } finally { await close(); }
 });
 
-test('recall carries the calling Host through to the scoped path', async () => {
+test('recall carries the calling Host and turn through to the scoped path', async () => {
   const { recalls, base, close } = await harness();
   try {
     const response = await fetch(`${base}/v1/recall`, {
       method: 'POST',
-      headers: { authorization: `Bearer ${TOKEN}`, 'x-mnemoweave-host': 'dsh', 'content-type': 'application/json', connection: 'close' },
+      headers: { authorization: `Bearer ${TOKEN}`, 'x-mnemoweave-host': 'dsh', ...TURN, 'content-type': 'application/json', connection: 'close' },
       body: JSON.stringify({ query: 'anything', limit: 5 }),
     });
     assert.equal(response.status, 200);
     assert.deepEqual(recalls, ['dsh'], 'the grant is built for the identity that asked');
+  } finally { await close(); }
+});
+
+test('a partial turn identity is refused instead of being treated as an administrative read', async () => {
+  const { recalls, base, close } = await harness();
+  try {
+    // A call that names half a turn claims a per-turn budget it cannot identify; it must not be
+    // downgraded to the administrative recall.
+    for (const headers of [
+      { 'x-mnemoweave-turn-id': 'turn-1' },
+      { 'x-mnemoweave-session-id': 's-1' },
+    ]) {
+      const response = await fetch(`${base}/v1/recall`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${TOKEN}`, 'x-mnemoweave-host': 'dsh', ...headers, 'content-type': 'application/json', connection: 'close' },
+        body: JSON.stringify({ query: 'anything', limit: 5 }),
+      });
+      assert.equal(response.status, 401, JSON.stringify(headers));
+    }
+    assert.equal(recalls.length, 0, 'an unattributable read never reaches the Provider');
   } finally { await close(); }
 });
 
@@ -110,25 +132,41 @@ test('explore is a host-scoped read too, and validates its query', async () => {
   try {
     const withoutHost = await fetch(`${base.origin}/v1/memories/explore`, {
       method: 'POST',
-      headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json', connection: 'close' },
+      headers: { authorization: `Bearer ${TOKEN}`, ...TURN, 'content-type': 'application/json', connection: 'close' },
       body: JSON.stringify({ query: 'q' }),
     });
     assert.equal(withoutHost.status, 401);
 
-    const blank = await fetch(`${base.origin}/v1/memories/explore`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${TOKEN}`, 'x-mnemoweave-host': 'dsh', 'content-type': 'application/json', connection: 'close' },
-      body: JSON.stringify({ query: '  ' }),
-    });
-    assert.equal(blank.status, 400);
-    assert.equal(base.explored.length, 0, 'an empty query never reaches the Provider');
-
-    const accepted = await fetch(`${base.origin}/v1/memories/explore`, {
+    // A management search has no turn: it is bounded by the administrative limit instead.
+    const management = await fetch(`${base.origin}/v1/memories/explore`, {
       method: 'POST',
       headers: { authorization: `Bearer ${TOKEN}`, 'x-mnemoweave-host': 'dsh', 'content-type': 'application/json', connection: 'close' },
       body: JSON.stringify({ query: 'q' }),
     });
+    assert.equal(management.status, 200);
+    // Half an identity is not a management read either: it claims a turn it cannot name.
+    const halfTurn = await fetch(`${base.origin}/v1/memories/explore`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${TOKEN}`, 'x-mnemoweave-host': 'dsh', 'x-mnemoweave-session-id': 's-1', 'content-type': 'application/json', connection: 'close' },
+      body: JSON.stringify({ query: 'q' }),
+    });
+    assert.equal(halfTurn.status, 401);
+
+    const beforeBlank = base.explored.length;
+    const blank = await fetch(`${base.origin}/v1/memories/explore`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${TOKEN}`, 'x-mnemoweave-host': 'dsh', ...TURN, 'content-type': 'application/json', connection: 'close' },
+      body: JSON.stringify({ query: '  ' }),
+    });
+    assert.equal(blank.status, 400);
+    assert.equal(base.explored.length, beforeBlank, 'an empty query never reaches the Provider');
+
+    const accepted = await fetch(`${base.origin}/v1/memories/explore`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${TOKEN}`, 'x-mnemoweave-host': 'dsh', ...TURN, 'content-type': 'application/json', connection: 'close' },
+      body: JSON.stringify({ query: 'q' }),
+    });
     assert.equal(accepted.status, 200);
-    assert.deepEqual(base.explored, [{ hostId: 'dsh' }]);
+    assert.deepEqual(base.explored, [{ hostId: 'dsh' }, { hostId: 'dsh' }]);
   } finally { await base.close(); }
 });

@@ -20,7 +20,9 @@ import { mnemonBinary } from './mnemon-binary.ts';
 
 const DEVICE_TOKEN = 'e'.repeat(32);
 const B_TOKEN = 'c'.repeat(32);
-const SCOPE = 'project:alpha';
+const WORKSPACE = '11111111-1111-4111-8111-111111111111';
+const FORMAL_STREAM = 'formal-memories';
+const ARCHIVE_STREAM = `workspace-archives:${WORKSPACE}`;
 
 test('a user edit is confirmed remotely, applied locally and published once', async () => {
   const dir = resolve('work', 'edit-through-sync', randomUUID());
@@ -28,8 +30,11 @@ test('a user edit is confirmed remotely, applied locally and published once', as
   mkdirSync(join(dir, 'state'), { recursive: true });
 
   const remote = new SyncStore({ path: join(dir, 'remote.db') });
-  remote.enroll('device-local', DEVICE_TOKEN, [{ scope: SCOPE, canRead: true, canWrite: true }]);
-  remote.enroll('device-b', B_TOKEN, [{ scope: SCOPE, canRead: true, canWrite: true }]);
+  remote.enroll('device-local', DEVICE_TOKEN, [
+    { stream: FORMAL_STREAM, canRead: true, canWrite: true },
+    { stream: ARCHIVE_STREAM, canRead: true, canWrite: true },
+  ]);
+  remote.enroll('device-b', B_TOKEN, [{ stream: FORMAL_STREAM, canRead: true, canWrite: true }]);
   const server: Server = createSyncServer({ gateway: remote });
   await new Promise<void>((done) => server.listen(0, '127.0.0.1', () => done()));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -38,10 +43,10 @@ test('a user edit is confirmed remotely, applied locally and published once', as
   const seedRepo = new SqliteCandidates(resolve(join(dir, 'state', 'governance.db')));
   const seedProvider = new MnemonCliProvider({ binary: mnemonBinary(), dataDir: resolve(join(dir, 'provider')), store: 'edit_sync' });
   const request = RememberInput.parse({
-    idempotencyKey: `seed-${randomUUID()}`, content: '初始正文：发布路径写入。', knowledgeType: 'Practice', tags: [], projectId: 'alpha',
+    idempotencyKey: `seed-${randomUUID()}`, content: '初始正文：发布路径写入。', knowledgeType: 'Practice', tags: [],
     provenance: {
       source: 'local-user', sourceReference: 'e2e:seed', evidence: ['seed'], verificationStatus: 'verified',
-      confidence: 1, applicability: 'alpha', limitations: '无（验收固定值）', lastVerified: '2026-11-10T07:00:00.000Z',
+      confidence: 1, applicability: 'shared collection', limitations: '无（验收固定值）', lastVerified: '2026-11-10T07:00:00.000Z',
     },
   });
   const candidate = seedRepo.submit(request);
@@ -65,10 +70,10 @@ test('a user edit is confirmed remotely, applied locally and published once', as
     assert.equal(first.entryVersion, 1);
     assert.ok(first.providerMemoryId.length > 0);
 
-    const remotePage = remote.pull(DEVICE_TOKEN, { scope: SCOPE, since: 0, limit: 10 });
+    const remotePage = remote.pull(DEVICE_TOKEN, { stream: FORMAL_STREAM, since: 0, limit: 10 });
     assert.equal(remotePage.changes.length, 1);
     assert.equal(remotePage.changes[0]?.operation, 'create');
-    assert.equal(remotePage.changes[0]?.entry.kind, 'formal');
+    assert.equal(remotePage.changes[0]?.entry.kind, 'formal-memory');
 
     const listing = await app.client!.memories({ query: '第一次编辑', limit: 10 });
     assert.equal(listing.items.length, 1);
@@ -79,28 +84,31 @@ test('a user edit is confirmed remotely, applied locally and published once', as
       app.client!.editMemory(memoryId, { content: '过期基准的编辑。', entryVersion: 0 }),
       (error: unknown) => error instanceof MnemoWeaveError && error.code === 'VERSION_CONFLICT',
     );
-    assert.equal(remote.pull(DEVICE_TOKEN, { scope: SCOPE, since: 0, limit: 10 }).changes.length, 1, 'a rejected edit must not reach the remote');
+    assert.equal(remote.pull(DEVICE_TOKEN, { stream: FORMAL_STREAM, since: 0, limit: 10 }).changes.length, 1, 'a rejected edit must not reach the remote');
 
     const second = await app.client!.editMemory(memoryId, { content: '第二次编辑后的正文。', entryVersion: 1 });
     assert.equal(second.entryVersion, 2);
-    const changes = remote.pull(DEVICE_TOKEN, { scope: SCOPE, since: 0, limit: 10 }).changes;
+    const changes = remote.pull(DEVICE_TOKEN, { stream: FORMAL_STREAM, since: 0, limit: 10 }).changes;
     assert.equal(changes.length, 2);
     assert.equal(changes[1]?.operation, 'update');
     const listingAfter = await app.client!.memories({ query: '第二次编辑', limit: 10 });
     assert.equal(listingAfter.items[0]?.content, '第二次编辑后的正文。');
     assert.equal(listingAfter.items[0]?.entryVersion, 2);
-    assert.ok(app.client?.createArchive && app.client.editArchive && app.client.archives);
-    const archive = await app.client.createArchive({
-      projectId: 'alpha', title: 'Design record', body: 'Original archive', source: 'user',
+    assert.ok(app.client?.createArchive && app.client.editArchive && app.client.workspaces);
+    // An archive belongs to a registered workspace; registering is explicit and idempotent.
+    await app.client!.registerWorkspace!({ workspaceId: WORKSPACE, name: 'e2e workspace' }, true);
+    const archive = await app.client!.createArchive!({
+      workspaceId: WORKSPACE, title: 'Design record', body: 'Original archive', source: 'user',
       verification: 'open', evidence: 'Design review',
     });
     const archiveEdit = { title: archive.title, body: 'Revised archive', verification: 'verified', evidence: archive.evidence } as const;
-    const updated = await app.client.editArchive(archive.entryId, { ...archiveEdit, baseVersion: archive.version });
+    const updated = await app.client!.editArchive!(archive.entryId, { ...archiveEdit, baseVersion: archive.version });
     assert.equal(updated.version, archive.version + 1);
-    await assert.rejects(app.client.editArchive(archive.entryId, { ...archiveEdit, baseVersion: archive.version }),
+    await assert.rejects(app.client!.editArchive!(archive.entryId, { ...archiveEdit, baseVersion: archive.version }),
       (error: unknown) => error instanceof MnemoWeaveError && error.code === 'VERSION_CONFLICT');
-    assert.equal((await app.client.archives({ projectId: 'alpha' })).items[0]?.body, archiveEdit.body);
-    assert.deepEqual(remote.pull(DEVICE_TOKEN, { scope: SCOPE, since: 0, limit: 10 }).changes
+    assert.equal((await app.client!.archives!({ workspaceId: WORKSPACE })).items[0]?.body, archiveEdit.body);
+    // An archive travels on its own workspace stream, not on the formal-memory one.
+    assert.deepEqual(remote.pull(DEVICE_TOKEN, { stream: ARCHIVE_STREAM, since: 0, limit: 10 }).changes
       .filter(change => change.entry.entryId === archive.entryId).map(change => [change.operation, change.version]), [['create', 1], ['update', 2]]);
     // One edit is one local Revision: the initial publish plus two edits is three, not four.
     // Appending from both the sync apply step and the direct-edit path doubled the history.

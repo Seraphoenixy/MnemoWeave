@@ -71,12 +71,12 @@ const exploreResult: UiExplore = {
   hits: [
     {
       memoryId: '11111111-1111-4111-8111-111111111111', revisionId: '22222222-2222-4222-8222-222222222222',
-      providerMemoryId: 'p1', state: 'active', content: '第一条命中的正文', projectId: null,
+      providerMemoryId: 'p1', state: 'active', content: '第一条命中的正文',
       score: 0.93, publishedAt: '2026-11-10T00:00:00.000Z', category: 'decision',
     },
     {
       memoryId: '33333333-3333-4333-8333-333333333333', revisionId: '44444444-4444-4444-8444-444444444444',
-      providerMemoryId: 'p2', state: 'superseded', projectId: null,
+      providerMemoryId: 'p2', state: 'superseded',
       content: '第二条命中的正文', score: 0.61, publishedAt: '2026-11-09T00:00:00.000Z',
     },
   ],
@@ -84,8 +84,8 @@ const exploreResult: UiExplore = {
 
 const graphFixture: UiGraph = {
   nodes: [
-    { memoryId: '11111111-1111-4111-8111-111111111111', projectId: null, state: 'active', publishedAt: '2026-11-10T00:00:00.000Z', importance: 5 },
-    { memoryId: '22222222-2222-4222-8222-222222222222', projectId: null, state: 'superseded', publishedAt: '2026-11-09T00:00:00.000Z', category: 'decision' },
+    { memoryId: '11111111-1111-4111-8111-111111111111', state: 'active', publishedAt: '2026-11-10T00:00:00.000Z', importance: 5 },
+    { memoryId: '22222222-2222-4222-8222-222222222222', state: 'superseded', publishedAt: '2026-11-09T00:00:00.000Z', category: 'decision' },
   ],
   edges: [{
     relationId: 'edge-1', kind: 'Supersedes',
@@ -104,14 +104,18 @@ const settingsFixture: UiSettings = {
   connection: { serverUrl: 'http://127.0.0.1:4317', hostId: 'local-server', source: 'preference', hostSource: 'environment' },
   credential: { configured: true, source: 'environment', lastAuth: 'ok' },
   autoStart: { enabled: true, taskName: 'MnemoWeave Local Server', source: 'preference' },
-  injection: { projectId: null, injectTimeoutMs: 900, source: 'preference', timeoutSource: 'preference' },
+  injection: { workspaceId: null, injectTimeoutMs: 900, source: 'preference', timeoutSource: 'preference' },
   diagnostics: { serverReady: true, providerReady: true, syncEnabled: true, settingsPath: 'C:/tmp/settings.json' },
 };
 
 const syncFixture: UiSyncStatus = {
   enabled: true,
+  protocol: 2,
   updatedAt: '2026-11-11T05:00:00.000Z',
-  scopes: [{ scope: 'global', cursor: 12, lastPullAt: '2026-11-11T05:00:00.000Z', lastError: null, pending: 1, unknown: 0, unapplied: 0 }],
+  streams: [
+    { stream: 'rules', cursor: 12, lastPullAt: '2026-11-11T05:00:00.000Z', lastError: null, pending: 1, unknown: 0, unapplied: 0 },
+    { stream: 'formal-memories', cursor: 40, lastPullAt: '2026-11-11T05:00:00.000Z', lastError: null, pending: 0, unknown: 0, unapplied: 0 },
+  ],
 };
 
 test('the settings page shows the Provider recall diagnosis without inventing values', () => {
@@ -270,17 +274,14 @@ test('the formal-memory header names the page, its count and its four views', ()
   assert.match(html, /data-active="true">内容</, 'the active view is marked');
   assert.match(html, /新增记忆/, 'the page-level action is in the header');
   assert.doesNotMatch(html, /undefined/, 'no field is printed raw');
-  // The project selector belongs to this page, not to the conversation; without a handler the
-  // header does not draw one at all.
-  assert.doesNotMatch(html, /查看项目/);
-  const scoped = render(panels.MemoryPageHeader, {
+  // The shared collection has no workspace filter, so the header carries no selector at all —
+  // passing the removed props has no effect rather than drawing a dead control.
+  const withRemovedProps = render(panels.MemoryPageHeader, {
     count: '已载入 3 条', language: 'zh', active: 'content', creating: false, saving: false,
-    projects: [{ projectId: null, count: 2 }, { projectId: 'alpha', count: 1 }],
-    project: 'alpha', onProject: noop, onSelect: noop, onCreate: noop,
+    projects: [{ projectId: null, count: 2 }], project: 'alpha', onProject: noop, onSelect: noop, onCreate: noop,
   });
-  assert.match(scoped, /查看项目/, 'the page names its project selector');
-  assert.match(scoped, /value="alpha"/, 'the current project is selected');
-  assert.match(scoped, /alpha \(1\)/, 'the selector lists known projects with their counts');
+  assert.doesNotMatch(withRemovedProps, /查看项目/);
+  assert.doesNotMatch(withRemovedProps, /全部项目/);
 });
 
 test('the formal-memory overview counts what it holds and embeds the graph', () => {

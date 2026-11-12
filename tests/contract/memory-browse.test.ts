@@ -5,7 +5,7 @@ import { mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { configure } from '../../apps/server/src/config.ts';
 import { SqliteCandidates } from '../../packages/infrastructure/governance/src/index.ts';
-import { MnemonCliProvider } from '../../packages/providers/mnemon/src/index.ts';
+import { MnemonCliProvider, createRunner } from '../../packages/providers/mnemon/src/index.ts';
 import { RememberInput } from '../../packages/core/contracts/src/index.ts';
 import { mnemonBinary } from '../e2e/mnemon-binary.ts';
 
@@ -17,7 +17,6 @@ import { mnemonBinary } from '../e2e/mnemon-binary.ts';
  * still selectable.
  */
 
-const SCOPE = 'project:alpha';
 
 async function seed(
   root: string,
@@ -26,24 +25,38 @@ async function seed(
   mkdirSync(join(root, 'provider'), { recursive: true });
   mkdirSync(join(root, 'state'), { recursive: true });
   const repo = new SqliteCandidates(resolve(join(root, 'state', 'governance.db')));
-  const provider = new MnemonCliProvider({ binary: mnemonBinary(), dataDir: resolve(join(root, 'provider')), store: 'browse' });
-  const publish = async (content: string, projectId: string | null, index: number): Promise<void> => {
+  // This fixture writes every row through the real CLI. Under a full parallel run on Windows a
+  // spawn can fail for lack of process slots, which is an environment failure rather than a
+  // product one; the write is retried once so a busy machine does not report a memory bug.
+  const binary = mnemonBinary();
+  const provider = new MnemonCliProvider({ binary, dataDir: resolve(join(root, 'provider')), store: 'browse', runner: createRunner(binary, 120_000) });
+  const persist = async (content: string, source: string) => {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await provider.persistReviewed(content, source);
+      } catch (error) {
+        if (attempt >= 2 || (error as { code?: string }).code !== 'PROVIDER_UNAVAILABLE') throw error;
+        await new Promise(done => setTimeout(done, 500));
+      }
+    }
+  };
+  const publish = async (content: string, label: string, index: number): Promise<void> => {
     const request = RememberInput.parse({
-      idempotencyKey: `browse-${projectId ?? 'global'}-${index}`, content, knowledgeType: 'Practice', tags: [],
-      ...(projectId === null ? {} : { projectId }),
-            provenance: {
+      idempotencyKey: `browse-${label}-${index}`, content, knowledgeType: 'Practice', tags: [],
+      provenance: {
         source: 'local-user', sourceReference: `browse:${index}`, evidence: ['browse'], verificationStatus: 'verified',
-        confidence: 1, applicability: projectId ?? 'global', limitations: '无（验收固定值）', lastVerified: '2026-11-10T00:00:00.000Z',
+        confidence: 1, applicability: 'shared collection', limitations: '无（验收固定值）', lastVerified: '2026-11-10T00:00:00.000Z',
       },
     });
     const candidate = repo.submit(request);
-    const written = await provider.persistReviewed(request.content, `candidate:${candidate.id}`);
+    const written = await persist(request.content, `candidate:${candidate.id}`);
     repo.catalog.publishInitial(candidate.id, request, written.id, createHash('sha256').update(request.content).digest('hex'), '2026-11-10T00:00:00.000Z');
   };
   // Identical publishedAt on purpose: only the memoryId tie-break keeps the order stable.
-  for (let index = 0; index < counts.global; index += 1) await publish(`全局条目 ${index}`, null, index);
-  for (let index = 0; index < counts.alpha; index += 1) await publish(`甲项目条目 ${index}`, 'alpha', index);
-  for (let index = 0; index < counts.beta; index += 1) await publish(`乙项目条目 ${index}`, 'beta', index);
+  // "alpha" and "beta" only vary the text: the collection has no owner dimension.
+  for (let index = 0; index < counts.global; index += 1) await publish(`条目 ${index}`, 'global', index);
+  for (let index = 0; index < counts.alpha; index += 1) await publish(`甲组条目 ${index}`, 'alpha', index);
+  for (let index = 0; index < counts.beta; index += 1) await publish(`乙组条目 ${index}`, 'beta', index);
   // Synced entries are the ones that carry a category; the local publish path records only a
   // knowledge type, which is exactly the distinction the filter has to respect.
   for (const [index, meta] of (counts.categorized ?? []).entries()) {
@@ -55,7 +68,7 @@ async function seed(
         confidence: 1, applicability: 'global', limitations: '无（验收固定值）', lastVerified: '2026-11-10T00:00:00.000Z',
       },
     });
-    const written = await provider.persistReviewed(content, `candidate:${randomUUID()}`);
+    const written = await persist(content, `candidate:${randomUUID()}`);
     repo.catalog.publishSynced(
       randomUUID(), request, written.id, createHash('sha256').update(content).digest('hex'),
       '2026-11-10T00:00:00.000Z', 'sync', `synced revision ${index + 1}`,
@@ -92,28 +105,21 @@ test('paging covers every row exactly once, even when candidates share a timesta
   } finally { await app.close(); }
 });
 
-test('general and project memory share one library that the page can narrow by project', async () => {
+test('the list is one shared collection with no owner field or project filter', async () => {
   const root = resolve('work', 'browse-scope', randomUUID());
   const { app } = await seed(root, { global: 3, alpha: 2, beta: 1 });
   try {
-    // One library: the default list is every memory, each carrying its owner.
+    // One collection: every published memory appears, and no item carries an owner.
     const all = await app.client!.memories({ limit: 200 });
     assert.equal(all.items.length, 6);
-    assert.equal(all.items.filter(item => item.projectId === null).length, 3);
-    assert.equal(all.items.filter(item => item.projectId === 'alpha').length, 2);
-    assert.deepEqual(
-      (all.projects ?? []).map(entry => [entry.projectId, entry.count]).sort(),
-      [[null, 3], ['alpha', 2], ['beta', 1]],
-    );
-    // The management page's project narrows the view; general memory is included by default.
-    const alpha = await app.client!.memories({ limit: 200, projectId: 'alpha' });
-    assert.equal(alpha.items.length, 5);
-    assert.ok(alpha.items.every(item => item.projectId === null || item.projectId === 'alpha'));
-    const alphaOnly = await app.client!.memories({ limit: 200, projectId: 'alpha', includeGlobal: false });
-    assert.equal(alphaOnly.items.length, 2);
-    assert.ok(alphaOnly.items.every(item => item.projectId === 'alpha'));
-    // A project-filtered page still indexes the projects, so the selector never loses options.
-    assert.equal((alphaOnly.projects ?? []).length, 3);
+    for (const item of all.items) assert.equal(Object.hasOwn(item, 'projectId'), false);
+    assert.equal(Object.hasOwn(all, 'projects'), false);
+    // The classification facet still travels with the list, so the filter picker keeps its values.
+    assert.ok(all.categories !== undefined);
+    // A query filters the shared collection by text; there is nothing to narrow by workspace.
+    const filtered = await app.client!.memories({ limit: 200, query: '甲组' });
+    assert.equal(filtered.items.length, 2);
+    assert.ok(filtered.items.every(item => item.content.includes('甲组')));
   } finally { await app.close(); }
 });
 

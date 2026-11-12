@@ -1,20 +1,28 @@
-import { MemoryRuntime } from '../../../packages/core/application/src/runtime.ts';
-import type { ClientHttpEndpoints } from '../../../packages/protocols/http/src/index.ts';
-import { z } from 'zod';
 import { mkdirSync, statfsSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
+import { isAbsolute, join, resolve } from 'node:path';
+import { z } from 'zod';
+import type { ClientHttpEndpoints, TurnIdentity } from '../../../packages/protocols/http/src/index.ts';
 import { MnemonCliProvider } from '../../../packages/providers/mnemon/src/index.ts';
-import { MemoryApplication, SyncCoordinator, applyInboxEntry, archiveDraft, assertEntryVersion, planArchive, planArchiveEdit, planArchiveState, planEditChange, planRuleCreate, planRuleEdit, ruleDraft, ruleScope, selectIdleReviewSignals, submitLocalChange, toArchiveRecord, toRuleRecord } from '../../../packages/core/application/src/index.ts';
+import {
+  MemoryApplication, SyncCoordinator, TRIGGER_MAX_ACTIONS, TurnBudgetRegistry, applyInboxEntry, archiveDraft, assertEntryVersion, assertTriggerAllows,
+  clipChars, planArchive, planArchiveEdit, planArchiveState, planEditChange, planRuleCreate, planRuleEdit,
+  planWithdrawChange, ruleDraft, ruleUsage, selectIdleReviewSignals, submitLocalChange, toArchiveRecord,
+  toRuleRecord, archiveUsage, archiveReleaseCandidates,
+} from '../../../packages/core/application/src/index.ts';
 import type { FormalProviderPort, LocalWriteState } from '../../../packages/core/application/src/index.ts';
-import { ViewAssembler } from '../../../packages/core/application/src/view.ts';
-import { MnemoWeaveError, ArchiveCreate, ArchiveEdit, ArchiveSearchInput, ArchiveStateInput, HostEvent, IdleReviewRunFinishInput, IdleReviewRunItem, IdleReviewRunStartInput, IdleReviewRunStartOutput, IdleReviewScanInput, IdleReviewScanOutput, MemoryCreateInput, MemoryEditInput, MemoryList, MemoryWithdrawInput, RememberInput, RuleArchiveList, RuleCreate, RuleEdit, RuleList, SyncRefreshOutput, SyncStatusOutput, ViewRequest, ARCHIVE_ACTIVE_CAPACITY_BYTES, RULE_CAPACITY_BYTES, RULE_CAPACITY_MAX_BYTES, RULE_ITEM_MAX_BYTES } from '../../../packages/core/contracts/src/index.ts';
-import type { DiagnosticJobRecord, ReadGrantRecord, SyncEntryDraftValue } from '../../../packages/core/contracts/src/index.ts';
-import { SqliteCandidates } from '../../../packages/infrastructure/governance/src/index.ts';
+import {
+  ArchiveDistillationCreate, ArchiveStateInput, ARCHIVE_ACTIVE_CAPACITY_BYTES, FORMAL_STREAM, HostEvent,
+  IdleReviewRunFinishInput, IdleReviewRunItem, IdleReviewRunStartInput, IdleReviewRunStartOutput,
+  IdleReviewScanInput, IdleReviewScanOutput, MemoryCreateInput, MemoryEditInput, MemoryList, MemoryWithdrawInput,
+  MnemoWeaveError, RULE_CAPACITY_BYTES, RULE_CAPACITY_MAX_BYTES, RULE_ITEM_MAX_BYTES, RecallInput, RememberInput,
+  RuleArchiveList, RuleCreate, RuleEdit, RuleList, SyncRefreshOutput, SyncStatusOutput, WriteTaskAction,
+} from '../../../packages/core/contracts/src/index.ts';
 import type { PublishedFormal } from '../../../packages/infrastructure/governance/src/index.ts';
+import type { WriteTaskReceiptRecord } from '../../../packages/core/contracts/src/index.ts';
+import { SqliteCandidates } from '../../../packages/infrastructure/governance/src/index.ts';
 import { SyncClient } from '../../../packages/infrastructure/sync-client/src/index.ts';
 import { SyncService } from './sync-service.ts';
-import { isAbsolute, join } from 'node:path';
-import { resolve } from 'node:path';
 import { MemoryWorkflow } from '../../../packages/core/application/src/workflow.ts';
 import { VersionWorkflow } from '../../../packages/core/application/src/version-workflow.ts';
 
@@ -23,13 +31,11 @@ const Config = z.object({
   MNEMOWEAVE_PORT: z.coerce.number().int().min(0).max(65535).default(4317),
   MNEMOWEAVE_STATE_DIR: z.string().refine(isAbsolute, 'State directory must be absolute').optional(),
   MNEMOWEAVE_WORKER: z.enum(['on', 'off']).default('on'),
-  /** One byte-accounted runtime rule collection; metadata added by injection is counted by View. */
+  /** One byte-accounted rule collection; every enabled rule is injected whole. */
   MNEMOWEAVE_RULE_CAPACITY_BYTES: z.coerce.number().int().min(1).max(RULE_CAPACITY_MAX_BYTES).default(RULE_CAPACITY_BYTES),
   MNEMOWEAVE_RULE_ITEM_MAX_BYTES: z.coerce.number().int().min(1).max(RULE_CAPACITY_MAX_BYTES).default(RULE_ITEM_MAX_BYTES),
-  /** Active project archives per project scope; archived entries do not consume it. */
+  /** Active workspace archives per workspace; archived entries do not consume it. */
   MNEMOWEAVE_ARCHIVE_ACTIVE_CAPACITY_BYTES: z.coerce.number().int().min(1).default(ARCHIVE_ACTIVE_CAPACITY_BYTES),
-
-  // STORAGE-02: no fixed quota is preconfigured; this floor only stops the worker before disk exhaustion.
   MNEMOWEAVE_MIN_FREE_BYTES: z.coerce.number().int().nonnegative().optional(),
   MNEMOWEAVE_QUOTA_SOFT_BYTES: z.coerce.number().int().nonnegative().default(10 * 1024 ** 3),
   MNEMOWEAVE_QUOTA_HARD_BYTES: z.coerce.number().int().nonnegative().default(20 * 1024 ** 3),
@@ -40,6 +46,7 @@ const Config = z.object({
   MNEMOWEAVE_SYNC_INTERVAL_MS: z.coerce.number().int().nonnegative().default(300000),
   MNEMOWEAVE_SYNC_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),
 });
+
 /** Free-space floor guard for the worker; statfs errors fail open (no silent lockup). */
 function diskFloorGuard(dir: string, minFreeBytes: number): () => boolean {
   return () => {
@@ -50,17 +57,11 @@ function diskFloorGuard(dir: string, minFreeBytes: number): () => boolean {
 }
 
 /**
- * Host clients authenticate with the service token and identify themselves through
- * `x-mnemoweave-host`. Without per-host grants the effective scope is the whole store, so the
- * synthetic grant only carries the caller identity; there is nothing to revoke or expire.
- */
-/**
  * Keep only edges a renderer could actually draw.
  *
  * A graph response with an edge whose endpoint was dropped by the node cap would force every
- * client to re-implement this filter; a self-loop is also meaningless here, because a memory
- * cannot supersede itself. Exported so the rule is tested directly instead of through a fixture
- * that would have to run the whole candidate pipeline to produce one relation.
+ * client to re-implement this filter; a self-loop is also meaningless here. Exported so the rule
+ * is tested directly instead of through a fixture that would have to run the whole pipeline.
  */
 export function drawableEdges(
   nodeIds: Iterable<string>,
@@ -79,22 +80,8 @@ export function drawableEdges(
     }));
 }
 
-/**
- * A byte-bounded UTF-8 prefix. Search evidence is measured in bytes, so a cut must not
- * split a multi-byte character or it would change the text that reaches the model.
- */
-function utf8Prefix(text: string, maxBytes: number): { text: string; bytes: number } {
-  const bytes = Buffer.byteLength(text, 'utf8');
-  if (bytes <= maxBytes) return { text, bytes };
-  const buffer = Buffer.from(text, 'utf8');
-  let end = maxBytes;
-  while (end > 0 && (buffer[end]! & 0xc0) === 0x80) end -= 1;
-  const prefix = buffer.subarray(0, end).toString('utf8');
-  return { text: prefix, bytes: Buffer.byteLength(prefix, 'utf8') };
-}
-
 /** A deterministic ranking signal: exact title hits first, then verification, then recency. */
-function scoreArchive(row: { title: string; body: string; verification: string; updatedAt?: string | undefined }, query: string): number {
+export function scoreArchive(row: { title: string; body: string; verification: string }, query: string): number {
   const lowered = query.toLowerCase();
   let score = Number(row.title.toLowerCase().includes(lowered)) * 12;
   score += Number(row.body.toLowerCase().includes(lowered)) * 4;
@@ -103,61 +90,38 @@ function scoreArchive(row: { title: string; body: string; verification: string; 
 }
 
 /**
- * Only the classification the caller actually set.
- *
- * An omitted field must inherit the previous revision rather than be cleared, so this returns
- * just the present ones — an explicitly empty tag list still means "clear them".
+ * Only the classification the caller actually set. An omitted field inherits the previous
+ * revision rather than being cleared; an explicitly empty tag list still means "clear them".
  */
-function classificationOf(input: {
+export function classificationOf(input: {
   category?: string | undefined;
   knowledgeType?: string | undefined;
   importance?: number | undefined;
   tags?: string[] | undefined;
-}): {
-  category?: string;
-  knowledgeType?: string;
-  importance?: number;
-  tags?: string[];
-} {
+  entities?: string[] | undefined;
+}): { category?: string; knowledgeType?: string; importance?: number; tags?: string[]; entities?: string[] } {
   return {
     ...(input.category === undefined ? {} : { category: input.category }),
     ...(input.knowledgeType === undefined ? {} : { knowledgeType: input.knowledgeType }),
     ...(input.importance === undefined ? {} : { importance: input.importance }),
     ...(input.tags === undefined ? {} : { tags: input.tags }),
+    ...(input.entities === undefined ? {} : { entities: input.entities }),
   };
 }
 
-/**
- * List cursors are keyset positions, not array offsets.
- *
- * An offset assumes the list between pages is unchanged. It is not: publishing, withdrawing or a
- * sync apply can insert or remove a row, and an offset then repeats or skips memories. The cursor
- * therefore carries the sort key of the last row returned — `publishedAt` and `memoryId` — and the
- * next page continues strictly after that key, whatever happened in between.
- *
- * Encoded as text so clients treat it as opaque.
- */
 interface ListCursor { sort: ListSort; publishedAt: string; importance: number | null; memoryId: string }
-
-/** Orders the list can be scanned in; the cursor carries the one it was issued for. */
 type ListSort = 'newest' | 'oldest' | 'importance';
 
-function encodeListCursor(cursor: ListCursor): string {
-  // `|` cannot appear in a timestamp, an integer or a UUID, so splitting stays unambiguous where
-  // the ISO timestamp's own colons would not.
+/** List cursors are keyset positions, not array offsets, so concurrent writes cannot shift a page. */
+export function encodeListCursor(cursor: ListCursor): string {
   return Buffer.from(`v3|${cursor.sort}|${cursor.publishedAt}|${cursor.importance ?? ''}|${cursor.memoryId}`, 'utf8').toString('base64url');
 }
 
-function decodeListCursor(cursor: string | undefined): ListCursor | null {
+export function decodeListCursor(cursor: string | undefined): ListCursor | null {
   if (cursor === undefined) return null;
   let decoded: string;
   try { decoded = Buffer.from(cursor, 'base64url').toString('utf8'); } catch { throw new MnemoWeaveError('INVALID_INPUT'); }
-  // A v2 cursor predates sorting, so it can only mean the default order.
-  const legacy = /^v2:(.+):([0-9a-f-]{36})$/.exec(decoded);
-  if (legacy) return { sort: 'newest', publishedAt: legacy[1]!, importance: null, memoryId: legacy[2]! };
   const parts = decoded.split('|');
-  // An unrecognised cursor is refused rather than silently restarting: restarting would show the
-  // first page again and look like duplicated data.
   if (parts.length !== 5 || parts[0] !== 'v3') throw new MnemoWeaveError('INVALID_INPUT');
   const [, sort, publishedAt, importance, memoryId] = parts as [string, string, string, string, string];
   if (sort !== 'newest' && sort !== 'oldest' && sort !== 'importance') throw new MnemoWeaveError('INVALID_INPUT');
@@ -167,15 +131,7 @@ function decodeListCursor(cursor: string | undefined): ListCursor | null {
   return { sort, publishedAt, importance: parsedImportance, memoryId };
 }
 
-/**
- * Order of two entries; negative means `left` appears first.
- *
- * Every order falls back to `publishedAt` and then `memoryId`, so the sequence is total: two
- * entries can never compare equal, which is what keeps a keyset cursor from repeating or skipping.
- * An unrecorded importance sorts last rather than being guessed at, and is still returned as
- * absent so the caller can tell "not recorded" from "recorded as low".
- */
-function compareEntries(
+export function compareEntries(
   left: { publishedAt: string; importance: number | null; memoryId: string },
   right: { publishedAt: string; importance: number | null; memoryId: string },
   sort: ListSort,
@@ -193,8 +149,7 @@ function compareEntries(
   return tieBreak();
 }
 
-/** Strictly after the cursor in the requested order. */
-function isAfterCursor(
+export function isAfterCursor(
   entry: { publishedAt: string; importance: number | null; memoryId: string },
   cursor: ListCursor | null,
 ): boolean {
@@ -202,11 +157,44 @@ function isAfterCursor(
   return compareEntries(entry, cursor, cursor.sort) > 0;
 }
 
-function clientGrant(hostId: string): ReadGrantRecord {
-  const now = Date.now();
+/**
+ * Archive segment cursors are opaque and bound to the host, session, entry, workspace and version
+ * they were issued for. Changing any of those (especially a new archive version) invalidates the
+ * cursor instead of resuming at an offset into text the user never saw.
+ */
+interface SegmentCursor { hostId: string; sessionId: string; entryId: string; workspaceId: string; version: number; offset: number }
+
+export function encodeSegmentCursor(cursor: SegmentCursor): string {
+  return Buffer.from(`s1|${cursor.hostId}|${cursor.sessionId}|${cursor.entryId}|${cursor.workspaceId}|${cursor.version}|${cursor.offset}`, 'utf8').toString('base64url');
+}
+
+export function decodeSegmentCursor(value: string): SegmentCursor {
+  let decoded: string;
+  try { decoded = Buffer.from(value, 'base64url').toString('utf8'); } catch { throw new MnemoWeaveError('INVALID_INPUT'); }
+  const parts = decoded.split('|');
+  if (parts.length !== 7 || parts[0] !== 's1') throw new MnemoWeaveError('INVALID_INPUT');
+  const [, hostId, sessionId, entryId, workspaceId, version, offset] = parts as [string, string, string, string, string, string, string];
+  const parsedVersion = Number(version);
+  const parsedOffset = Number(offset);
+  if (!Number.isInteger(parsedVersion) || parsedVersion < 1 || !Number.isInteger(parsedOffset) || parsedOffset < 0) {
+    throw new MnemoWeaveError('INVALID_INPUT');
+  }
+  return { hostId, sessionId, entryId, workspaceId, version: parsedVersion, offset: parsedOffset };
+}
+
+/** Shape one stored receipt for the HTTP contract. */
+function toReceipt(row: {
+  taskId: string; index: number; kind: string; action: string; status: string;
+  memoryId: string | null; entryVersion: number | null; entryId: string | null;
+  candidateId: string | null; errorCode: string | null; updatedAt: string;
+}): WriteTaskReceiptRecord {
   return {
-    grantId: randomUUID(), hostId, projects: ['*'], globalIncluded: true,
-    issuedAt: new Date(now).toISOString(), expiresAt: new Date(now + 10 * 365 * 86_400_000).toISOString(), generation: 0,
+    taskId: row.taskId, index: row.index,
+    kind: row.kind as WriteTaskReceiptRecord['kind'],
+    action: row.action as WriteTaskReceiptRecord['action'],
+    status: row.status as WriteTaskReceiptRecord['status'],
+    memoryId: row.memoryId, entryVersion: row.entryVersion, entryId: row.entryId,
+    candidateId: row.candidateId, errorCode: row.errorCode, updatedAt: row.updatedAt,
   };
 }
 
@@ -218,6 +206,12 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
   };
   const archiveLimitBytes = config.MNEMOWEAVE_ARCHIVE_ACTIVE_CAPACITY_BYTES;
   if (config.MNEMOWEAVE_QUOTA_SOFT_BYTES >= config.MNEMOWEAVE_QUOTA_HARD_BYTES) throw new Error('Quota soft limit must be below the hard limit');
+  // The project-based configuration was removed with the workspace model. A stale value is
+  // reported once at start so the operator moves to MNEMOWEAVE_WORKSPACE_ID instead of silently
+  // running without a binding.
+  if (env['MNEMOWEAVE_PROJECT_ID'] !== undefined) {
+    process.stderr.write(`${JSON.stringify({ event: 'config_expired', variable: 'MNEMOWEAVE_PROJECT_ID', replacement: 'MNEMOWEAVE_WORKSPACE_ID' })}\n`);
+  }
   const provider = new MnemonCliProvider({ binary: config.MNEMON_BINARY, dataDir: config.MNEMON_DATA_DIR, store: config.MNEMON_STORE });
   const candidates = config.MNEMOWEAVE_STATE_DIR
     ? new SqliteCandidates(join(config.MNEMOWEAVE_STATE_DIR, 'governance.db'), { softBytes: config.MNEMOWEAVE_QUOTA_SOFT_BYTES, hardBytes: config.MNEMOWEAVE_QUOTA_HARD_BYTES })
@@ -226,6 +220,8 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
   let sync: SyncService | undefined;
   let coordinator: SyncCoordinator | undefined;
   let formalProvider: FormalProviderPort | undefined;
+  const budgets = new TurnBudgetRegistry();
+  const BACKFILL_KIND = 'embedding-backfill';
   try {
     candidates?.bindProvider(JSON.stringify({ directory: resolve(config.MNEMON_DATA_DIR), store: config.MNEMON_STORE }));
 
@@ -233,94 +229,48 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
     if (syncConfigured && !(config.MNEMOWEAVE_SYNC_URL && config.MNEMOWEAVE_SYNC_DEVICE_ID && config.MNEMOWEAVE_SYNC_TOKEN)) throw new Error('Remote sync requires URL, device id and token together');
     if (candidates && config.MNEMOWEAVE_WORKER === 'on') {
       const admit = config.MNEMOWEAVE_MIN_FREE_BYTES === undefined ? undefined : diskFloorGuard(config.MNEMOWEAVE_STATE_DIR!, config.MNEMOWEAVE_MIN_FREE_BYTES);
-      // No gateway and no background capture: the runtime capture queue reports that it awaits
-      // the host's own model rather than running one here.
-      workflow = new MemoryWorkflow(candidates, provider, 90000, new VersionWorkflow(candidates, provider), 2, admit, 3_600_000, () => candidates.runtime.tick(undefined)); workflow.start();
+      workflow = new MemoryWorkflow(candidates, provider, 90000, new VersionWorkflow(candidates, provider), 2, admit, 3_600_000, async () => candidates!.turns.tick());
+      workflow.start();
     }
     const app = new MemoryApplication(provider, candidates, candidates);
-    /**
-   * Is this exact text already a published memory?
-   *
-   * Returns the existing memory in the shape the create call answers with, or null. A Provider that
-   * cannot answer counts as "no match": refusing every creation because the duplicate check failed
-   * would turn a transient error into a broken feature, and the publisher's own duplicate handling
-   * still runs afterwards.
-   */
-  const findExactDuplicate = async (content: string): Promise<{
-    memoryId: string; revisionId: string; providerMemoryId: string; contentHash: string; entryVersion: number; duplicate: true;
-  } | null> => {
-    if (!candidates) return null;
-    let providerId: string;
-    try {
-      const exact = await provider.inspectExact(content);
-      if (!exact.complete || exact.matches.length !== 1) return null;
-      providerId = exact.matches[0]!.id;
-    } catch { return null; }
-    const hash = createHash('sha256').update(content).digest('hex');
-    for (const memoryId of candidates.catalog.currentMemoryIds(providerId)) {
-      const descriptor = candidates.catalog.get(memoryId);
-      if (descriptor.state !== 'active') continue;
-      const current = descriptor.revisions.find(revision => revision.id === descriptor.currentRevisionId);
-      if (!current || current.contentHash !== hash) continue;
-      return {
-        memoryId, revisionId: current.id, providerMemoryId: providerId,
-        contentHash: current.contentHash, entryVersion: candidates.memory.entryVersion(memoryId),
-        duplicate: true,
-      };
-    }
-    return null;
-  };
 
-  let client: ClientHttpEndpoints | undefined;
+    /**
+     * Is this exact text already a published memory? The check covers the whole shared
+     * collection: a Provider id that anchors an active catalog memory with the same body is the
+     * same knowledge, whichever workspace the caller was working in.
+     */
+    const findExactDuplicate = async (content: string): Promise<{
+      memoryId: string; revisionId: string; providerMemoryId: string; contentHash: string; entryVersion: number; duplicate: true;
+    } | null> => {
+      if (!candidates) return null;
+      let providerId: string;
+      try {
+        const exact = await provider.inspectExact(content);
+        if (!exact.complete || exact.matches.length !== 1) return null;
+        providerId = exact.matches[0]!.id;
+      } catch { return null; }
+      const hash = createHash('sha256').update(content, 'utf8').digest('hex');
+      for (const memoryId of candidates.catalog.currentMemoryIds(providerId)) {
+        const descriptor = candidates.catalog.get(memoryId);
+        if (descriptor.state !== 'active') continue;
+        const current = descriptor.revisions.find(revision => revision.id === descriptor.currentRevisionId);
+        if (!current || current.contentHash !== hash) continue;
+        return {
+          memoryId, revisionId: current.id, providerMemoryId: providerId,
+          contentHash: current.contentHash, entryVersion: candidates.memory.entryVersion(memoryId),
+          duplicate: true,
+        };
+      }
+      return null;
+    };
+
+    let client: ClientHttpEndpoints | undefined;
     if (candidates && config.MNEMOWEAVE_STATE_DIR) {
-      // VIEW-01/02: assembly re-checks publication state and budget; grants are implicit now.
-      // Rules carry no scope: every enabled rule applies to every session.
-      const ruleSource = () => candidates.memory.rulesFor()
-        .map(row => ({
-          entryId: row.entryId, version: row.version, body: row.body,
-          importance: row.importance ?? 'normal', pinned: row.pinned === true,
-          bodyBytes: Buffer.byteLength(row.body, 'utf8'),
-          ...(row.createdAt === undefined ? {} : { createdAt: row.createdAt }),
-        }));
-      const assembler = new ViewAssembler(app, { rules: ruleSource });
-      const memoryRuntime = new MemoryRuntime(candidates.runtime, assembler);
+      const now = () => new Date().toISOString();
       /**
-       * A local write becomes visible only after the remote confirms it.
-       *
-       * The previous order stored the body first and submitted afterwards, so a rejected
-       * write (version conflict, or an entry that already had an unconfirmed change) still
-       * left the refused text in `runtime_rules` / `project_archives`, where injection and
-       * recall read it. Queued and unknown outcomes are genuinely pending — those are
-       * persisted, because nothing was refused and the periodic pass will finish them.
-       */
-      const submitLocal = async (
-        scope: string,
-        operation: 'create' | 'update' | 'delete',
-        entry: SyncEntryDraftValue,
-        baseVersion: number,
-        applyLocal: () => void,
-        /** Caller-supplied change id, so the caller can look up its own inbox row afterwards. */
-        changeId?: string,
-      ): Promise<LocalWriteState | 'local_only'> => {
-        if (!coordinator) { applyLocal(); return 'local_only'; }
-        const result = await submitLocalChange({ scope, operation, entry, baseVersion }, {
-          ledger: candidates.ledger,
-          flush: () => coordinator!.flushOutbox(),
-          now: () => new Date().toISOString(),
-          ...(changeId === undefined ? {} : { changeId }),
-        });
-        // Confirmed, queued or unknown: the change exists and will not be withdrawn, so the
-        // working copy matches what the remote will serve to every other machine.
-        applyLocal();
-        return result.state;
-      };
-      /**
-       * Serializes edits of one logical memory.
-       *
-       * The version check and the Provider write are separated by several awaits. Two requests
-       * carrying the same `entryVersion` both passed the check and both published, so the base
-       * version stopped protecting anything. The lock is per entry, so unrelated memories still
-       * edit in parallel.
+       * Serializes edits of one logical memory. The version check and the Provider write are
+       * separated by several awaits; without the lock two requests carrying the same
+       * `entryVersion` both pass the check and both publish.
        */
       const editLocks = new Map<string, Promise<unknown>>();
       const withEditLock = async <T>(memoryId: string, operation: () => Promise<T>): Promise<T> => {
@@ -328,64 +278,174 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
         const run = previous.then(operation, operation);
         const settled = run.then(() => undefined, () => undefined);
         editLocks.set(memoryId, settled);
-        try {
-          return await run;
-        } finally {
-          // Only the last waiter removes the entry, so a queued edit still sees its predecessor.
-          if (editLocks.get(memoryId) === settled) editLocks.delete(memoryId);
-        }
+        try { return await run; }
+        finally { if (editLocks.get(memoryId) === settled) editLocks.delete(memoryId); }
       };
-      /**
-       * Rule capacity is a property of the whole collection, so planning two writes against the
-       * same snapshot and saving both would exceed the limit. This lock covers plan, remote
-       * confirmation and the local save; distinct archives keep their own locks.
-       */
+      /** Rule capacity is a property of the whole collection, so writes plan against one snapshot. */
       let ruleWrite = Promise.resolve();
       const withRuleLock = async <T>(operation: () => Promise<T>): Promise<T> => {
         const run = ruleWrite.then(operation, operation);
         ruleWrite = run.then(() => undefined, () => undefined);
         return run;
       };
-      /**
-       * Archive capacity belongs to a project scope. Serializing archive writes (including state
-       * changes) keeps a plan from being based on usage another write already consumed.
-       */
-      let archiveWrite = Promise.resolve();
-      const withArchiveLock = async <T>(operation: () => Promise<T>): Promise<T> => {
-        const run = archiveWrite.then(operation, operation);
-        archiveWrite = run.then(() => undefined, () => undefined);
+      /** Archive capacity belongs to one workspace; writes for that workspace are serialized. */
+      const archiveWrites = new Map<string, Promise<unknown>>();
+      const withArchiveLock = async <T>(workspaceId: string, operation: () => Promise<T>): Promise<T> => {
+        const previous = archiveWrites.get(workspaceId) ?? Promise.resolve();
+        const run = previous.then(operation, operation);
+        archiveWrites.set(workspaceId, run.then(() => undefined, () => undefined));
         return run;
       };
+
+      /**
+       * A local write becomes visible only after the remote confirms it. Queued and unknown
+       * outcomes are persisted because nothing was refused.
+       */
+      const submitLocal = async (input: Parameters<typeof submitLocalChange>[0], applyLocal: () => void): Promise<LocalWriteState | 'local_only'> => {
+        if (!coordinator) { applyLocal(); return 'local_only'; }
+        const result = await submitLocalChange(input, {
+          ledger: candidates.ledger,
+          flush: () => coordinator!.flushOutbox(),
+          now,
+        });
+        applyLocal();
+        return result.state;
+      };
+      const applyFormal = async (): Promise<void> => {
+        await coordinator!.applyStream(FORMAL_STREAM, row => applyInboxEntry(row, { store: candidates!.memory, provider: formalProvider!, ruleLimits }));
+      };
+      /** Apply an archive stream whose stream id carries the workspace id. */
+      const applyArchive = async (workspaceId: string): Promise<void> => {
+        const stream = `workspace-archives:${workspaceId}`;
+        await coordinator!.applyStream(stream, row => applyInboxEntry(row, { store: candidates!.memory, provider: formalProvider!, ruleLimits }));
+      };
+
+      /** Rule writes: plan, remote-confirm, then accept. A refused capacity leaves the draft. */
+      const writeRule = async (operation: 'create' | 'update', row: ReturnType<typeof planRuleCreate>['row'], baseVersion: number) => {
+        const state = await submitLocal({ operation, entry: ruleDraft(row), baseVersion }, () => candidates.memory.saveRule(row, now()));
+        if (state === 'queued') throw new MnemoWeaveError('SYNC_QUEUED');
+        if (state === 'unknown') throw new MnemoWeaveError('SYNC_OUTCOME_UNKNOWN');
+        return toRuleRecord(row);
+      };
+
+      /**
+       * Publish one workspace archive through the remote when sync is enabled. The remote assigns
+       * the version; the local copy is written only after that version is applied, and the
+       * confirmed version is what the caller gets back.
+       */
       const writeArchive = async (row: ReturnType<typeof planArchive>, baseVersion: number) => {
         if (!coordinator || !formalProvider) {
-          candidates.memory.upsertArchive(row, new Date().toISOString());
+          candidates.memory.upsertArchive(row, now());
+          candidates.memory.setEntryVersion(row.entryId, Math.max(1, row.version), now());
           return toArchiveRecord(row);
         }
         const confirmed = candidates.memory.entryVersion(row.entryId);
         if (confirmed !== 0 && confirmed !== baseVersion) throw new MnemoWeaveError('VERSION_CONFLICT');
-        const scope = `project:${row.projectId}`;
-        const result = await submitLocal(scope, confirmed === 0 ? 'create' : 'update', archiveDraft(row), confirmed, () => undefined);
-        if (result === 'queued') throw new MnemoWeaveError('SYNC_QUEUED');
-        if (result === 'unknown') throw new MnemoWeaveError('SYNC_OUTCOME_UNKNOWN');
-        await coordinator.applyScope(scope, record => applyInboxEntry(record, { store: candidates.memory, provider: formalProvider!, archiveCapacityBytes: archiveLimitBytes }));
+        const state = await submitLocal({ operation: confirmed === 0 ? 'create' : 'update', entry: archiveDraft(row), baseVersion: confirmed }, () => undefined);
+        if (state === 'queued') throw new MnemoWeaveError('SYNC_QUEUED');
+        if (state === 'unknown') throw new MnemoWeaveError('SYNC_OUTCOME_UNKNOWN');
+        await applyArchive(row.workspaceId);
         const current = candidates.memory.archive(row.entryId);
         if (!current || current.version <= confirmed) throw new MnemoWeaveError('SYNC_OUTCOME_UNKNOWN');
         return toArchiveRecord(current);
       };
-      /** Search call budget resets when a new View is assembled, so it is a per-turn budget. */
-      const archiveSearchCalls = new Map<string, number>();
+
+      /** Share one published memory now and wait for the remote to confirm and apply it. */
+      const shareMemory = async (publication: { memoryId: string; revisionId: string; providerId: string }): Promise<'confirmed' | 'queued' | 'unknown' | 'failed'> => {
+        if (!coordinator) return 'confirmed';
+        const descriptor = candidates.catalog.get(publication.memoryId);
+        const revision = descriptor.revisions.find(item => item.id === publication.revisionId);
+        if (!revision) return 'failed';
+        const published: PublishedFormal = {
+          memoryId: publication.memoryId,
+          providerId: publication.providerId,
+          version: revision.number,
+          content: (await provider.readMemory(publication.providerId)).content,
+          contentHash: revision.contentHash,
+          stream: FORMAL_STREAM,
+        };
+        candidates.memory.upsertFormalMap({
+          entryId: published.memoryId, version: published.version, providerId: published.providerId,
+          contentHash: published.contentHash, state: 'applied', appliedAt: now(),
+        }, now());
+        try {
+          const state = await submitLocal({
+            operation: published.version === 1 ? 'create' : 'update',
+            baseVersion: published.version - 1,
+            entry: {
+              entryId: published.memoryId,
+              kind: 'formal-memory',
+              content: { format: 'plain', data: published.content, contentHash: published.contentHash, byteLength: Buffer.byteLength(published.content, 'utf8') },
+              payload: {
+                category: 'fact', importance: 3, tags: [], entities: [],
+                relations: published.version > 1
+                  ? [{ type: 'supersedes' as const, from: { entryId: published.memoryId, version: published.version - 1 }, to: { entryId: published.memoryId, version: published.version } }]
+                  : [],
+              },
+              withdrawnAt: null,
+            },
+          }, () => undefined);
+          if (state === 'queued') return 'queued';
+          if (state === 'unknown') return 'unknown';
+          await applyFormal();
+          // Success means the local catalog maps the version the remote assigned, not merely that
+          // the push returned.
+          if (!candidates.memory.formalProviderId(published.memoryId, published.version)) return 'unknown';
+          candidates.settleShare(published.memoryId, 'confirmed', null, now());
+          return 'confirmed';
+        } catch (error) {
+          const code = error instanceof MnemoWeaveError ? error.code : 'INTERNAL';
+          candidates.settleShare(published.memoryId, 'failed', code, now());
+          process.stderr.write(`${JSON.stringify({ event: 'published_memory_not_shared', memoryId: published.memoryId, code })}\n`);
+          return 'failed';
+        }
+      };
+
+      /**
+       * The workspace a session is bound to. The model never supplies it: the host reads it from
+       * the session and the Server resolves the binding it recorded at session start.
+       */
+      const sessionWorkspace = (hostId: string, turn: TurnIdentity | undefined): string => {
+        if (turn === undefined) throw new MnemoWeaveError('WORKSPACE_REQUIRED');
+        const workspaceId = candidates.workspaces.sessionWorkspace(hostId, turn.sessionId);
+        if (workspaceId === null) throw new MnemoWeaveError('WORKSPACE_REQUIRED');
+        return workspaceId;
+      };
+      /**
+       * A model-facing read must present a turn the Server can account for. A turn marked
+       * "do not retain" may not start a write or read a per-turn budget beyond its own reads.
+       */
+      const requireTurn = (hostId: string, turn: TurnIdentity): TurnIdentity => {
+        if (candidates.turns.isClosed(hostId, turn.sessionId)) throw new MnemoWeaveError('INVALID_STATE');
+        return turn;
+      };
+
+      /** Read the whole rule set and report it; an over-capacity set is refused, never trimmed. */
+      const injectionFor = async (hostId: string, sessionId: string) => {
+        const rows = candidates.memory.rulesFor();
+        const usage = ruleUsage(rows, ruleLimits);
+        if (usage.exceeded) throw new MnemoWeaveError('RULE_CAPACITY_EXCEEDED');
+        const createdAt = now();
+        const record = {
+          hostId, sessionId,
+          rules: rows.map(row => ({
+            entryId: row.entryId, version: row.version, body: row.body,
+            importance: row.importance ?? 'normal', bodyBytes: Buffer.byteLength(row.body, 'utf8'),
+          })),
+          usedBytes: usage.usedBytes, limitBytes: usage.limitBytes, complete: true, createdAt,
+        };
+        candidates.memory.recordInjection({ id: randomUUID(), hostId, sessionId, ruleCount: record.rules.length, usedBytes: usage.usedBytes, createdAt });
+        return record;
+      };
+
       /** One durable vector backfill at a time; the row is the state, not an in-memory flag. */
-      const BACKFILL_KIND = 'embedding-backfill';
       const readEmbedding = async () => { try { return await provider.embeddingStatus(); } catch { return undefined; } };
-      const startBackfill = (): DiagnosticJobRecord => {
+      const startBackfill = (): import('../../../packages/core/contracts/src/index.ts').DiagnosticJobRecord => {
         const job = candidates.memory.beginDiagnosticJob(BACKFILL_KIND);
         void (async () => {
           try {
             const before = await readEmbedding();
             const result = await provider.embedAll();
-            // `embed --all` output is not a stable contract; the coverage report is. The job is
-            // succeeded only when the command reported no error, and the after-count shows what
-            // actually changed.
             const after = await readEmbedding();
             candidates.memory.finishDiagnosticJob(job.id, result.error === null ? 'succeeded' : 'failed', {
               ...(before === undefined ? {} : { embeddedBefore: before.embedded }),
@@ -398,60 +458,633 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
         })();
         return job;
       };
-      client = {
-        view: async (hostId, input) => {
-          archiveSearchCalls.delete(hostId);
-          const request = ViewRequest.parse(input);
-          const view = await memoryRuntime.view(clientGrant(hostId), request);
-          candidates.memory.recordInjection({
-            id: randomUUID(), hostId, sessionId: request.sessionId ?? 'unspecified',
-            rulesInjected: view.rules?.length ?? 0,
-            rulesOmitted: view.rulesBudget?.exceeded ? 'budget_exceeded' : null,
-            ...(view.rulesBudget?.exceeded
-              ? {
-                rulesOmittedCount: view.rulesBudget.omittedCount,
-                rulesOmissionReason: view.budgetOmissions?.find(item => item.kind === 'rules')?.reason ?? 'rule budget could not hold complete rules',
-              }
-              : {}),
-            memoriesInjected: view.memories.length,
-            usedTokens: view.budget.usedTokens,
-            createdAt: new Date().toISOString(),
+
+      /**
+       * Publish one formal-memory create from an authorized task action.
+       *
+       * Shared by the ordinary task create and the archive-distillation confirmation: both hand
+       * over a fixed body plus classification, and both follow the same duplicate, review and
+       * sync-confirmation rules.
+       */
+      const publishFormalTaskAction = async (input: {
+        taskId: string;
+        index: number;
+        content: string;
+        reason: string;
+        trigger: 'conversation' | 'organize' | 'reply-save' | 'archive-distill' | 'idle-review';
+        knowledgeType?: string | undefined;
+        category?: string | undefined;
+        importance?: number | undefined;
+        tags?: string[] | undefined;
+        entities?: string[] | undefined;
+        evidenceRefs?: string[] | undefined;
+        assessment?: 'supported' | 'uncertain' | 'conflict' | undefined;
+      }): Promise<{ status: 'published' | 'duplicate' | 'needs_review'; memoryId?: string | null; entryVersion?: number | null; candidateId?: string | null }> => {
+        const duplicate = await findExactDuplicate(input.content);
+        if (duplicate !== null) return { status: 'duplicate', memoryId: duplicate.memoryId, entryVersion: duplicate.entryVersion };
+        const reference = `write-task:${input.taskId}:${input.index}`;
+        if (input.assessment === 'uncertain' || input.assessment === 'conflict') {
+          const candidate = candidates.submit(RememberInput.parse({
+            idempotencyKey: `task-${input.taskId}-${input.index}`.slice(0, 128), content: input.content,
+            knowledgeType: input.knowledgeType ?? 'Practice', tags: input.tags ?? [],
+            ...(input.category === undefined ? {} : { category: input.category }),
+            ...(input.importance === undefined ? {} : { importance: input.importance }),
+            ...(input.entities === undefined ? {} : { entities: input.entities }),
+            ...(input.evidenceRefs === undefined ? {} : { evidenceRefs: input.evidenceRefs }),
+            provenance: {
+              source: 'task-agent', sourceReference: reference,
+              evidence: input.evidenceRefs ?? [input.reason], verificationStatus: 'unverified', confidence: 0.5,
+              applicability: 'shared collection', limitations: '写入任务无法确定依据是否充分，进入人工审核。', lastVerified: null,
+            },
+          }));
+          return { status: 'needs_review', candidateId: candidate.id };
+        }
+        const request = RememberInput.parse({
+          idempotencyKey: `task-${input.taskId}-${input.index}`.slice(0, 128), content: input.content,
+          knowledgeType: input.knowledgeType ?? 'Practice', tags: input.tags ?? [],
+          ...(input.category === undefined ? {} : { category: input.category }),
+          ...(input.importance === undefined ? {} : { importance: input.importance }),
+          ...(input.entities === undefined ? {} : { entities: input.entities }),
+          ...(input.evidenceRefs === undefined ? {} : { evidenceRefs: input.evidenceRefs }),
+          provenance: {
+            source: 'task-agent', sourceReference: reference,
+            evidence: input.evidenceRefs ?? [input.reason], verificationStatus: 'verified', confidence: 1,
+            applicability: 'shared collection', limitations: '无（授权任务写入）', lastVerified: now(),
+          },
+        });
+        const candidate = candidates.submit(request);
+        candidates.review(candidate.id, 'approve', 'task-agent', input.reason, null);
+        const publication = await waitForPublication(candidate.id);
+        const shareState = coordinator ? await shareMemory(publication) : 'confirmed';
+        if (shareState === 'queued') throw new MnemoWeaveError('SYNC_QUEUED');
+        if (shareState === 'unknown') throw new MnemoWeaveError('SYNC_OUTCOME_UNKNOWN');
+        if (shareState === 'failed') throw new MnemoWeaveError('NEEDS_REVIEW');
+        return { status: 'published', memoryId: publication.memoryId, entryVersion: candidates.memory.entryVersion(publication.memoryId) };
+      };
+
+      /**
+       * The checks that can refuse an action outright, run before its receipt is claimed.
+       *
+       * The trigger bounds which actions and how many; an idle-review action must name the Host's
+       * own open run. None of this depends on the action's outcome, so refusing here leaves no
+       * receipt behind.
+       */
+      /**
+       * Resolve one evidence reference for the action that cites it.
+       *
+       * A conversation write cites a persisted user event of the same turn or a host-attested
+       * engineering record; a reply save cites the confirmed reply; an organize task cites the
+       * host's own persisted instruction; a distillation cites its draft confirmation. A
+       * reference that does not resolve for this Host is an invalid request, not a weaker write:
+       * the whole point of the field is that the assertion can be checked.
+       */
+      const assertEvidence = (hostId: string, action: ReturnType<typeof WriteTaskAction.parse>, taskId: string): void => {
+        const refs = action.evidenceRefs ?? [];
+        if (refs.length === 0) return;
+        if (action.trigger === 'archive-distill') {
+          // The single reference is the user's confirmation of this draft.
+          if (action.draftId === undefined || refs.length !== 1 || refs[0] !== `confirm:${action.draftId}`) throw new MnemoWeaveError('INVALID_INPUT');
+          return;
+        }
+        if (action.trigger === 'organize') {
+          // The organizer's evidence is the host's own instruction and confirmation, bound to the
+          // task; the Server cannot re-read those, so it only requires the task binding shape.
+          if (!refs.every(ref => ref.includes(taskId))) throw new MnemoWeaveError('INVALID_INPUT');
+          return;
+        }
+        const sessionId = action.sessionId;
+        const turnId = action.turnId;
+        for (const ref of refs) {
+          if (sessionId === undefined) throw new MnemoWeaveError('INVALID_INPUT');
+          const message = candidates.turns.messages(hostId, sessionId).find(item => item.eventId === ref);
+          if (message !== undefined) {
+            // A user event is usable for the turn that produced it, either as this turn's own
+            // write or as the reply a save cites within the same session.
+            if (turnId !== undefined && message.turnId !== turnId && action.trigger === 'conversation') throw new MnemoWeaveError('INVALID_INPUT');
+            continue;
+          }
+          if (turnId !== undefined && candidates.evidence.get(hostId, sessionId, turnId, ref) !== null) continue;
+          throw new MnemoWeaveError('INVALID_INPUT');
+        }
+      };
+
+      const assertWriteTaskAllowed = (hostId: string, action: ReturnType<typeof WriteTaskAction.parse>, taskId: string): void => {
+        assertTriggerAllows(action.trigger, action.action);
+        // The per-trigger ceiling bounds how many actions of one kind a task may exist: an idle
+        // review gets one rule change (index 0) and one archive create (index 1).
+        const ceiling = TRIGGER_MAX_ACTIONS[action.trigger] ?? 1;
+        if (action.trigger === 'idle-review' && action.kind === 'workspace-archive') {
+          if (ceiling < 2) throw new MnemoWeaveError('SCOPE_FORBIDDEN');
+        }
+        if (action.trigger === 'idle-review') {
+          if (action.kind === 'formal-memory') throw new MnemoWeaveError('SCOPE_FORBIDDEN');
+          if (action.runId === undefined || action.sessionId === undefined) throw new MnemoWeaveError('INVALID_INPUT');
+          const run = candidates.events.idleRun(hostId, action.runId);
+          if (run === null) throw new MnemoWeaveError('NOT_FOUND');
+          if (run.sessionId !== action.sessionId) throw new MnemoWeaveError('SCOPE_FORBIDDEN');
+          if (run.state !== 'running') throw new MnemoWeaveError('INVALID_STATE');
+        }
+        assertEvidence(hostId, action, taskId);
+        const noRetention = candidates.turns.isNoRetention(hostId, action.sessionId ?? '', action.turnId);
+        if (noRetention) throw new MnemoWeaveError('TURN_NO_RETENTION');
+      };
+
+      /** Execute one action of an authorized write task. Host code only; never a model tool. */
+      const executeWriteTask = async (hostId: string, taskId: string, index: number, action: ReturnType<typeof WriteTaskAction.parse>): Promise<{
+        status: WriteTaskReceiptRecord['status'];
+        memoryId?: string | null;
+        entryVersion?: number | null;
+        entryId?: string | null;
+        candidateId?: string | null;
+        errorCode?: string | null;
+      }> => {
+        if (action.action === 'skip') return { status: 'skipped' };
+
+        if (action.kind === 'rule') {
+          if (action.trigger === 'conversation' && action.sessionId === undefined) throw new MnemoWeaveError('INVALID_INPUT');
+          return withRuleLock(async () => {
+            if (action.action === 'create') {
+              const plan = planRuleCreate({
+                body: action.body!, enabled: action.enabled ?? true,
+                importance: action.importance ?? 'normal', pinned: action.pinned ?? false,
+              }, candidates.memory.allRules(), ruleLimits);
+              const record = await writeRule('create', plan.row, 0);
+              return { status: 'applied', entryId: record.entryId, entryVersion: record.version };
+            }
+            const current = action.entryId === undefined ? null : candidates.memory.rule(action.entryId);
+            if (!current) throw new MnemoWeaveError('NOT_FOUND');
+            if (current.version !== action.baseVersion) throw new MnemoWeaveError('VERSION_CONFLICT');
+            if (action.action === 'remove') {
+              const plan = planRuleEdit(current, { remove: true, baseVersion: current.version }, candidates.memory.allRules(), ruleLimits);
+              candidates.memory.recordRuleArchive({
+                archiveId: randomUUID(), ruleId: current.entryId, ruleVersion: current.version, body: current.body,
+                importance: current.importance ?? 'normal', pinned: current.pinned === true, archivedAt: now(), reason: 'manual',
+              });
+              const record = await writeRule('update', plan.row, current.version);
+              return { status: 'applied', entryId: record.entryId, entryVersion: record.version };
+            }
+            const plan = planRuleEdit(current, {
+              ...(action.body === undefined ? {} : { body: action.body }),
+              ...(action.enabled === undefined ? {} : { enabled: action.enabled }),
+              ...(action.importance === undefined ? {} : { importance: action.importance }),
+              ...(action.pinned === undefined ? {} : { pinned: action.pinned }),
+              baseVersion: current.version,
+            }, candidates.memory.allRules(), ruleLimits);
+            const record = await writeRule('update', plan.row, current.version);
+            return { status: 'applied', entryId: record.entryId, entryVersion: record.version };
           });
-          return view;
+        }
+
+        if (action.kind === 'workspace-archive') {
+          const turn: TurnIdentity | undefined = action.sessionId === undefined ? undefined : {
+            sessionId: action.sessionId, turnId: action.turnId ?? '', agentId: 'task-agent',
+          };
+          const workspaceId = sessionWorkspace(hostId, turn);
+          return withArchiveLock(workspaceId, async () => {
+            if (action.action === 'create') {
+              const plan = planArchive({
+                workspaceId, title: action.title!, body: action.body!,
+                source: action.source ?? 'session', verification: action.verification ?? 'open',
+                evidence: action.evidence ?? (action.evidenceRefs ?? []).join('\n').slice(0, 2000),
+              }, candidates.memory.allArchives(true), now(), archiveLimitBytes);
+              const record = await writeArchive(plan, 0);
+              return { status: 'applied', entryId: record.entryId, entryVersion: record.version };
+            }
+            const current = action.entryId === undefined ? null : candidates.memory.archive(action.entryId);
+            if (!current || current.workspaceId !== workspaceId) throw new MnemoWeaveError('NOT_FOUND');
+            if (current.version !== action.baseVersion) throw new MnemoWeaveError('VERSION_CONFLICT');
+            const plan = planArchiveEdit(current, {
+              ...(action.title === undefined ? {} : { title: action.title }),
+              ...(action.body === undefined ? {} : { body: action.body }),
+              ...(action.verification === undefined ? {} : { verification: action.verification }),
+              ...(action.evidence === undefined ? {} : { evidence: action.evidence }),
+            }, candidates.memory.allArchives(true), now(), archiveLimitBytes);
+            const record = await writeArchive(plan, current.version);
+            return { status: 'applied', entryId: record.entryId, entryVersion: record.version };
+          });
+        }
+
+        // formal-memory
+        if (action.action === 'withdraw') {
+          if (action.memoryId === undefined || action.entryVersion === undefined) throw new MnemoWeaveError('INVALID_INPUT');
+          return withEditLock(action.memoryId, async () => {
+            const descriptor = candidates.catalog.get(action.memoryId!);
+            if (descriptor.state !== 'active') throw new MnemoWeaveError('INVALID_STATE');
+            const currentVersion = candidates.memory.entryVersion(action.memoryId!);
+            assertEntryVersion(currentVersion, action.entryVersion!);
+            const current = descriptor.revisions.find(revision => revision.id === descriptor.currentRevisionId);
+            if (!current) throw new MnemoWeaveError('NOT_FOUND');
+            if (coordinator && formalProvider) {
+              const body = (await provider.readMemory(current.providerMemoryId)).content;
+              const state = await submitLocal(planWithdrawChange({
+                entryId: action.memoryId!, content: body, entryVersion: currentVersion, at: now(),
+                category: (current.category ?? 'general') as never, importance: current.importance ?? 3,
+                tags: current.tags ?? [], entities: current.entities ?? [],
+              }), () => undefined);
+              if (state === 'queued') throw new MnemoWeaveError('SYNC_QUEUED');
+              if (state === 'unknown') throw new MnemoWeaveError('SYNC_OUTCOME_UNKNOWN');
+              await applyFormal();
+            }
+            const withdrawn = candidates.catalog.withdrawLocal(action.memoryId!, 'task-agent', action.reason, now());
+            const nextVersion = Math.max(currentVersion + 1, candidates.memory.entryVersion(action.memoryId!));
+            candidates.memory.upsertFormalMap({
+              entryId: action.memoryId!, version: nextVersion, providerId: current.providerMemoryId,
+              contentHash: current.contentHash, state: 'applied', appliedAt: now(),
+            }, now());
+            candidates.memory.setEntryVersion(action.memoryId!, nextVersion, now());
+            return { status: 'published', memoryId: action.memoryId!, entryVersion: nextVersion, entryId: null };
+          });
+        }
+
+        if (action.action === 'edit') {
+          if (action.memoryId === undefined || action.entryVersion === undefined || action.content === undefined) throw new MnemoWeaveError('INVALID_INPUT');
+          return withEditLock(action.memoryId, async () => {
+            const descriptor = candidates.catalog.get(action.memoryId!);
+            if (descriptor.state !== 'active') throw new MnemoWeaveError('INVALID_STATE');
+            const current = descriptor.revisions.find(revision => revision.id === descriptor.currentRevisionId);
+            if (!current) throw new MnemoWeaveError('NOT_FOUND');
+            const currentVersion = candidates.memory.entryVersion(action.memoryId!);
+            assertEntryVersion(currentVersion, action.entryVersion!);
+            if (action.assessment === 'uncertain' || action.assessment === 'conflict') {
+              const candidate = candidates.submit(RememberInput.parse({
+                idempotencyKey: `task-${taskId}-${index}`.slice(0, 128), content: action.content!,
+                knowledgeType: action.knowledgeType ?? 'Practice', tags: action.tags ?? [],
+                ...(action.category === undefined ? {} : { category: action.category }),
+                ...(action.importance === undefined ? {} : { importance: action.importance }),
+                ...(action.entities === undefined ? {} : { entities: action.entities }),
+                provenance: {
+                  source: 'task-agent', sourceReference: `write-task:${taskId}:${index}`,
+                  evidence: action.evidenceRefs ?? [action.reason], verificationStatus: 'unverified', confidence: 0.5,
+                  applicability: descriptor.applicability, limitations: '写入任务无法确定依据是否充分，进入人工审核。', lastVerified: null,
+                },
+              }));
+              return { status: 'needs_review', candidateId: candidate.id };
+            }
+            const hash = createHash('sha256').update(action.content!, 'utf8').digest('hex');
+            const category = action.category ?? current.category ?? 'general';
+            const importance = action.importance ?? current.importance ?? 3;
+            const tags = action.tags ?? current.tags ?? [];
+            const entities = action.entities ?? current.entities ?? [];
+            if (current.contentHash === hash && category === current.category && importance === current.importance) {
+              return { status: 'duplicate', memoryId: action.memoryId!, entryVersion: currentVersion };
+            }
+            if (coordinator && formalProvider) {
+              const state = await submitLocal(planEditChange({
+                entryId: action.memoryId!, content: action.content!, entryVersion: currentVersion,
+                category: category as never, importance, tags, entities,
+              }), () => undefined);
+              if (state === 'queued') throw new MnemoWeaveError('SYNC_QUEUED');
+              if (state === 'unknown') throw new MnemoWeaveError('SYNC_OUTCOME_UNKNOWN');
+              await applyFormal();
+              const mappedVersion = candidates.memory.nextMappedVersion(action.memoryId!, currentVersion);
+              if (mappedVersion === null) throw new MnemoWeaveError('SYNC_OUTCOME_UNKNOWN');
+              return { status: 'published', memoryId: action.memoryId!, entryVersion: mappedVersion };
+            }
+            const written = await provider.persistReviewed(action.content!, `candidate:${randomUUID()}`);
+            await provider.linkSupersedes(written.id, current.providerMemoryId, { operationId: randomUUID(), reason: action.reason, effectiveAt: now() });
+            const plan = candidates.catalog.publishDirectEdit(action.memoryId!, RememberInput.parse({
+              idempotencyKey: `edit-${randomUUID()}`.slice(0, 128), content: action.content!, knowledgeType: action.knowledgeType ?? 'Practice', tags: [],
+              provenance: {
+                source: 'task-agent', sourceReference: `write-task:${taskId}:${index}`, evidence: action.evidenceRefs ?? [action.reason],
+                verificationStatus: 'verified', confidence: 1, applicability: descriptor.applicability,
+                limitations: '无（授权任务写入）', lastVerified: now(),
+              },
+            }), written.id, hash, now(), 'task-agent', action.reason, {
+              ...(action.category === undefined ? {} : { category: action.category }),
+              ...(action.importance === undefined ? {} : { importance: action.importance }),
+              tags, ...(action.entities === undefined ? {} : { entities: action.entities }),
+            });
+            const entryVersion = currentVersion + 1;
+            candidates.memory.upsertFormalMap({ entryId: action.memoryId!, version: entryVersion, providerId: written.id, contentHash: hash, state: 'applied', appliedAt: now() }, now());
+            candidates.memory.setEntryVersion(action.memoryId!, entryVersion, now());
+            void plan;
+            return { status: 'published', memoryId: action.memoryId!, entryVersion };
+          });
+        }
+
+        /**
+         * A confirmed archive distillation publishes the draft's fixed text.
+         *
+         * The draft names its source version and content hash; a source edited or archived after
+         * the preview no longer matches, so the confirmation is refused rather than publishing
+         * text the user did not see. The draft is bound to the task once, so a retry returns the
+         * original publication instead of creating a second memory.
+         */
+        if (action.draftId !== undefined) {
+          // The draft id is the task id: one draft has at most one create action, so the receipt
+          // key (Host, task, index) is exactly the confirmation of that draft.
+          if (taskId !== action.draftId) throw new MnemoWeaveError('INVALID_INPUT');
+          if (index !== 0) throw new MnemoWeaveError('INVALID_INPUT');
+          const draft = candidates.distillations.get(action.draftId);
+          if (!draft || draft.hostId !== hostId) throw new MnemoWeaveError('NOT_FOUND');
+          const source = candidates.memory.archive(draft.entryId);
+          if (!source || source.workspaceId !== draft.workspaceId || source.withdrawnAt !== null) throw new MnemoWeaveError('NOT_FOUND');
+          const sourceHash = createHash('sha256').update(source.body, 'utf8').digest('hex');
+          if (source.version !== draft.entryVersion || sourceHash !== draft.sourceContentHash) throw new MnemoWeaveError('VERSION_CONFLICT');
+          if (draft.taskId !== null && draft.taskId !== taskId) throw new MnemoWeaveError('INVALID_STATE');
+          const distilled = await publishFormalTaskAction({
+            taskId, index, content: draft.content, reason: action.reason,
+            knowledgeType: draft.knowledgeType, ...(draft.category === null ? {} : { category: draft.category }),
+            ...(draft.importance === null ? {} : { importance: draft.importance }),
+            ...(draft.tags === null ? {} : { tags: draft.tags }),
+            ...(draft.entities === null ? {} : { entities: draft.entities }),
+            ...(action.evidenceRefs === undefined ? {} : { evidenceRefs: action.evidenceRefs }),
+            ...(draft.assessment === 'supported' || draft.assessment === 'uncertain' || draft.assessment === 'conflict'
+              ? { assessment: draft.assessment } : {}),
+            trigger: 'archive-distill',
+          });
+          if (distilled.status === 'published' || distilled.status === 'duplicate' || distilled.status === 'needs_review') {
+            // Bind only after the action reached a durable outcome, so a failed publish stays retryable.
+            if (draft.taskId === null) candidates.distillations.attachTask(draft.draftId, taskId);
+          }
+          return distilled;
+        }
+
+        // formal-memory create
+        if (action.content === undefined) throw new MnemoWeaveError('INVALID_INPUT');
+        return publishFormalTaskAction({
+          taskId, index, content: action.content, reason: action.reason, trigger: action.trigger,
+          ...(action.knowledgeType === undefined ? {} : { knowledgeType: action.knowledgeType }),
+          ...(action.category === undefined ? {} : { category: action.category }),
+          ...(action.importance === undefined ? {} : { importance: action.importance }),
+          ...(action.tags === undefined ? {} : { tags: action.tags }),
+          ...(action.entities === undefined ? {} : { entities: action.entities }),
+          ...(action.evidenceRefs === undefined ? {} : { evidenceRefs: action.evidenceRefs }),
+          ...(action.assessment === undefined ? {} : { assessment: action.assessment }),
+        });
+      };
+
+      /** The worker publishes asynchronously; a brief wait is normal, a long one is not. */
+      const waitForPublication = async (candidateId: string): Promise<{ memoryId: string; revisionId: string; providerId: string }> => {
+        const deadline = Date.now() + 15_000;
+        for (;;) {
+          const current = candidates.get(candidateId);
+          if (current.status === 'persisted') {
+            if (!current.publication) throw new MnemoWeaveError('INTERNAL');
+            const descriptor = candidates.catalog.get(current.publication.memoryId);
+            const revision = descriptor.revisions.find(item => item.id === current.publication!.revisionId);
+            if (!revision) throw new MnemoWeaveError('INTERNAL');
+            return { memoryId: current.publication.memoryId, revisionId: current.publication.revisionId, providerId: revision.providerMemoryId };
+          }
+          if (current.status === 'failed' || current.status === 'rejected') throw new MnemoWeaveError('PROVIDER_UNAVAILABLE');
+          if (Date.now() > deadline) throw new MnemoWeaveError('SYNC_OUTCOME_UNKNOWN');
+          await new Promise(done => setTimeout(done, 100));
+        }
+      };
+
+      client = {
+        // ── Injection and diagnostics ──
+        inject: async (hostId, input) => {
+          const request = input as { sessionId?: unknown };
+          if (typeof request.sessionId !== 'string' || request.sessionId.trim() === '') throw new MnemoWeaveError('INVALID_INPUT');
+          if (candidates.turns.isClosed(hostId, request.sessionId)) throw new MnemoWeaveError('INVALID_STATE');
+          return injectionFor(hostId, request.sessionId);
         },
-        context: (hostId, input) => {
-          if (input.close) candidates.runtime.closeSession(hostId, input.sessionId);
-          const context = candidates.runtime.context(hostId, input.sessionId, input.projectId, input.task);
-          return { ...context, pins: [...context.pins] };
+        lastInjection: async (hostId, sessionId) => candidates.memory.lastInjection(hostId, sessionId),
+        closeSession: (hostId, sessionId) => candidates.turns.closeSession(hostId, sessionId),
+        events: (hostId, input) => candidates.turns.observe(hostId, HostEvent.parse(input)),
+        embeddingDiagnostics: async () => {
+          const report = await app.embeddingDiagnostics();
+          const backfill = candidates.memory.diagnosticJob(BACKFILL_KIND);
+          return { ...report, ...(backfill === undefined ? {} : { backfill }) };
         },
-        pin: input => { candidates.catalog.get(input.memoryId); candidates.runtime.pin(input); },
-        register: projectId => candidates.runtime.register(projectId),
-        projects: async () => ({ projects: [...new Set([...candidates.runtime.list(), ...candidates.catalog.projects()])].sort() }),
-        closeSession: (hostId, sessionId) => candidates.runtime.closeSession(hostId, sessionId),
-        events: (hostId, input) => {
-          const result = candidates.events.record(hostId, input);
-          // The runtime projection has its own idempotency; retention skipping must not hide events from it.
-          candidates.runtime.observe(hostId, HostEvent.parse(input));
-          return result;
+        embeddingBackfill: async () => startBackfill(),
+
+        // ── Workspaces ──
+        workspaces: async ({ hostId, operator }) => ({
+          items: candidates.workspaces.list()
+            .filter(workspace => operator || candidates.workspaces.accessibleTo(workspace.workspaceId, hostId))
+            .map(workspace => ({
+              workspaceId: workspace.workspaceId, name: workspace.name, createdAt: workspace.createdAt,
+              ...(operator ? { boundRootCount: candidates.workspaces.bindingCount(workspace.workspaceId) } : {}),
+            })),
+        }),
+        registerWorkspace: async (input) => {
+          const workspace = candidates.workspaces.register(input.workspaceId, input.name);
+          return { ...workspace, boundRootCount: candidates.workspaces.bindingCount(workspace.workspaceId) };
+        },
+        bindWorkspace: async (workspaceId, rootPath) => {
+          candidates.workspaces.bind(workspaceId, rootPath);
+          const workspace = candidates.workspaces.get(workspaceId);
+          if (!workspace) throw new MnemoWeaveError('NOT_FOUND');
+          return { ...workspace, boundRootCount: candidates.workspaces.bindingCount(workspaceId) };
         },
         /**
-         * Browse published memories.
-         *
-         * Order matters: the candidate set is chosen by scope first, in a stable order, and the
-         * cursor records how far that scan reached. Matching the query is a later filter, so a
-         * page whose candidates are all skipped does not stall — the next page continues from
-         * where the scan stopped rather than from how many items were returned.
+         * The host claims the workspace one session works in. A directory and an explicit id must
+         * agree; a session that already has a binding cannot switch it.
          */
-        memories: async ({ query, limit, category, knowledgeType, entity, sort, cursor, projectId, includeGlobal }) => {
+        bindSession: async (hostId, sessionId, input) => {
+          let workspaceId: string | null = null;
+          if (input.rootPath !== undefined) workspaceId = candidates.workspaces.workspaceForRoot(input.rootPath);
+          if (input.workspaceId !== undefined) {
+            if (!candidates.workspaces.has(input.workspaceId)) throw new MnemoWeaveError('INVALID_INPUT');
+            if (workspaceId !== null && workspaceId !== input.workspaceId) throw new MnemoWeaveError('INVALID_INPUT');
+            workspaceId = input.workspaceId;
+          }
+          const bound = candidates.workspaces.bindSession(hostId, sessionId, workspaceId);
+          return { sessionId, workspaceId: bound.workspaceId, boundAt: bound.boundAt };
+        },
+        sessionWorkspace: (hostId, sessionId) => candidates.workspaces.sessionWorkspace(hostId, sessionId),
+
+        // ── Rules ──
+        rules: async () => RuleList.parse({ items: candidates.memory.allRules().map(toRuleRecord), usage: ruleUsage(candidates.memory.allRules(), ruleLimits) }),
+        ruleArchive: async () => RuleArchiveList.parse({ items: candidates.memory.ruleArchive() }),
+        createRule: async (input) => withRuleLock(async () => {
+          const plan = planRuleCreate(input, candidates.memory.allRules(), ruleLimits);
+          return writeRule('create', plan.row, 0);
+        }),
+        editRule: async (ruleId, input) => withRuleLock(async () => {
+          const current = candidates.memory.rule(ruleId);
+          if (!current) throw new MnemoWeaveError('NOT_FOUND');
+          if (input.baseVersion !== current.version) throw new MnemoWeaveError('VERSION_CONFLICT');
+          if (input.remove === true) {
+            candidates.memory.recordRuleArchive({
+              archiveId: randomUUID(), ruleId: current.entryId, ruleVersion: current.version, body: current.body,
+              importance: current.importance ?? 'normal', pinned: current.pinned === true, archivedAt: now(), reason: 'manual',
+            });
+            const plan = planRuleEdit(current, { remove: true, baseVersion: current.version }, candidates.memory.allRules(), ruleLimits);
+            return writeRule('update', plan.row, current.version);
+          }
+          const plan = planRuleEdit(current, input, candidates.memory.allRules(), ruleLimits);
+          return writeRule('update', plan.row, current.version);
+        }),
+
+        // ── Archives ──
+        archives: async ({ workspaceId, includeWithdrawn, limit, cursor }) => {
+          const selected = workspaceId?.trim() ?? '';
+          if (selected === '') throw new MnemoWeaveError('WORKSPACE_REQUIRED');
+          if (!candidates.workspaces.has(selected)) throw new MnemoWeaveError('NOT_FOUND');
+          const rows = candidates.memory.archivesFor(selected, includeWithdrawn ?? false);
+          if (cursor !== undefined && !/^\d+$/.test(cursor)) throw new MnemoWeaveError('INVALID_INPUT');
+          const start = cursor === undefined ? 0 : Number.parseInt(cursor, 10);
+          if (!Number.isSafeInteger(start) || start < 0) throw new MnemoWeaveError('INVALID_INPUT');
+          const pageSize = Math.min(Math.max(limit ?? 100, 1), 200);
+          const page = rows.slice(start, start + pageSize);
+          return {
+            items: page.map(toArchiveRecord),
+            capacities: [archiveUsage(selected, candidates.memory.archivesFor(selected, true), archiveLimitBytes)],
+            ...(start + pageSize < rows.length ? { nextCursor: String(start + pageSize) } : {}),
+          };
+        },
+        /**
+         * Capacity maintenance: the active archives whose release would free the most room,
+         * oldest first. Nothing is archived here; the user picks a row and confirms separately.
+         */
+        archiveReleaseCandidates: async (workspaceId, limit) => {
+          const selected = workspaceId?.trim() ?? '';
+          if (selected === '') throw new MnemoWeaveError('WORKSPACE_REQUIRED');
+          if (!candidates.workspaces.has(selected)) throw new MnemoWeaveError('NOT_FOUND');
+          const all = candidates.memory.archivesFor(selected, true);
+          const pageSize = Math.min(Math.max(limit ?? 20, 1), 100);
+          const items = archiveReleaseCandidates(selected, all, pageSize);
+          const activeCount = all.filter(row => row.workspaceId === selected && row.state !== 'archived' && row.withdrawnAt === null).length;
+          return {
+            workspaceId: selected,
+            capacity: archiveUsage(selected, all, archiveLimitBytes),
+            items,
+            remaining: Math.max(0, activeCount - items.length),
+          };
+        },
+        searchArchives: async (hostId, input) => {
+          const selected = input.workspaceId?.trim() ?? '';
+          if (selected === '') throw new MnemoWeaveError('WORKSPACE_REQUIRED');
+          if (!candidates.workspaces.has(selected)) throw new MnemoWeaveError('NOT_FOUND');
+          const query = input.query;
+          const limit = Math.min(Math.max(input.limit ?? 5, 1), 20);
+          const rows = candidates.memory.searchArchives(selected, query, input.includeArchived === true);
+          const total = rows.length;
+          const results: Array<Record<string, unknown>> = [];
+          let totalChars = 0;
+          for (const row of rows) {
+            if (results.length >= limit) break;
+            const budget = 6_000 - totalChars;
+            if (budget <= 0) break;
+            const excerpt = clipChars(row.body, Math.min(budget, 600));
+            if (excerpt.text === '') break;
+            totalChars += excerpt.text.length;
+            results.push({
+              entryId: row.entryId, workspaceId: row.workspaceId, title: row.title, state: row.state ?? 'active',
+              version: row.version, verification: row.verification, excerpt: excerpt.text,
+              excerptChars: excerpt.text.length, excerptTruncated: excerpt.truncated,
+              bodyChars: row.body.length, score: scoreArchive(row, query),
+            });
+          }
+          return {
+            query, total, results, totalChars,
+            truncated: results.length >= limit && total > results.length,
+            totalLimitChars: 6_000 as const, callsLimit: 4 as const,
+          };
+        },
+        /** Search inside the session's bound workspace for a model tool: the model has no workspace. */
+        searchArchivesForTurn: async (hostId, input, turn) => {
+          const workspaceId = sessionWorkspace(hostId, requireTurn(hostId, turn));
+          const budget = budgets.for({ ...turn, hostId });
+          budget.takeArchiveCall();
+          const rows = candidates.memory.searchArchives(workspaceId, input.query, input.includeArchived === true);
+          const total = rows.length;
+          const limit = Math.min(Math.max(input.limit ?? 5, 1), 20);
+          const results: Array<Record<string, unknown>> = [];
+          let totalChars = 0;
+          for (const row of rows) {
+            if (results.length >= limit) break;
+            const remaining = 6_000 - totalChars;
+            if (remaining <= 0) break;
+            const excerpt = clipChars(row.body, remaining);
+            if (excerpt.text === '') break;
+            totalChars += excerpt.text.length;
+            results.push({
+              entryId: row.entryId, workspaceId: row.workspaceId, title: row.title, state: row.state ?? 'active',
+              version: row.version, verification: row.verification, excerpt: excerpt.text,
+              excerptChars: excerpt.text.length, excerptTruncated: excerpt.truncated,
+              bodyChars: row.body.length, score: scoreArchive(row, input.query),
+            });
+          }
+          return {
+            query: input.query, total, results, totalChars,
+            truncated: results.length >= limit && total > results.length,
+            totalLimitChars: 6_000 as const, callsLimit: 4 as const,
+          };
+        },
+        archiveHistory: async (entryId) => {
+          if (!candidates.memory.archive(entryId)) throw new MnemoWeaveError('NOT_FOUND');
+          return {
+            entryId,
+            items: candidates.memory.archiveHistory(entryId).map(row => ({
+              revisionId: row.revision_id, entryId: row.entry_id, workspaceId: row.workspace_id,
+              version: row.version, title: row.title, body: row.body,
+              source: row.source as 'session' | 'tool' | 'user',
+              verification: row.verification as 'verified' | 'open' | 'refuted', evidence: row.evidence,
+              state: row.state as 'active' | 'archived', archivedAt: row.archived_at, recordedAt: row.recorded_at,
+            })),
+          };
+        },
+        /** One model-facing segment; a cursor from another host, session, entry or version is refused. */
+        archiveSegment: async (hostId, entryId, cursor, turn) => {
+          if (turn === undefined) throw new MnemoWeaveError('WORKSPACE_REQUIRED');
+          requireTurn(hostId, turn);
+          const budget = budgets.for({ ...turn, hostId });
+          const workspaceId = sessionWorkspace(hostId, turn);
+          budget.takeArchiveCall();
+          const row = candidates.memory.archive(entryId);
+          if (!row || row.workspaceId !== workspaceId || row.withdrawnAt !== null) throw new MnemoWeaveError('NOT_FOUND');
+          let offset = 0;
+          if (cursor !== undefined) {
+            const decoded = decodeSegmentCursor(cursor);
+            if (decoded.hostId !== hostId || decoded.sessionId !== turn.sessionId
+              || decoded.entryId !== entryId || decoded.workspaceId !== workspaceId || decoded.version !== row.version) {
+              throw new MnemoWeaveError('VERSION_CONFLICT');
+            }
+            offset = decoded.offset;
+          }
+          const segment = clipChars(row.body.slice(offset), 6_000);
+          const nextOffset = offset + segment.text.length;
+          const complete = nextOffset >= row.body.length;
+          return {
+            entryId, workspaceId, version: row.version, title: row.title,
+            content: segment.text,
+            ...(complete ? {} : { nextCursor: encodeSegmentCursor({ hostId, sessionId: turn.sessionId, entryId, workspaceId, version: row.version, offset: nextOffset }) }),
+            complete,
+            totalChars: row.body.length,
+          };
+        },
+        createArchive: async (input) => {
+          if (!candidates.workspaces.has(input.workspaceId)) throw new MnemoWeaveError('NOT_FOUND');
+          const workspaceId = input.workspaceId;
+          return withArchiveLock(workspaceId, async () => {
+            const plan = planArchive(input, candidates.memory.allArchives(true), now(), archiveLimitBytes);
+            return writeArchive(plan, 0);
+          });
+        },
+        editArchive: async (entryId, input) => {
+          const current = candidates.memory.archive(entryId);
+          if (!current || current.withdrawnAt !== null) throw new MnemoWeaveError('NOT_FOUND');
+          if (current.version !== input.baseVersion) throw new MnemoWeaveError('VERSION_CONFLICT');
+          const workspaceId = current.workspaceId;
+          return withArchiveLock(workspaceId, async () => {
+            const plan = planArchiveEdit(current, input, candidates.memory.allArchives(true), now(), archiveLimitBytes);
+            return writeArchive(plan, current.version);
+          });
+        },
+        editArchiveState: async (entryId, input) => {
+          const request = ArchiveStateInput.parse(input);
+          const current = candidates.memory.archive(entryId);
+          if (!current || current.withdrawnAt !== null) throw new MnemoWeaveError('NOT_FOUND');
+          if (current.version !== request.baseVersion) throw new MnemoWeaveError('VERSION_CONFLICT');
+          const workspaceId = current.workspaceId;
+          return withArchiveLock(workspaceId, async () => {
+            const plan = planArchiveState(current, request.state, candidates.memory.allArchives(true), now(), archiveLimitBytes);
+            return writeArchive(plan, current.version);
+          });
+        },
+
+        // ── Formal memories ──
+        memories: async ({ query, limit, category, knowledgeType, entity, sort, cursor }) => {
           const terms = query ? query.toLowerCase().split(/\s+/).filter(Boolean) : [];
-          // The scan order is chosen first; the cursor then records a position in that order.
           const order: ListSort = sort ?? 'newest';
-          const scoped: {
-            memoryId: string; providerId: string; publishedAt: string;
-            importance: number | null;
-            projectId: string | null;
+          const scoped: Array<{
+            memoryId: string; providerId: string; publishedAt: string; importance: number | null;
             current: { knowledgeType?: string; category?: string; importance?: number; tags?: string[]; entities?: string[] };
-          }[] = [];
+          }> = [];
           for (const providerId of candidates.catalog.visibleProviderIds()) {
             for (const memoryId of candidates.catalog.currentMemoryIds(providerId)) {
               const descriptor = candidates.catalog.get(memoryId);
@@ -459,10 +1092,7 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
               const current = descriptor.revisions.find(revision => revision.id === descriptor.currentRevisionId);
               if (!current) continue;
               scoped.push({
-                memoryId, providerId,
-                publishedAt: current.publishedAt,
-                importance: current.importance ?? null,
-                projectId: descriptor.projectId ?? null,
+                memoryId, providerId, publishedAt: current.publishedAt, importance: current.importance ?? null,
                 current: {
                   ...(current.knowledgeType === undefined ? {} : { knowledgeType: current.knowledgeType }),
                   ...(current.category === undefined ? {} : { category: current.category }),
@@ -473,17 +1103,11 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
               });
             }
           }
-          // Indexes describe the scoped set, not the filtered one, so choosing a category cannot
-          // remove the categories you might switch to.
-          const projects = new Map<string, number>();
           const categories = new Map<string, number>();
           const knowledgeTypes = new Map<string, number>();
-          // Entities are compared case-insensitively but listed in their recorded spelling, so a
-          // filter stays forgiving without rewriting what the memory says.
           const entityNames = new Map<string, string>();
           const entityCounts = new Map<string, number>();
           for (const entry of scoped) {
-            projects.set(entry.projectId ?? '', (projects.get(entry.projectId ?? '') ?? 0) + 1);
             if (entry.current.category !== undefined) categories.set(entry.current.category, (categories.get(entry.current.category) ?? 0) + 1);
             if (entry.current.knowledgeType !== undefined) knowledgeTypes.set(entry.current.knowledgeType, (knowledgeTypes.get(entry.current.knowledgeType) ?? 0) + 1);
             for (const value of entry.current.entities ?? []) {
@@ -492,34 +1116,18 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
               entityCounts.set(key, (entityCounts.get(key) ?? 0) + 1);
             }
           }
-          // Filters run before the Provider read, so they cost nothing beyond the catalog row. A
-          // memory with no recorded category is not "general": it simply does not match a
-          // category filter.
           const wantedEntity = entity?.toLowerCase();
           const browsable = scoped.filter(entry =>
-            (projectId === undefined
-              ? includeGlobal !== false || entry.projectId === null
-              : entry.projectId === projectId || (includeGlobal !== false && entry.projectId === null))
-            && (category === undefined || entry.current.category === category)
+            (category === undefined || entry.current.category === category)
             && (knowledgeType === undefined || entry.current.knowledgeType === knowledgeType)
             && (wantedEntity === undefined || (entry.current.entities ?? []).some(value => value.toLowerCase() === wantedEntity)));
           browsable.sort((left, right) => compareEntries(left, right, order));
-          // Continue strictly after the last row the previous page returned. Insertions and
-          // withdrawals between pages can no longer shift, repeat or hide a memory.
           const after = decodeListCursor(cursor);
-          // A cursor only means something inside the order it was issued for; reusing it after
-          // switching order would silently skip rows, so it is refused instead.
           if (after !== null && after.sort !== order) throw new MnemoWeaveError('INVALID_INPUT');
           const remaining = after === null ? browsable : browsable.filter(entry => isAfterCursor(entry, after));
           const items: Array<Record<string, unknown>> = [];
-          // Bodies are read in batches rather than one CLI process per row. The window starts at
-          // exactly what the page needs and only grows when rows were skipped (a query filtered
-          // them out) — reading four times the page up front made every list load pay for rows it
-          // never showed.
           let windowSize = limit;
           const maxWindow = Math.max(limit * 4, 96);
-          // The position of the last row this page returned; the next cursor is built from it, so
-          // a row that could not be read is retried rather than skipped.
           let lastReturned = -1;
           let readFailure = false;
           let index = 0;
@@ -538,12 +1146,7 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
               if (items.length >= limit) break;
               const entry = window[offset]!;
               const content = bodies.get(entry.providerId);
-              if (content === undefined) {
-                // A body the Provider could not return is not "no such memory". Stop here: the
-                // cursor stays before this row, so a retry re-reads it instead of losing it.
-                readFailure = true;
-                break;
-              }
+              if (content === undefined) { readFailure = true; break; }
               const position = index + offset;
               if (terms.length > 0 && !terms.every(term => content.toLowerCase().includes(term))) continue;
               const descriptor = candidates.catalog.get(entry.memoryId);
@@ -552,23 +1155,16 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
               items.push({
                 memoryId: entry.memoryId, revisionId: current.id, providerMemoryId: entry.providerId,
                 applicability: descriptor.applicability, publishedAt: current.publishedAt, content,
-                projectId: descriptor.projectId ?? null,
                 entryVersion: candidates.memory.entryVersion(entry.memoryId),
-                // Carried from the candidate so the card can label the memory without a second read.
                 ...entry.current,
               });
               lastReturned = position;
             }
             index += window.length;
-            // The page is still short and the provider did not fail, so rows in this window were
-            // filtered out; widen the next batch instead of paying a second round trip per row.
             if (items.length < limit && !readFailure) windowSize = Math.min(windowSize * 2, maxWindow);
           }
-          // Nothing could be returned and the Provider failed: report it, so the page offers a
-          // retry instead of claiming the library is empty.
           if (items.length === 0 && readFailure) throw new MnemoWeaveError('PROVIDER_UNAVAILABLE');
           const cursorEntry = lastReturned >= 0 ? remaining[lastReturned]! : null;
-          // More to scan when the page filled (or stopped on a read failure) and rows remain.
           const hasMore = cursorEntry !== null && lastReturned + 1 < remaining.length;
           return MemoryList.parse({
             items,
@@ -576,24 +1172,18 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
             categories: [...categories].map(([value, count]) => ({ value, count })).sort((left, right) => left.value.localeCompare(right.value)),
             entities: [...entityNames].map(([key, value]) => ({ value, count: entityCounts.get(key) ?? 0 })).sort((left, right) => left.value.localeCompare(right.value)),
             knowledgeTypes: [...knowledgeTypes].map(([value, count]) => ({ value, count })).sort((left, right) => left.value.localeCompare(right.value)),
-            projects: [...projects].map(([value, count]) => ({ projectId: value === '' ? null : value, count })).sort((left, right) => (left.projectId ?? '').localeCompare(right.projectId ?? '')),
           });
         },
         /**
-         * Provider-ranked semantic search, mapped to memories this machine knows.
-         *
-         * The list endpoint matches body text over a stable scan; this one asks the Provider for
-         * similarity ranking. Results are limited to the visible catalog so an explore answer can
-         * never name a memory the caller could not open, and Provider hits with no catalog entry
-         * are counted rather than silently dropped.
+         * Provider-ranked search over the shared collection. An optional hint is a workspace name
+         * used as an extra relevance line; it never filters the result set.
          */
-        explore: async (hostId: string, input: { query: string; limit: number; minScore?: number; projectId?: string }) => {
-          const recalled = await app.recallDetailed({ query: input.query, limit: input.limit, ...(input.projectId === undefined ? {} : { projectId: input.projectId }) }, clientGrant(hostId));
+        explore: async (_hostId, input) => {
+          const query = input.hint === undefined ? input.query : `${input.query}\n${input.hint}`;
+          const recalled = await app.recallDetailed({ query, limit: input.limit });
           const threshold = input.minScore ?? 0;
           const hits: Array<Record<string, unknown>> = [];
           for (const memory of recalled.memories) {
-            // The Provider's score is the only ranking signal here; a hit below the requested floor
-            // is noise the caller asked not to see.
             if ((memory.score ?? 0) < threshold) continue;
             for (const memoryId of candidates.catalog.currentMemoryIds(memory.id)) {
               const descriptor = candidates.catalog.get(memoryId);
@@ -602,22 +1192,14 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
               if (!current) continue;
               hits.push({
                 memoryId, revisionId: current.id, providerMemoryId: memory.id,
-                state: descriptor.state,
-                content: memory.content,
-                score: memory.score ?? 0,
+                state: descriptor.state, content: memory.content, score: memory.score ?? 0,
                 publishedAt: current.publishedAt,
-                projectId: descriptor.projectId ?? null,
                 ...(current.category === undefined ? {} : { category: current.category }),
                 ...(current.knowledgeType === undefined ? {} : { knowledgeType: current.knowledgeType }),
                 ...(current.tags === undefined ? {} : { tags: current.tags }),
               });
             }
           }
-          // The Provider ranks by its own score and leaves ties in an unstable order: measured on
-          // a fixed store, the same query returned three different orders across five calls. That
-          // makes a repeated search look like the list shuffled itself, and it breaks "show more"
-          // (a larger limit is only a superset if the order is a function of the hits). So the
-          // Server imposes a total order of its own: score, then newest, then memoryId.
           hits.sort((left, right) => {
             const leftScore = left['score'] as number;
             const rightScore = right['score'] as number;
@@ -629,67 +1211,37 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
             const rightId = right['memoryId'] as string;
             return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
           });
-          // A full page means the ranking had at least that many matches; asking again with a
-          // larger limit is how a caller sees further down it.
           return { query: input.query, hits, unregistered: recalled.unregistered.length, truncated: hits.length >= input.limit };
         },
-        /**
-         * The relation graph.
-         *
-         * Only structure: nodes are active memories in scope, edges are catalogued relations whose
-         * both endpoints are present, so nothing in the answer is undrawable. Bodies are left out
-         * on purpose — reading them would cost one Provider process per node.
-         */
-        graph: async (hostId: string, { limit, projectId, includeGlobal }: { limit: number; projectId?: string; includeGlobal?: boolean }) => {
-          void hostId;
-          // The graph is drawn for one project: general memories plus that project's, never a
-          // neighbour's. An edge is kept only when both endpoints are in that same view.
-          const inScope = (owner: string | null): boolean => projectId === undefined || owner === projectId || (includeGlobal !== false && owner === null);
+        graph: async (_hostId, { limit }) => {
           const nodes: Array<{
-            memoryId: string; publishedAt: string;
-            state: 'active' | 'superseded' | 'unverified';
+            memoryId: string; publishedAt: string; state: 'active' | 'superseded' | 'unverified';
             category?: string; knowledgeType?: string; importance?: number;
-            projectId: string | null;
           }> = [];
           const describeNode = (memoryId: string): (typeof nodes)[number] | null => {
             const descriptor = candidates.catalog.get(memoryId);
-            // A withdrawn memory is not somewhere to navigate to; a superseded one has to stay,
-            // because a supersede edge points at it.
             if (descriptor.state === 'superseded' && descriptor.revisions.length === 0) return null;
-            if (!inScope(descriptor.projectId ?? null)) return null;
             const current = descriptor.revisions.find(revision => revision.id === descriptor.currentRevisionId);
             if (!current) return null;
             return {
               memoryId,
               state: descriptor.state === 'active' ? 'active' : descriptor.state === 'unverified' ? 'unverified' : 'superseded',
               publishedAt: current.publishedAt,
-              projectId: descriptor.projectId ?? null,
               ...(current.category === undefined ? {} : { category: current.category }),
               ...(current.knowledgeType === undefined ? {} : { knowledgeType: current.knowledgeType }),
               ...(current.importance === undefined ? {} : { importance: current.importance }),
             };
           };
-          const start = (memoryId: string): (typeof nodes)[number] | null => {
-            const descriptor = candidates.catalog.get(memoryId);
-            // The scan for starting points only walks what recall would serve.
-            if (descriptor.state !== 'active') return null;
-            return describeNode(memoryId);
-          };
           for (const providerId of candidates.catalog.visibleProviderIds()) {
             for (const memoryId of candidates.catalog.currentMemoryIds(providerId)) {
-              const node = start(memoryId);
+              const descriptor = candidates.catalog.get(memoryId);
+              if (descriptor.state !== 'active') continue;
+              const node = describeNode(memoryId);
               if (node !== null) nodes.push(node);
             }
           }
-          // A supersede edge points at a memory that is no longer active, so restricting nodes to
-          // active ones made every supersede edge undrawable. Pull in the far end of any relation
-          // whose near end is already a node, keeping the edge instead of dropping it.
           const present = new Set(nodes.map(node => node.memoryId));
-          const related = [
-            ...candidates.catalog.allRelations(limit * 8),
-            ...candidates.catalog.allConflictEdges(limit * 8),
-          ];
-          for (const edge of related) {
+          for (const edge of [...candidates.catalog.allRelations(limit * 8), ...candidates.catalog.allConflictEdges(limit * 8)]) {
             for (const [near, far] of [[edge.sourceMemoryId, edge.targetMemoryId], [edge.targetMemoryId, edge.sourceMemoryId]] as const) {
               if (!present.has(near) || present.has(far)) continue;
               const node = describeNode(far);
@@ -698,238 +1250,259 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
               present.add(far);
             }
           }
-          // Newest first, so the cap keeps the most recent part of the graph rather than an
-          // arbitrary slice.
           nodes.sort((left, right) => {
             if (left.publishedAt !== right.publishedAt) return left.publishedAt < right.publishedAt ? 1 : -1;
             return left.memoryId < right.memoryId ? -1 : left.memoryId > right.memoryId ? 1 : 0;
           });
           const truncated = nodes.length > limit;
           const kept = nodes.slice(0, limit);
-          // Read every relation, then keep the ones whose endpoints survived the cap: a renderer
-          // would have to drop the rest anyway, and doing it here keeps the contract honest.
-          const keptIds = kept.map(node => node.memoryId);
-          const edges = drawableEdges(keptIds, [
+          const edges = drawableEdges(kept.map(node => node.memoryId), [
             ...candidates.catalog.allRelations(limit * 8),
-            // A conflict that was resolved as "coexist" leaves two live memories that disagree;
-            // that relationship is worth drawing, and it is the only kind that survives as a pair.
             ...candidates.catalog.allConflictEdges(limit * 8).map(edge => ({ ...edge, kind: 'Conflicts' })),
           ]);
           return { nodes: kept, edges, truncated };
         },
-        /** Provider-level recall, scoped to the caller: the primitive explore is built on. */
-        recall: async (hostId: string, input: unknown) => app.recall(input, clientGrant(hostId)),
+        /** Model-facing recall; the per-turn budget is enforced from the turn identity. */
+        recall: async (hostId, input, turn) => {
+          const request = RecallInput.parse(input);
+          // A management recall (no turn) is bounded by the administrative limit; a model call
+          // always names its turn and is charged against that turn's budget.
+          /**
+           * Attach the logical memory id so a model tool can open the body it was shown: `id` is
+           * the Provider's identifier, which the read route does not accept.
+           */
+          const attachLogical = <T extends { id: string }>(memories: readonly T[]): Array<T & { memoryId?: string }> => memories.flatMap(memory => {
+            const logical = candidates.catalog.currentMemoryIds(memory.id)
+              .filter(memoryId => candidates.catalog.get(memoryId).state === 'active');
+            return logical.length === 0 ? [memory] : logical.map(memoryId => ({ ...memory, memoryId }));
+          });
+          if (turn === undefined) {
+            const result = await app.recallDetailed({ query: request.query, limit: Math.min(request.limit, 50) });
+            return { ...result, memories: attachLogical(result.memories) };
+          }
+          requireTurn(hostId, turn);
+          const budget = budgets.for({ ...turn, hostId });
+          const result = await app.recallDetailed({ query: request.query, limit: Math.min(request.limit, 50) });
+          const answer = budget.acceptRecall(request.query, result.memories.map(memory => ({
+            id: memory.id, content: memory.content, ...(memory.score === undefined ? {} : { score: memory.score }),
+          })));
+          const byProvider = new Map(result.memories.map(memory => [memory.id, memory] as const));
+          return {
+            memories: attachLogical(answer.memories.flatMap(item => {
+              const memory = byProvider.get(item.id);
+              return memory === undefined ? [] : [{ id: item.id, content: item.content, ...(memory.score === undefined ? {} : { score: memory.score }) }];
+            })),
+            complete: !answer.truncated,
+          };
+        },
+        related: async (hostId, input, turn) => {
+          if (turn === undefined) throw new MnemoWeaveError('UNAUTHORIZED');
+          requireTurn(hostId, turn);
+          const request = input as { memoryId?: unknown; edge?: unknown };
+          if (typeof request.memoryId !== 'string') throw new MnemoWeaveError('INVALID_INPUT');
+          const budget = budgets.for({ ...turn, hostId });
+          const descriptor = candidates.catalog.get(request.memoryId);
+          const revision = descriptor.revisions.find(item => item.id === descriptor.currentRevisionId);
+          if (!revision) throw new MnemoWeaveError('NOT_FOUND');
+          const edge = request.edge === 'semantic' || request.edge === 'causal' || request.edge === 'entity' || request.edge === 'temporal' ? request.edge : 'supersedes';
+          const related = await provider.related(revision.providerMemoryId, edge);
+          const mapped = related.flatMap(item => candidates.catalog.currentMemoryIds(item.id).map(memoryId => ({ memoryId, content: item.content })));
+          const answer = budget.acceptRelated(revision.providerMemoryId, mapped.map(item => ({ id: item.memoryId, content: item.content })));
+          const byLogical = new Map(mapped.map(item => [item.memoryId, item] as const));
+          return {
+            memories: answer.memories.flatMap(item => {
+              const logical = byLogical.get(item.id);
+              return logical === undefined ? [] : [{ memoryId: item.id, content: item.content, excerpt: item.excerpt }];
+            }),
+            truncated: answer.truncated,
+          };
+        },
+        createMemory: async (input) => {
+          const parsed = MemoryCreateInput.parse(input);
+          if (config.MNEMOWEAVE_WORKER !== 'on') throw new MnemoWeaveError('INVALID_STATE');
+          const duplicate = await findExactDuplicate(parsed.content);
+          if (duplicate !== null) return duplicate;
+          const hash = createHash('sha256').update(parsed.content, 'utf8').digest('hex');
+          const reason = parsed.reason ?? '用户在记忆界面直接新增';
+          const request = RememberInput.parse({
+            idempotencyKey: `create-${randomUUID()}`.slice(0, 128),
+            content: parsed.content, knowledgeType: parsed.knowledgeType, tags: parsed.tags ?? [],
+            ...(parsed.category === undefined ? {} : { category: parsed.category }),
+            ...(parsed.importance === undefined ? {} : { importance: parsed.importance }),
+            ...(parsed.entities === undefined ? {} : { entities: parsed.entities }),
+            provenance: {
+              source: 'local-user', sourceReference: `user-create:${randomUUID()}`,
+              evidence: [reason], verificationStatus: 'verified', confidence: 1,
+              applicability: 'shared collection', limitations: '无（用户直接新增）', lastVerified: now(),
+            },
+          });
+          const candidate = candidates.submit(request);
+          candidates.review(candidate.id, 'approve', 'local-user', reason, null);
+          const publication = await waitForPublication(candidate.id);
+          const shareState = coordinator ? await shareMemory(publication) : 'confirmed';
+          if (shareState === 'queued') throw new MnemoWeaveError('SYNC_QUEUED');
+          if (shareState === 'unknown') throw new MnemoWeaveError('SYNC_OUTCOME_UNKNOWN');
+          if (shareState === 'failed') throw new MnemoWeaveError('NEEDS_REVIEW');
+          return {
+            memoryId: publication.memoryId, revisionId: publication.revisionId,
+            providerMemoryId: publication.providerId, contentHash: hash,
+            entryVersion: candidates.memory.entryVersion(publication.memoryId),
+          };
+        },
         editMemory: async (memoryId, input) => withEditLock(memoryId, async () => {
           const parsed = MemoryEditInput.parse(input);
-          // Read state inside the lock: a queued edit must see its predecessor's outcome.
           const descriptor = candidates.catalog.get(memoryId);
           if (descriptor.state !== 'active') throw new MnemoWeaveError('INVALID_STATE');
           const current = descriptor.revisions.find(revision => revision.id === descriptor.currentRevisionId);
           if (!current) throw new MnemoWeaveError('NOT_FOUND');
           const currentVersion = candidates.memory.entryVersion(memoryId);
           assertEntryVersion(currentVersion, parsed.entryVersion);
-          const now = new Date().toISOString();
-          const reason = parsed.reason ?? 'user edit from DSH memory page';
-          const hash = createHash('sha256').update(parsed.content).digest('hex');
-          // A memory keeps the owner it was published under. Moving it changes the sync scope of
-          // the same logical id, which the version ledger cannot express yet (the old scope's
-          // entry must be withdrawn while the new scope starts at version 1). Refusing is honest;
-          // silently writing it under one scope while the other still lists it would diverge.
-          const owner = descriptor.projectId ?? null;
-          if (parsed.projectId !== undefined && parsed.projectId !== owner) throw new MnemoWeaveError('NEEDS_REVIEW');
-          const scope = owner === null ? 'global' : `project:${owner}`;
+          const reason = parsed.reason ?? '用户在记忆界面直接编辑';
+          const hash = createHash('sha256').update(parsed.content, 'utf8').digest('hex');
+          // Editing to the same body and classification is a duplicate, not a new revision.
+          if (current.contentHash === hash
+            && (parsed.category === undefined || parsed.category === current.category)
+            && (parsed.importance === undefined || parsed.importance === current.importance)) {
+            return { memoryId, revisionId: current.id, providerMemoryId: current.providerMemoryId, contentHash: hash, entryVersion: currentVersion, duplicate: true };
+          }
+          const category = parsed.category ?? current.category ?? 'general';
+          const importance = parsed.importance ?? current.importance ?? 3;
+          const tags = parsed.tags ?? current.tags ?? [];
+          const entities = parsed.entities ?? current.entities ?? [];
           let providerId: string;
           let entryVersion: number;
-          let publishedRevisionId: string | null = null;
+          let publishedRevisionId: string;
           if (coordinator && formalProvider) {
-            // The remote confirms first: a local Provider write that the remote then
-            // rejects would leave an unreferenced memory behind.
-            const plan = planEditChange({ entryId: memoryId, scope, content: parsed.content, entryVersion: currentVersion });
-            const changeId = randomUUID();
-            const result = await submitLocal(plan.scope, plan.operation, plan.entry, plan.baseVersion, () => undefined, changeId);
-            if (result === 'queued') throw new MnemoWeaveError('SYNC_QUEUED');
-            if (result === 'unknown') throw new MnemoWeaveError('SYNC_OUTCOME_UNKNOWN');
-            await coordinator.applyScope(scope, row => applyInboxEntry(row, { store: candidates.memory, provider: formalProvider!, ruleLimits, archiveCapacityBytes: archiveLimitBytes }));
-            // The apply step processes rows in order and stops at a gap or at a row awaiting
-            // review, so "the current version" may still belong to an earlier revision; using it
-            // would hand back a stale Revision and file the operator decision against it. The
-            // inbox row itself is not a reliable witness either — a snapshot reset drops applied
-            // rows — so success is decided by whether this entry gained a mapping beyond the
-            // version the edit was based on.
+            const plan = planEditChange({ entryId: memoryId, content: parsed.content, entryVersion: currentVersion, category: category as never, importance, tags, entities });
+            const state = await submitLocal(plan, () => undefined);
+            if (state === 'queued') throw new MnemoWeaveError('SYNC_QUEUED');
+            if (state === 'unknown') throw new MnemoWeaveError('SYNC_OUTCOME_UNKNOWN');
+            await applyFormal();
             const mappedVersion = candidates.memory.nextMappedVersion(memoryId, currentVersion);
             if (mappedVersion === null) throw new MnemoWeaveError('SYNC_OUTCOME_UNKNOWN');
             entryVersion = mappedVersion;
             const mapped = candidates.memory.formalProviderId(memoryId, entryVersion);
             if (!mapped) throw new MnemoWeaveError('NEEDS_REVIEW');
             providerId = mapped;
-            // Applying the confirmed change already appended this Revision through the
-            // shared pipeline. Appending a second one here would double this machine's
-            // history for a single edit, so the revision from the apply step is reused and
-            // only the operator decision is recorded against it.
             const decided = candidates.catalog.currentRevisionFor(memoryId, providerId);
             if (!decided) throw new MnemoWeaveError('NEEDS_REVIEW');
             candidates.catalog.recordEditDecision(memoryId, decided.candidateId, 'local-user', reason);
             publishedRevisionId = decided.id;
           } else {
             const written = await provider.persistReviewed(parsed.content, `candidate:${randomUUID()}`);
-            await provider.linkSupersedes(written.id, current.providerMemoryId, { operationId: randomUUID(), reason, effectiveAt: now });
+            await provider.linkSupersedes(written.id, current.providerMemoryId, { operationId: randomUUID(), reason, effectiveAt: now() });
             providerId = written.id;
             entryVersion = currentVersion + 1;
-            candidates.memory.upsertFormalMap({ entryId: memoryId, version: entryVersion, providerId, contentHash: hash, state: 'applied', appliedAt: now }, now);
-            candidates.memory.setEntryVersion(memoryId, entryVersion, now);
-          }
-          const request = RememberInput.parse({
-            idempotencyKey: `edit-${randomUUID()}`.slice(0, 128), content: parsed.content, knowledgeType: 'Practice', tags: [],
-            provenance: {
-              source: 'local-user', sourceReference: `dsh-edit:${memoryId}`, evidence: [reason], verificationStatus: 'verified',
-              confidence: 1, applicability: descriptor.applicability, limitations: '无（用户直接编辑）', lastVerified: now,
-            },
-          });
-          // Without sync there is no pipeline to publish through, so the local edit is the
-          // only publication. With sync the apply step already appended the Revision.
-          if (publishedRevisionId === null) {
-            const published = candidates.catalog.publishDirectEdit(memoryId, request, providerId, hash, now, 'local-user', reason, classificationOf(parsed));
+            candidates.memory.upsertFormalMap({ entryId: memoryId, version: entryVersion, providerId, contentHash: hash, state: 'applied', appliedAt: now() }, now());
+            candidates.memory.setEntryVersion(memoryId, entryVersion, now());
+            const published = candidates.catalog.publishDirectEdit(memoryId, RememberInput.parse({
+              idempotencyKey: `edit-${randomUUID()}`.slice(0, 128), content: parsed.content, knowledgeType: parsed.knowledgeType ?? 'Practice', tags: [],
+              provenance: {
+                source: 'local-user', sourceReference: `user-edit:${memoryId}`, evidence: [reason], verificationStatus: 'verified',
+                confidence: 1, applicability: descriptor.applicability, limitations: '无（用户直接编辑）', lastVerified: now(),
+              },
+            }), providerId, hash, now(), 'local-user', reason, {
+              ...(parsed.category === undefined ? {} : { category: parsed.category }),
+              ...(parsed.knowledgeType === undefined ? {} : { knowledgeType: parsed.knowledgeType }),
+              ...(parsed.tags === undefined ? {} : { tags: parsed.tags }),
+              ...(parsed.entities === undefined ? {} : { entities: parsed.entities }),
+              ...(parsed.importance === undefined ? {} : { importance: parsed.importance }),
+            });
             publishedRevisionId = published.revisionId;
           }
           return { memoryId, revisionId: publishedRevisionId, providerMemoryId: providerId, contentHash: hash, entryVersion };
         }),
-        /**
-         * Withdraw a memory. Unlike an edit this appends no new body: it records the decision,
-         * stops the memory being recalled, and — with sync — publishes the withdrawal as a new
-         * version so the other machines stop recalling it too. The local Provider copy is kept,
-         * so history stays readable.
-         */
-        /**
-         * Create a formal memory directly.
-         *
-         * The user's own input is treated as already-confirmed knowledge, so this does not wait for
-         * a review: the candidate is approved the moment it is submitted, and the ordinary
-         * publisher writes it to the Provider, records the catalog entry, and queues the share. The
-         * wait loop exists because that publisher is a background worker — reimplementing its write
-         * sequence here would duplicate the duplicate-detection and reconciliation logic.
-         */
-        createMemory: async (input) => {
-          const parsed = MemoryCreateInput.parse(input);
-          // Attribution is a write into that project's scope. An unregistered id is a typo or a
-          // guess, so it is refused before anything reaches the Provider.
-          const projectId = parsed.projectId ?? null;
-          if (projectId !== null && !candidates.runtime.registered(projectId)) throw new MnemoWeaveError('INVALID_INPUT');
-          // Creation is published by the background worker. Failing now is honest; waiting for a
-          // publisher that is not running would leave the caller staring at a spinner and then
-          // learn nothing happened.
-          if (config.MNEMOWEAVE_WORKER !== 'on') throw new MnemoWeaveError('INVALID_STATE');
-          // Identical text must not become a second memory. The publisher would find the existing
-          // Provider record and publish another catalog entry pointing at it, so the check belongs
-          // here, where the answer can still be "you already have this one".
-          const duplicateOf = await findExactDuplicate(parsed.content);
-          if (duplicateOf !== null) return duplicateOf;
-          const now = new Date().toISOString();
-          const hash = createHash('sha256').update(parsed.content).digest('hex');
-          const reason = parsed.reason ?? 'user created from DSH memory page';
-          const request = RememberInput.parse({
-            idempotencyKey: `create-${randomUUID()}`.slice(0, 128),
-            content: parsed.content,
-            knowledgeType: parsed.knowledgeType,
-            tags: parsed.tags ?? [],
-            ...(parsed.category === undefined ? {} : { category: parsed.category }),
-            ...(parsed.importance === undefined ? {} : { importance: parsed.importance }),
-            ...(parsed.entities === undefined ? {} : { entities: parsed.entities }),
-            ...(projectId === null ? {} : { projectId }),
-            provenance: {
-              source: 'local-user', sourceReference: `dsh-create:${randomUUID()}`,
-              evidence: [reason], verificationStatus: 'verified', confidence: 1,
-              applicability: projectId === null ? 'global' : `project:${projectId}`, limitations: '无（用户直接新增）', lastVerified: now,
-            },
-          });
-          const candidate = candidates.submit(request);
-          // Recording the decision keeps the history honest: the entry says a person asked for it.
-          candidates.review(candidate.id, 'approve', 'local-user', reason, null);
-          const deadline = Date.now() + 15_000;
-          for (;;) {
-            const current = candidates.get(candidate.id);
-            if (current.status === 'persisted') {
-              const publication = current.publication;
-              if (!publication) throw new MnemoWeaveError('INTERNAL');
-              // The Provider id belongs to the revision, not to the entry-version mapping: a fresh
-              // publication has no mapping row yet, so asking the mapping yielded an empty string.
-              const descriptor = candidates.catalog.get(publication.memoryId);
-              const revision = descriptor.revisions.find(item => item.id === publication.revisionId);
-              if (!revision) throw new MnemoWeaveError('INTERNAL');
-              return {
-                memoryId: publication.memoryId,
-                revisionId: publication.revisionId,
-                providerMemoryId: revision.providerMemoryId,
-                contentHash: hash,
-                entryVersion: candidates.memory.entryVersion(publication.memoryId),
-                duplicate: false,
-              };
-            }
-            if (current.status === 'failed' || current.status === 'rejected') {
-              throw new MnemoWeaveError('PROVIDER_UNAVAILABLE');
-            }
-            // The publisher ticks every 500 ms; a brief wait is normal, a long one is not.
-            if (Date.now() > deadline) throw new MnemoWeaveError('SYNC_OUTCOME_UNKNOWN');
-            await new Promise(done => setTimeout(done, 100));
-          }
-        },
         withdrawMemory: async (memoryId, input) => withEditLock(memoryId, async () => {
           const parsed = MemoryWithdrawInput.parse(input);
           const descriptor = candidates.catalog.get(memoryId);
           if (descriptor.state !== 'active') throw new MnemoWeaveError('INVALID_STATE');
           const currentVersion = candidates.memory.entryVersion(memoryId);
           assertEntryVersion(currentVersion, parsed.entryVersion);
-          const now = new Date().toISOString();
+          const at = now();
+          const current = descriptor.revisions.find(revision => revision.id === descriptor.currentRevisionId);
+          if (!current) throw new MnemoWeaveError('NOT_FOUND');
           if (coordinator && formalProvider) {
-            const scope = descriptor.projectId ? `project:${descriptor.projectId}` : 'global';
-            // The change envelope still carries a body: the contract requires one, and other
-            // machines need the local read-back check to match. The withdrawal itself is
-            // expressed by `withdrawnAt`, not by dropping the content.
-            const current = descriptor.revisions.find(revision => revision.id === descriptor.currentRevisionId);
-            if (!current) throw new MnemoWeaveError('NOT_FOUND');
             const body = (await provider.readMemory(current.providerMemoryId)).content;
-            const changeId = randomUUID();
-            const result = await submitLocal(scope, 'delete', {
-              entryId: memoryId,
-              kind: 'formal',
-              scope,
-              content: { format: 'plain', data: body, contentHash: createHash('sha256').update(body).digest('hex'), byteLength: Buffer.byteLength(body, 'utf8') },
-              payload: { category: 'fact', importance: 3, tags: [], entities: [], relations: [] },
-              withdrawnAt: now,
-            }, currentVersion, () => undefined, changeId);
-            if (result === 'queued') throw new MnemoWeaveError('SYNC_QUEUED');
-            if (result === 'unknown') throw new MnemoWeaveError('SYNC_OUTCOME_UNKNOWN');
-            const applied = candidates.ledger.inboxChange(changeId);
-            if (!applied || applied.state !== 'applied') throw new MnemoWeaveError('SYNC_OUTCOME_UNKNOWN');
+            const state = await submitLocal(planWithdrawChange({
+              entryId: memoryId, content: body, entryVersion: currentVersion, at,
+              category: (current.category ?? 'general') as never, importance: current.importance ?? 3,
+              tags: current.tags ?? [], entities: current.entities ?? [],
+            }), () => undefined);
+            if (state === 'queued') throw new MnemoWeaveError('SYNC_QUEUED');
+            if (state === 'unknown') throw new MnemoWeaveError('SYNC_OUTCOME_UNKNOWN');
+            await applyFormal();
           }
-          const withdrawn = candidates.catalog.withdrawLocal(memoryId, 'local-user', parsed.reason, now);
-          // A withdrawal is a new version like any other write. Without local sync nothing else
-          // advances the counter, so a later edit would be based on a version the memory no longer
-          // has — and the caller would be told the withdrawal did not happen.
+          const withdrawn = candidates.catalog.withdrawLocal(memoryId, 'local-user', parsed.reason, at);
           const nextVersion = Math.max(currentVersion + 1, candidates.memory.entryVersion(memoryId));
-          const currentRevision = descriptor.revisions.find(revision => revision.id === descriptor.currentRevisionId);
-          if (currentRevision !== undefined && nextVersion > currentVersion) {
-            candidates.memory.upsertFormalMap({
-              entryId: memoryId, version: nextVersion, providerId: currentRevision.providerMemoryId,
-              contentHash: currentRevision.contentHash, state: 'applied', appliedAt: now,
-            }, now);
-          }
-          candidates.memory.setEntryVersion(memoryId, nextVersion, now);
-          return { memoryId, revisionId: withdrawn.revisionId, entryVersion: nextVersion, withdrawnAt: now };
+          candidates.memory.upsertFormalMap({
+            entryId: memoryId, version: nextVersion, providerId: current.providerMemoryId,
+            contentHash: current.contentHash, state: 'applied', appliedAt: at,
+          }, at);
+          candidates.memory.setEntryVersion(memoryId, nextVersion, at);
+          return { memoryId, revisionId: withdrawn.revisionId, entryVersion: nextVersion, withdrawnAt: at };
         }),
-        lastInjection: async (hostId, sessionId) => candidates.memory.lastInjection(hostId, sessionId),
-        embeddingDiagnostics: async hostId => {
-          const report = await app.embeddingDiagnostics(clientGrant(hostId));
-          const backfill = candidates.memory.diagnosticJob(BACKFILL_KIND);
-          return { ...report, ...(backfill === undefined ? {} : { backfill }) };
+
+        // ── Authorized write tasks ──
+        writeTaskAction: async (hostId, taskId, index, input) => {
+          const action = WriteTaskAction.parse(input);
+          // Authorize before claiming: a refused action must not take the task key, or the action
+          // that would have been allowed could never run under that key again.
+          assertWriteTaskAllowed(hostId, action, taskId);
+          const requestHash = createHash('sha256').update(JSON.stringify(action)).digest('hex');
+          const claim = candidates.writeTasks.claim({ hostId, taskId, index, kind: action.kind, action: action.action, requestHash });
+          // A replay of the same action returns the latest known receipt; it is never executed twice.
+          if (claim.existing && claim.existing.status !== 'unknown') return toReceipt(claim.existing);
+          const receipt = await executeWriteTask(hostId, taskId, index, action);
+          return toReceipt(candidates.writeTasks.settle(hostId, taskId, index, receipt));
         },
-        embeddingBackfill: async hostId => { void hostId; return startBackfill(); },
+        writeTaskReceipt: async (hostId, taskId, index) => {
+          const row = candidates.writeTasks.receipt(hostId, taskId, index);
+          if (!row) throw new MnemoWeaveError('NOT_FOUND');
+          return toReceipt(row);
+        },
+
+        // ── Archive distillation ──
+        createDistillation: async (hostId, input) => {
+          const parsed = ArchiveDistillationCreate.parse(input);
+          const row = candidates.memory.archive(parsed.source.entryId);
+          if (!row || row.workspaceId !== parsed.source.workspaceId || row.withdrawnAt !== null) throw new MnemoWeaveError('NOT_FOUND');
+          const sourceHash = createHash('sha256').update(row.body, 'utf8').digest('hex');
+          if (row.version !== parsed.source.entryVersion || sourceHash !== parsed.source.contentHash) throw new MnemoWeaveError('VERSION_CONFLICT');
+          const contentHash = createHash('sha256').update(parsed.content, 'utf8').digest('hex');
+          const draft = candidates.distillations.create({
+            hostId, workspaceId: parsed.source.workspaceId, entryId: parsed.source.entryId,
+            entryVersion: parsed.source.entryVersion, sourceContentHash: parsed.source.contentHash,
+            content: parsed.content, knowledgeType: parsed.knowledgeType,
+            category: parsed.category ?? null, importance: parsed.importance ?? null,
+            tags: parsed.tags ?? null, entities: parsed.entities ?? null,
+            reason: parsed.reason, assessment: parsed.assessment, contentHash,
+          });
+          return toDistillation(draft);
+        },
+        readDistillation: async (hostId, draftId) => {
+          const draft = candidates.distillations.get(draftId);
+          if (!draft || draft.hostId !== hostId) throw new MnemoWeaveError('NOT_FOUND');
+          const source = candidates.memory.archive(draft.entryId);
+          if (!source || source.workspaceId !== draft.workspaceId || source.withdrawnAt !== null) throw new MnemoWeaveError('NOT_FOUND');
+          return toDistillation(draft);
+        },
+
+        // ── Idle review ──
         idleReviewScan: async (hostId, input) => {
           const request = IdleReviewScanInput.parse(input);
           const state = candidates.events.idleReview(hostId, request.sessionId);
-          const selection = selectIdleReviewSignals(candidates.events.list(hostId, request.sessionId), {
+          // The scan reads the retained user turns, not the selectively persisted event ledger: an
+          // ordinary user message is skipped by the retention selector, and it is exactly the
+          // material an idle review judges.
+          const turns = candidates.turns.messages(hostId, request.sessionId).map(message => ({
+            eventId: message.eventId, sessionId: request.sessionId,
+            turnId: message.turnId, kind: 'message.user' as const,
+            payload: { text: message.text, ...(message.noRetention ? { noRetention: true as const } : {}) },
+          }));
+          const selection = selectIdleReviewSignals(turns, {
             afterTurn: state.lastTurn, completedThroughTurn: request.completedThroughTurn,
             maxSignals: request.maxSignals, knownTexts: new Set(state.signals.map(signal => signal.text)),
-            now: new Date().toISOString(), id: randomUUID,
+            now: now(), id: randomUUID,
           });
           candidates.events.recordIdleReview(hostId, request.sessionId, selection.lastTurn, selection.signals);
           return IdleReviewScanOutput.parse(selection);
@@ -947,112 +1520,9 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
           const request = IdleReviewRunFinishInput.parse(input);
           return candidates.events.finishIdleRun(hostId, runId, request.state, request.error);
         },
-        rules: async () => RuleList.parse({
-          items: candidates.memory.everyRule().map(toRuleRecord),
-          usage: candidates.memory.ruleUsage(ruleLimits),
-        }),
-        ruleArchive: async () => RuleArchiveList.parse({ items: candidates.memory.ruleArchive() }),
-        createRule: async (input) => withRuleLock(async () => {
-          const plan = planRuleCreate(input, candidates.memory.allRules(), ruleLimits);
-          const now = new Date().toISOString();
-          await submitLocal(ruleScope(), 'create', ruleDraft(plan.row), 0, () => candidates.memory.saveRulePlan(plan, now));
-          return toRuleRecord(plan.row);
-        }),
-        editRule: async (ruleId, input) => withRuleLock(async () => {
-          const current = candidates.memory.rule(ruleId);
-          if (!current) throw new MnemoWeaveError('NOT_FOUND');
-          // The editor carries the version it was opened at. Without this check two hosts would
-          // both succeed and the later write would silently replace a rule the first one never
-          // saw — the same class of overwrite the memory edit path refuses.
-          if (input.baseVersion !== undefined && input.baseVersion !== current.version) throw new MnemoWeaveError('VERSION_CONFLICT');
-          const plan = planRuleEdit(current, input, candidates.memory.allRules(), ruleLimits);
-          const baseVersion = candidates.memory.entryVersion(ruleId);
-          const now = new Date().toISOString();
-          await submitLocal(ruleScope(), baseVersion === 0 ? 'create' : 'update', ruleDraft(plan.row), baseVersion, () => candidates.memory.saveRulePlan(plan, now));
-          return toRuleRecord(plan.row);
-        }),
-        archives: async ({ projectId, includeWithdrawn, limit, cursor }) => {
-          const rows = projectId === undefined
-            ? candidates.memory.allArchives(includeWithdrawn ?? false)
-            : candidates.memory.archivesFor(projectId, includeWithdrawn ?? false);
-          if (cursor !== undefined && !/^\d+$/.test(cursor)) throw new MnemoWeaveError('INVALID_INPUT');
-          const start = cursor === undefined ? 0 : Number.parseInt(cursor, 10);
-          if (!Number.isSafeInteger(start) || start < 0) throw new MnemoWeaveError('INVALID_INPUT');
-          const pageSize = Math.min(Math.max(limit ?? 100, 1), 200);
-          const page = rows.slice(start, start + pageSize);
-          const projects = [...new Set((projectId === undefined ? rows.map(row => row.projectId) : [projectId]))];
-          return {
-            items: page.map(toArchiveRecord),
-            capacities: projects.map(id => candidates.memory.archiveUsage(id, archiveLimitBytes)),
-            ...(start + pageSize < rows.length ? { nextCursor: String(start + pageSize) } : {}),
-          };
-        },
-        searchArchives: async (hostId, input) => {
-          const request = ArchiveSearchInput.parse(input);
-          const calls = (archiveSearchCalls.get(hostId) ?? 0) + 1;
-          if (calls > 4) throw new MnemoWeaveError('ARCHIVE_SEARCH_BUDGET_EXCEEDED');
-          archiveSearchCalls.set(hostId, calls);
-          const rows = candidates.memory.searchArchives(request.projectId, request.query, request.includeArchived);
-          const results = [];
-          let totalBytes = 0;
-          const total = rows.length;
-          for (const row of rows) {
-            if (results.length >= request.limit) continue;
-            const bodyBytes = Buffer.byteLength(row.body, 'utf8');
-            const excerpt = utf8Prefix(row.body, 512);
-            if (totalBytes + excerpt.bytes > 4096) {
-              if (results.length === 0) {
-                results.push({
-                  entryId: row.entryId, projectId: row.projectId, title: row.title, state: row.state ?? 'active',
-                  version: row.version, verification: row.verification, excerpt: excerpt.text,
-                  excerptBytes: excerpt.bytes, excerptTruncated: excerpt.bytes < bodyBytes, bodyBytes, score: scoreArchive(row, request.query),
-                });
-              }
-              break;
-            }
-            totalBytes += excerpt.bytes;
-            results.push({
-              entryId: row.entryId, projectId: row.projectId, title: row.title, state: row.state ?? 'active',
-              version: row.version, verification: row.verification, excerpt: excerpt.text,
-              excerptBytes: excerpt.bytes, excerptTruncated: excerpt.bytes < bodyBytes, bodyBytes, score: scoreArchive(row, request.query),
-            });
-          }
-          return {
-            query: request.query, total, results, totalBytes, truncated: results.length >= request.limit && total > results.length,
-            excerptLimitBytes: 512 as const, totalLimitBytes: 4096 as const, callsLimit: 4 as const,
-          };
-        },
-        archiveHistory: async (entryId) => {
-          if (!candidates.memory.archive(entryId)) throw new MnemoWeaveError('NOT_FOUND');
-          return {
-            entryId,
-            items: candidates.memory.archiveHistory(entryId).map(row => ({
-              revisionId: row.revision_id, entryId: row.entry_id, projectId: row.project_id, version: row.version, title: row.title,
-              body: row.body, source: row.source as 'session' | 'tool' | 'user',
-              verification: row.verification as 'verified' | 'open' | 'refuted', evidence: row.evidence,
-              state: row.state as 'active' | 'archived', archivedAt: row.archived_at, recordedAt: row.recorded_at,
-            })),
-          };
-        },
-        editArchive: async (entryId, { baseVersion, ...input }) => withArchiveLock(async () => {
-          const current = candidates.memory.archive(entryId);
-          if (!current || current.withdrawnAt !== null) throw new MnemoWeaveError('NOT_FOUND');
-          if (current.version !== baseVersion) throw new MnemoWeaveError('VERSION_CONFLICT');
-          return writeArchive(planArchiveEdit(current, input, candidates.memory.allArchives(true), undefined, archiveLimitBytes), baseVersion);
-        }),
-        editArchiveState: async (entryId, input) => withArchiveLock(async () => {
-          const request = ArchiveStateInput.parse(input);
-          const current = candidates.memory.archive(entryId);
-          if (!current || current.withdrawnAt !== null) throw new MnemoWeaveError('NOT_FOUND');
-          if (current.version !== request.baseVersion) throw new MnemoWeaveError('VERSION_CONFLICT');
-          const row = planArchiveState(current, request.state, candidates.memory.allArchives(true), undefined, archiveLimitBytes);
-          return writeArchive(row, current.version);
-        }),
-        createArchive: async (input) => {
-          const parsed = ArchiveCreate.parse(input);
-          return withArchiveLock(async () => writeArchive(planArchive(parsed, candidates.memory.allArchives(true), undefined, archiveLimitBytes), 0));
-        },
       };
+
+      // ── Sync ──
       if (config.MNEMOWEAVE_SYNC_URL && config.MNEMOWEAVE_SYNC_DEVICE_ID && config.MNEMOWEAVE_SYNC_TOKEN) {
         const syncClient = new SyncClient({ baseUrl: config.MNEMOWEAVE_SYNC_URL, deviceId: config.MNEMOWEAVE_SYNC_DEVICE_ID, token: config.MNEMOWEAVE_SYNC_TOKEN, timeoutMs: config.MNEMOWEAVE_SYNC_TIMEOUT_MS });
         const formal = {
@@ -1072,77 +1542,44 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
           remote: syncClient,
           coordinator,
           ledger: candidates.ledger,
-          apply: row => applyInboxEntry(row, { store: candidates.memory, provider: formal, ruleLimits, archiveCapacityBytes: archiveLimitBytes }),
+          apply: row => applyInboxEntry(row, { store: candidates.memory, provider: formal, ruleLimits }),
           intervalMs: config.MNEMOWEAVE_SYNC_INTERVAL_MS,
         });
         sync = service;
-        client.syncStatus = async () => SyncStatusOutput.parse(service.status());
-        client.syncRefresh = async () => SyncRefreshOutput.parse(await service.refresh());
-        /**
-         * Offer published memories to shared sync. Reads the durable queue rather than the
-         * event argument, so a publication whose notification was lost to a crash is picked up
-         * on the next start instead of never being shared.
-         */
-        const sharePublished = async (event: PublishedFormal | undefined): Promise<void> => {
-          void event;
-          for (const pending of candidates!.pendingShares()) {
-            try {
-              const now = new Date().toISOString();
-              // Record the mapping this machine already has. Without it, pulling our own change
-              // back finds no local row for the revision and writes the Provider a second time.
-              candidates!.memory.upsertFormalMap({
-                entryId: pending.memoryId, version: pending.version, providerId: pending.providerId,
-                contentHash: pending.contentHash, state: 'applied', appliedAt: now,
-              }, now);
-              const changeId = randomUUID();
-              const result = await submitLocalChange({
-                scope: pending.scope,
-                operation: pending.version === 1 ? 'create' : 'update',
-                baseVersion: pending.version - 1,
-                changeId,
-                entry: {
-                  entryId: pending.memoryId,
-                  kind: 'formal',
-                  scope: pending.scope,
-                  content: { format: 'plain', data: pending.content, contentHash: pending.contentHash, byteLength: Buffer.byteLength(pending.content, 'utf8') },
-                  payload: {
-                    category: 'fact', importance: 3, tags: [], entities: [],
-                    // A later reviewed revision supersedes the previous one, exactly as the edit
-                    // path expresses it, so other machines can rebuild the same chain.
-                    relations: pending.version > 1
-                      ? [{ type: 'supersedes' as const, from: { entryId: pending.memoryId, version: pending.version - 1 }, to: { entryId: pending.memoryId, version: pending.version } }]
-                      : [],
-                  },
-                  withdrawnAt: null,
-                },
-              }, {
-                ledger: candidates!.ledger,
-                flush: () => coordinator!.flushOutbox(),
-                now: () => new Date().toISOString(),
-              });
-              // Only a confirmed version is a confirmed version: writing 1 unconditionally marked
-              // an unconfirmed change as settled, so a later edit used a base the remote never issued.
-              if (result.state === 'confirmed' && result.accepted !== null) {
-                candidates!.memory.setEntryVersion(pending.memoryId, result.accepted.version, new Date().toISOString());
-                await coordinator!.applyScope(pending.scope, row => applyInboxEntry(row, { store: candidates!.memory, provider: formalProvider!, ruleLimits, archiveCapacityBytes: archiveLimitBytes }));
-                candidates!.settleShare(pending.memoryId, 'confirmed', null, new Date().toISOString());
-              } else {
-                candidates!.settleShare(pending.memoryId, 'failed', result.state === 'unknown' ? 'SYNC_OUTCOME_UNKNOWN' : 'SYNC_QUEUED', new Date().toISOString());
-              }
-            } catch (error) {
-              const code = error instanceof MnemoWeaveError ? error.code : 'INTERNAL';
-              candidates!.settleShare(pending.memoryId, 'failed', code, new Date().toISOString());
-              process.stderr.write(`${JSON.stringify({ event: 'published_memory_not_shared', memoryId: pending.memoryId, code })}\n`);
-            }
-          }
-        };
-        // Registered after the function exists, so the listener always resolves.
-        candidates.setPublishListener(event => { void sharePublished(event); });
+        const endpoints = client!;
+        endpoints.syncStatus = async () => SyncStatusOutput.parse(service.status());
+        endpoints.syncRefresh = async () => SyncRefreshOutput.parse(await service.refresh());
+        candidates.setPublishListener(event => { void shareMemory({ memoryId: event.memoryId, revisionId: candidates!.catalog.get(event.memoryId).currentRevisionId, providerId: event.providerId }); });
         service.start();
-        // Compensate for a crash between the publication commit and its notification.
-        void sharePublished(undefined);
       }
     }
-    return { app, port: config.MNEMOWEAVE_PORT, close: async () => { await sync?.stop(); await workflow?.stop(); candidates?.close(); }, client, storage: candidates ? () => candidates.storageStatus() : undefined };
+    if (!client) throw new Error('Memory endpoints require a state directory');
+    return {
+      app, port: config.MNEMOWEAVE_PORT,
+      close: async () => { await sync?.stop(); await workflow?.stop(); candidates?.close(); },
+      client, storage: candidates ? () => candidates.storageStatus() : undefined,
+    };
   } catch (error) { candidates?.close(); throw error; }
+}
+
+/** Distillation drafts are returned as the contract, with the source metadata intact. */
+function toDistillation(draft: import('../../../packages/infrastructure/governance/src/workspace-store.ts').DistillationRow) {
+  return {
+    draftId: draft.draftId,
+    source: {
+      workspaceId: draft.workspaceId, entryId: draft.entryId,
+      entryVersion: draft.entryVersion, contentHash: draft.sourceContentHash,
+    },
+    content: draft.content,
+    knowledgeType: draft.knowledgeType as never,
+    ...(draft.category === null ? {} : { category: draft.category as never }),
+    ...(draft.importance === null ? {} : { importance: draft.importance }),
+    ...(draft.tags === null ? {} : { tags: draft.tags }),
+    ...(draft.entities === null ? {} : { entities: draft.entities }),
+    reason: draft.reason,
+    assessment: draft.assessment as never,
+    contentHash: draft.contentHash,
+    createdAt: draft.createdAt,
+    taskId: draft.taskId,
+  };
 }

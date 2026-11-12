@@ -2,8 +2,8 @@ import { readFileSync } from 'node:fs';
 import { performance } from 'node:perf_hooks';
 import { ChatgptHook, DEFAULT_HOST_ID, normalizeChatgptHook } from './index.ts';
 import { publicError } from '../../../core/contracts/src/index.ts';
-import { clientFromEnv, ensureServerForTurn, renderView } from '../../../client/src/index.ts';
-import type { RenderableView } from '../../../client/src/render.ts';
+import { clientFromEnv, ensureServerForTurn, renderRules } from '../../../client/src/index.ts';
+
 
 // Cloud orchestration has different managed-hook requirements; never silently treat it as local.
 if (process.env.MNEMOWEAVE_CHATGPT_MODE !== 'local-only') process.exit(0);
@@ -19,7 +19,7 @@ let stage = 'input';
 try {
   const started = performance.now();
   const hook = ChatgptHook.parse(JSON.parse(readFileSync(0, 'utf8')));
-  const event = normalizeChatgptHook(hook, process.env.MNEMOWEAVE_PROJECT_ID);
+  const event = normalizeChatgptHook(hook);
   stage = 'server';
   // The Server is hosted by the "MnemoWeave Local Server" scheduled task, so the desktop app
   // may well start first. Wake it on a refused connection only, and only within this turn's
@@ -42,13 +42,16 @@ try {
   if (trigger) {
     const remaining = turnDeadline - performance.now();
     if (remaining <= 0) process.exit(0);
-    const request = { sessionId: event.sessionId, ...(event.projectId ? { projectId: event.projectId } : {}), ...(event.kind === 'message.user' && event.payload.text ? { query: event.payload.text.slice(0, 2000) } : {}) };
-    stage = 'view';
-    const delivered = await client.inject(request, Math.max(1, Math.floor(remaining)));
+    stage = 'rules';
+    const delivered = await client.inject({ sessionId: event.sessionId }, Math.max(1, Math.floor(remaining)));
     if (delivered.ok) {
       stage = 'render';
-      const text = renderView(delivered.value as RenderableView);
+      // A partial set is never injected: the host reports the failure and the turn continues.
+      const text = renderRules(delivered.value);
       if (text.length > 0) process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: hook.hook_event_name, additionalContext: text } }) + '\n');
+      else if (!delivered.value.complete) process.stderr.write(JSON.stringify({ event: 'chatgpt_injection_incomplete', reason: 'the host output limit could not hold every rule' }) + '\n');
+    } else {
+      process.stderr.write(JSON.stringify({ event: 'chatgpt_injection_unavailable', code: delivered.error.code }) + '\n');
     }
   }
 } catch (error) { process.stderr.write(JSON.stringify({ event: 'chatgpt_hook_unavailable', stage, kind: error instanceof Error ? error.name : 'unknown', ...publicError(error) }) + '\n'); }

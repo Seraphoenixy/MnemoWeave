@@ -26,6 +26,6 @@ process.stdout.write(`${JSON.stringify({
   baseUrl,
   hostId,
   provider: health.value,
-  memories: list.ok ? { count: list.value.items.length, items: list.value.items.map(item => ({ memoryId: item.memoryId, scope: item.scope, publishedAt: item.publishedAt })) } : { error: list.error.code },
+  memories: list.ok ? { count: list.value.items.length, items: list.value.items.map(item => ({ memoryId: item.memoryId, knowledgeType: item.knowledgeType ?? null, publishedAt: item.publishedAt })) } : { error: list.error.code },
   sample,
 }, null, 2)}\n`);

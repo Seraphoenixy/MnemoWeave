@@ -1,16 +1,17 @@
 import { createHash } from 'node:crypto';
-import { MnemoWeaveError } from '../../contracts/src/index.ts';
+import { MnemoWeaveError, streamOf } from '../../contracts/src/index.ts';
 import type { SyncContentValue, SyncEntryValue } from '../../contracts/src/index.ts';
 import type { ApplyOutcome, SyncInboxRecord } from './sync.ts';
-import type { RuleArchiveRow, RuleLimits } from './rules.ts';
+import type { RuleLimits } from './rules.ts';
+import { ruleUsage } from './rules.ts';
 
 /**
  * Turning a received change into a local state.
  *
- * Runtime rules and project archives are stored directly. Formal memories go
- * through the Mnemon interface in a fixed order: write, link, read back, then move
- * the local mapping. Nothing is recorded as applied before the read-back matches,
- * so a recall never sees content the local Server has not verified.
+ * Rules and workspace archives are stored directly. Formal memories go through the Mnemon
+ * interface in a fixed order: write, link, read back, then move the local mapping. Nothing is
+ * recorded as applied before the read-back matches, so a recall never sees content the local
+ * Server has not verified.
  */
 
 export interface LocalRuleRow {
@@ -19,7 +20,6 @@ export interface LocalRuleRow {
   enabled: boolean;
   version: number;
   withdrawnAt: string | null;
-  /** Absent on pre-v16 rows; normalized to `normal`/false. */
   importance?: 'critical' | 'normal' | 'low' | undefined;
   pinned?: boolean | undefined;
   createdAt?: string | undefined;
@@ -27,7 +27,7 @@ export interface LocalRuleRow {
 
 export interface LocalArchiveRow {
   entryId: string;
-  projectId: string;
+  workspaceId: string;
   title: string;
   body: string;
   source: string;
@@ -35,7 +35,7 @@ export interface LocalArchiveRow {
   evidence: string;
   version: number;
   withdrawnAt: string | null;
-  /** Absent on pre-v16 rows; normalized to active. */
+  /** Absent on rows written before the workspace model; normalized to active. */
   state?: 'active' | 'archived' | undefined;
   archivedAt?: string | null | undefined;
   updatedAt?: string | undefined;
@@ -57,12 +57,12 @@ export interface MemoryApplyStore {
   withdrawRule(entryId: string, at: string): void;
   upsertArchive(row: LocalArchiveRow, at: string): void;
   withdrawArchive(entryId: string, at: string): void;
-  upsertFormalMap(row: FormalMapRow, at: string): void;  /** Provider id recorded for a specific revision, if this machine applied it. */
+  upsertFormalMap(row: FormalMapRow, at: string): void;
   formalProviderId(entryId: string, version: number): string | null;
   /**
    * Provider id this machine already holds for the same body, whatever version it was filed
-   * under. The origin machine publishes locally before the remote assigns a version, so its
-   * row and the echoed change can disagree on the number while describing the same write.
+   * under. The origin machine publishes locally before the remote assigns a version, so its row
+   * and the echoed change can disagree on the number while describing the same write.
    */
   formalProviderIdByHash?(entryId: string, contentHash: string): string | null;
   /** Confirmed remote version of an entry; local writes use it as their base. */
@@ -71,10 +71,8 @@ export interface MemoryApplyStore {
   publishSynced?(input: SyncedPublish): void;
   /** Hide a synced formal memory whose remote entry was withdrawn. */
   retireSynced?(memoryId: string, at: string): void;
-  /** Apply a synced archive, archiving least-recently-used entries when the project is full. */
-  applyArchiveWithCapacity?(row: LocalArchiveRow, at: string, limitBytes: number): LocalArchiveRow[];
-  /** Apply a synced rule, archiving lower-priority entries when the active set is full. */
-  applyRuleWithCapacity?(row: LocalRuleRow, at: string, limits: RuleLimits): RuleArchiveRow[];
+  /** Confirm the current rule set, refusing an inbound set that is over capacity. */
+  applyRuleWithCapacity?(row: LocalRuleRow, at: string, limits: RuleLimits): void;
 }
 
 export interface SyncedPublish {
@@ -83,8 +81,6 @@ export interface SyncedPublish {
   content: string;
   contentHash: string;
   providerId: string;
-  scope: string;
-  projectId: string | null;
   category: string;
   importance?: number;
   tags: string[];
@@ -123,11 +119,6 @@ export interface ApplyPorts {
   now?: () => string;
   /** Capacity is part of the local apply boundary, including retries and sync merges. */
   ruleLimits?: RuleLimits;
-  archiveCapacityBytes?: number;
-}
-
-function projectIdOf(entry: SyncEntryValue): string | null {
-  return entry.scope === 'global' ? null : entry.scope.slice('project:'.length);
 }
 
 function ruleRow(entry: SyncEntryValue, body: string): LocalRuleRow {
@@ -144,13 +135,16 @@ function ruleRow(entry: SyncEntryValue, body: string): LocalRuleRow {
 }
 
 function archiveRow(entry: SyncEntryValue, body: string): LocalArchiveRow {
-  const payload = entry.payload as { title: string; source: string; verification: 'verified' | 'open' | 'refuted'; evidence: string; state?: 'active' | 'archived'; archivedAt?: string | null };
-  const projectId = projectIdOf(entry);
-  if (projectId === null) throw new MnemoWeaveError('INVALID_INPUT');
+  const payload = entry.payload as {
+    workspaceId?: string; title: string; source: string; verification: 'verified' | 'open' | 'refuted';
+    evidence: string; state?: 'active' | 'archived'; archivedAt?: string | null;
+  };
+  if (typeof payload.workspaceId !== 'string') throw new MnemoWeaveError('INVALID_INPUT');
+  if (streamOf(entry.kind, entry.payload) === 'rules' || streamOf(entry.kind, entry.payload) === 'formal-memories') throw new MnemoWeaveError('INVALID_INPUT');
   const state = payload.state === 'archived' ? 'archived' : 'active';
   return {
     entryId: entry.entryId,
-    projectId,
+    workspaceId: payload.workspaceId,
     title: payload.title,
     body,
     source: payload.source,
@@ -164,8 +158,9 @@ function archiveRow(entry: SyncEntryValue, body: string): LocalArchiveRow {
 }
 
 /**
- * Apply one inbox row. Provider failures stay `needs_review` with their code, which
- * keeps the scope cursor from advancing past content the local copy does not hold.
+ * Apply one inbox row. Provider failures stay `needs_review` with their code, which keeps the
+ * stream cursor from advancing past content the local copy does not hold. An inbound rule set
+ * that exceeds capacity is refused the same way: it is never trimmed or archived on arrival.
  */
 export async function applyInboxEntry(record: SyncInboxRecord, ports: ApplyPorts): Promise<ApplyOutcome> {
   const at = (ports.now ?? (() => new Date().toISOString()))();
@@ -176,21 +171,27 @@ export async function applyInboxEntry(record: SyncInboxRecord, ports: ApplyPorts
   } catch (error) {
     return { status: 'needs_review', error: error instanceof MnemoWeaveError ? error.code : 'PROVIDER_INTEGRITY' };
   }
+  try {
+    if (streamOf(entry.kind, entry.payload) !== record.stream) return { status: 'needs_review', error: 'INVALID_INPUT' };
+  } catch {
+    return { status: 'needs_review', error: 'INVALID_INPUT' };
+  }
 
-  if (entry.kind === 'runtime') {
-    if (record.operation === 'delete' || entry.withdrawnAt !== null) ports.store.withdrawRule(entry.entryId, at);
-    else if (ports.store.applyRuleWithCapacity !== undefined && ports.ruleLimits !== undefined) {
+  if (entry.kind === 'rule') {
+    if (record.operation === 'delete' || entry.withdrawnAt !== null) {
+      ports.store.withdrawRule(entry.entryId, at);
+    } else if (ports.store.applyRuleWithCapacity !== undefined && ports.ruleLimits !== undefined) {
       ports.store.applyRuleWithCapacity(ruleRow(entry, body), at, ports.ruleLimits);
-    } else ports.store.upsertRule(ruleRow(entry, body), at);
+    } else {
+      ports.store.upsertRule(ruleRow(entry, body), at);
+    }
     ports.store.setEntryVersion(entry.entryId, entry.version, at);
     return { status: 'applied' };
   }
 
-  if (entry.kind === 'archive') {
+  if (entry.kind === 'workspace-archive') {
     if (record.operation === 'delete' || entry.withdrawnAt !== null) ports.store.withdrawArchive(entry.entryId, at);
-    else if (ports.store.applyArchiveWithCapacity !== undefined && ports.archiveCapacityBytes !== undefined) {
-      ports.store.applyArchiveWithCapacity(archiveRow(entry, body), at, ports.archiveCapacityBytes);
-    } else ports.store.upsertArchive(archiveRow(entry, body), at);
+    else ports.store.upsertArchive(archiveRow(entry, body), at);
     ports.store.setEntryVersion(entry.entryId, entry.version, at);
     return { status: 'applied' };
   }
@@ -207,11 +208,8 @@ async function applyFormal(record: SyncInboxRecord, body: string, ports: ApplyPo
     const payload = entry.payload as { category?: string; importance?: number; tags?: string[]; entities?: string[] };
     ports.store.publishSynced?.({
       entryId: entry.entryId, version: entry.version, content: body, contentHash: entry.content.contentHash,
-      providerId, scope: entry.scope,
-      projectId: entry.scope.startsWith('project:') ? entry.scope.slice('project:'.length) : null,
+      providerId,
       category: payload.category ?? 'general', tags: payload.tags ?? [],
-      // Classification travels with the revision so the local view can show what the origin
-      // machine recorded instead of guessing from the body.
       ...(typeof payload.importance === 'number' ? { importance: payload.importance } : {}),
       ...(payload.entities === undefined ? {} : { entities: payload.entities }),
       at,
@@ -220,10 +218,7 @@ async function applyFormal(record: SyncInboxRecord, body: string, ports: ApplyPo
   try {
     if (record.operation === 'delete' || entry.withdrawnAt !== null) {
       // Withdrawal is a new version that stops being recalled; it is not physical deletion.
-      // `forget` erases the row, so `show` fails and edges pointing at it disappear — which
-      // breaks the protocol's promise that withdrawn history stays readable. The local
-      // Provider copy is left intact and only the catalog pointer is retired, so the body is
-      // still inspectable while recall and injection skip it.
+      // `forget` erases the row, so `show` fails and edges pointing at it disappear.
       ports.store.upsertFormalMap({ entryId: entry.entryId, version: entry.version, providerId: previous, contentHash: entry.content.contentHash, state: 'applied', appliedAt: at }, at);
       ports.store.retireSynced?.(entry.entryId, at);
       return { status: 'applied' };
@@ -234,9 +229,6 @@ async function applyFormal(record: SyncInboxRecord, body: string, ports: ApplyPo
       mirror(existing);
       return { status: 'applied' };
     }
-    // The origin machine published this revision itself and already wrote the Provider. Its
-    // mapping is keyed by the version the remote assigned, which may differ from the version
-    // this row carries, so look the revision up by content hash before writing a second copy.
     const local = ports.store.formalProviderIdByHash?.(entry.entryId, entry.content.contentHash);
     if (local) {
       ports.store.upsertFormalMap({ entryId: entry.entryId, version: entry.version, providerId: local, contentHash: entry.content.contentHash, state: 'applied', appliedAt: at }, at);
@@ -258,29 +250,22 @@ async function applyFormal(record: SyncInboxRecord, body: string, ports: ApplyPo
       if (targets.size === 0 && previous && previous !== providerId) targets.add(previous);
       return [...targets];
     };
-    // Linking is an upsert on the Provider side, so replaying it is harmless.
     const linkTargets = async (providerId: string): Promise<void> => {
       for (const target of targetsFor(providerId)) {
         await ports.provider.linkSupersedes(providerId, target, { operationId: record.changeId, reason: 'cross-machine sync', effectiveAt: at });
       }
     };
-      // The mapping is written after the Provider call, so a crash in between leaves a
-      // written memory with no local row. Recover it by its stable source before writing.
-      // This also makes an overlapping apply safe: the first writer's row is found by
-      // source instead of being written a second time.
-      const recovered = await ports.provider.findBySource?.(source);
-      if (recovered) {
-        // Same source, different body means the source is not unique for this change; refuse
-        // rather than silently keeping the wrong content.
-        if (createHash('sha256').update(Buffer.from(recovered.content, 'utf8')).digest('hex') !== entry.content.contentHash) {
-          return { status: 'needs_review', error: 'PROVIDER_INTEGRITY' };
-        }
-        await linkTargets(recovered.id);
-        ports.store.upsertFormalMap({ entryId: entry.entryId, version: entry.version, providerId: recovered.id, contentHash: entry.content.contentHash, state: 'applied', appliedAt: at }, at);
-        mirror(recovered.id);
-        return { status: 'applied' };
+    const recovered = await ports.provider.findBySource?.(source);
+    if (recovered) {
+      if (createHash('sha256').update(Buffer.from(recovered.content, 'utf8')).digest('hex') !== entry.content.contentHash) {
+        return { status: 'needs_review', error: 'PROVIDER_INTEGRITY' };
       }
-      const written = await ports.provider.remember(body, source);
+      await linkTargets(recovered.id);
+      ports.store.upsertFormalMap({ entryId: entry.entryId, version: entry.version, providerId: recovered.id, contentHash: entry.content.contentHash, state: 'applied', appliedAt: at }, at);
+      mirror(recovered.id);
+      return { status: 'applied' };
+    }
+    const written = await ports.provider.remember(body, source);
     const actual = await ports.provider.show(written.id);
     if (actual.id !== written.id || createHash('sha256').update(Buffer.from(actual.content, 'utf8')).digest('hex') !== entry.content.contentHash) {
       return { status: 'needs_review', error: 'PROVIDER_INTEGRITY' };
@@ -293,4 +278,10 @@ async function applyFormal(record: SyncInboxRecord, body: string, ports: ApplyPo
     const code = error instanceof MnemoWeaveError ? error.code : 'PROVIDER_UNAVAILABLE';
     return { status: 'needs_review', error: code };
   }
+}
+
+/** The capacity check the local apply boundary uses for an inbound rule set. */
+export function ruleSetFits(row: LocalRuleRow, existing: readonly LocalRuleRow[], limits: RuleLimits): boolean {
+  const merged = [...existing.filter(entry => entry.entryId !== row.entryId), row];
+  return !ruleUsage(merged, limits).exceeded;
 }

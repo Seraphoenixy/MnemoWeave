@@ -10,8 +10,7 @@ const CHANGE = '22222222-2222-4222-8222-222222222222';
 function draft(): SyncEntryDraftValue {
   return {
     entryId: ENTRY,
-    kind: 'runtime',
-    scope: 'project:alpha',
+    kind: 'rule',
     content: plainContent('提交前必须运行类型检查。'),
     payload: { enabled: true },
     withdrawnAt: null,
@@ -22,7 +21,7 @@ function record(seq: number): SyncChangeRecordValue {
   return {
     changeId: CHANGE,
     entryId: ENTRY,
-    scope: 'project:alpha',
+    stream: 'rules',
     version: seq,
     seq,
     operation: 'update',
@@ -33,7 +32,7 @@ function record(seq: number): SyncChangeRecordValue {
 }
 
 function page(seqs: readonly number[], overrides: Partial<SyncPullPageValue> = {}): SyncPullPageValue {
-  return { scope: 'project:alpha', changes: seqs.map(record), nextSince: seqs.at(-1) ?? 0, hasMore: false, retentionFloor: seqs[0] ?? 0, ...overrides };
+  return { stream: 'rules', changes: seqs.map(record), nextSince: seqs.at(-1) ?? 0, hasMore: false, retentionFloor: seqs[0] ?? 0, ...overrides };
 }
 
 test('plain content carries the hash and byte length the remote checks', () => {
@@ -42,7 +41,10 @@ test('plain content carries the hash and byte length the remote checks', () => {
   assert.equal(content.byteLength, 6);
   assert.match(content.contentHash, /^[a-f0-9]{64}$/);
   assert.throws(() => plainContent(''), (error: unknown) => error instanceof MnemoWeaveError && error.code === 'INVALID_INPUT');
-  assert.throws(() => plainContent('x'.repeat(8001)), (error: unknown) => error instanceof MnemoWeaveError && error.code === 'INVALID_INPUT');
+  // The envelope carries any of the three classes, so its ceiling is the archive body limit; the
+  // 8,000-byte formal body limit is a separate check on the formal-memory payload.
+  assert.equal(plainContent('x'.repeat(8001)).byteLength, 8001);
+  assert.throws(() => plainContent('x'.repeat(2 * 1024 * 1024 + 1)), (error: unknown) => error instanceof MnemoWeaveError && error.code === 'INVALID_INPUT');
 });
 
 test('create starts from base 0 and update/delete need a real base', () => {

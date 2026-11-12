@@ -21,7 +21,8 @@ function catalogStub(visible: string[]) {
     catalog: {
       visibleProviderIds: () => visible,
       currentMemoryIds: (providerId: string) => (visible.includes(providerId) ? [`logical-${providerId}`] : []),
-      get: () => { throw new Error('not used'); },
+      // Only active memories are readable; the recall filter checks the state of each candidate.
+      get: () => ({ state: 'active' }),
       getConflict: () => { throw new Error('not used'); },
     },
   };
@@ -108,56 +109,34 @@ test('a Provider without an embedding interface reports unknown, and a failed pr
   assert.equal(failed.lastError, 'PROVIDER_TIMEOUT');
 });
 
-test('recall returns general memory plus the requested project, and only general without one', async () => {
+test('recall covers the whole shared collection and takes no workspace', async () => {
+  // One shared collection: every published memory is a candidate, whichever workspace the caller
+  // was working in. There is no project or workspace parameter to filter by.
   const provider = {
     async health(): Promise<{ ready: true; version: '0.2.13'; capabilities: ['health'] }> { return { ready: true, version: '0.2.13', capabilities: ['health'] }; },
     async recall(req: { query: string; limit: number }) {
       return { memories: [
         { id: 'general-1', content: '通用经验' },
-        { id: 'alpha-1', content: '甲项目结论' },
-        { id: 'beta-1', content: '乙项目结论' },
+        { id: 'alpha-1', content: '第一条共享结论' },
+        { id: 'beta-1', content: '第二条共享结论' },
       ].slice(0, req.limit) };
     },
   };
-  const owners: Record<string, string | null> = { 'general-1': null, 'alpha-1': 'alpha', 'beta-1': 'beta' };
+  const published = new Set(['general-1', 'alpha-1', 'beta-1']);
   const catalog = {
     catalog: {
-      visibleProviderIds: () => ['general-1', 'alpha-1', 'beta-1'],
-      currentMemoryIds: (providerId: string) => (providerId in owners ? [`logical-${providerId}`] : []),
-      memoryProject: (memoryId: string) => owners[memoryId.replace('logical-', '')] ?? null,
-      get: () => { throw new Error('not used'); },
+      visibleProviderIds: () => [...published],
+      currentMemoryIds: (providerId: string) => (published.has(providerId) ? [`logical-${providerId}`] : []),
+      get: () => ({ state: 'active' }),
       getConflict: () => { throw new Error('not used'); },
     },
   };
   const app = new MemoryApplication(provider, catalog as unknown as CandidateRepository);
-  const alpha = await app.recall({ query: 'test', limit: 10, projectId: 'alpha' });
-  assert.deepEqual(alpha.memories.map(memory => memory.id).sort(), ['alpha-1', 'general-1']);
-  assert.equal(alpha.memories.find(memory => memory.id === 'alpha-1')?.projectId, 'alpha');
-  const general = await app.recall({ query: 'test', limit: 10 });
-  assert.deepEqual(general.memories.map(memory => memory.id), ['general-1']);
-  assert.equal(general.memories[0]?.projectId, null);
-  // Naming a project is not authorization: a grant that does not cover it is refused.
-  const grant = {
-    grantId: '00000000-0000-4000-8000-000000000001', hostId: 'h', projects: ['alpha'], globalIncluded: true,
-    issuedAt: '2026-01-01T00:00:00.000Z', expiresAt: '2099-01-01T00:00:00.000Z', generation: 0,
-  };
-  await assert.rejects(app.recall({ query: 'test', limit: 10, projectId: 'beta' }, grant), (error: unknown) => error instanceof MnemoWeaveError && error.code === 'SCOPE_FORBIDDEN');
+  const all = await app.recall({ query: 'test', limit: 10 });
+  assert.deepEqual(all.memories.map(memory => memory.id).sort(), ['alpha-1', 'beta-1', 'general-1']);
+  for (const memory of all.memories) assert.equal(Object.hasOwn(memory, 'projectId'), false);
+  // A workspace name is a recall cue appended to the query, not a parameter of the call.
+  await assert.rejects(app.recall({ query: 'test', limit: 10, projectId: 'beta' }), (error: unknown) => error instanceof Error);
 });
 
-test('a recall result from another project is not returned to a foreign session', async () => {
-  const provider = {
-    async health(): Promise<{ ready: true; version: '0.2.13'; capabilities: ['health'] }> { return { ready: true, version: '0.2.13', capabilities: ['health'] }; },
-    async recall(req: { query: string; limit: number }) { return { memories: [{ id: 'beta-1', content: '乙项目结论' }].slice(0, req.limit) }; },
-  };
-  const catalog = {
-    catalog: {
-      visibleProviderIds: () => ['beta-1'],
-      currentMemoryIds: (providerId: string) => (providerId === 'beta-1' ? ['logical-beta'] : []),
-      memoryProject: () => 'beta',
-      get: () => { throw new Error('not used'); },
-      getConflict: () => { throw new Error('not used'); },
-    },
-  };
-  const app = new MemoryApplication(provider, catalog as unknown as CandidateRepository);
-  assert.deepEqual((await app.recall({ query: 'test', limit: 10, projectId: 'alpha' })).memories, []);
-});
+

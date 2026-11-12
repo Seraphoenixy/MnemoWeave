@@ -2,38 +2,34 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { render } from '../../plugins/dsh-mnemo-weave/lib/index.js';
 
-/** The DSH Host half must inject the same block order and budget note as the shared renderer. */
+/**
+ * The DSH Host half injects the resident rules and nothing else. Working context and formal
+ * memories are not part of the injected text: the model reaches memory through the tools.
+ */
 
-test('the DSH host bundle renders rules first, then working context, then memories', () => {
+test('the DSH host bundle renders every resident rule whole, in the injected order', () => {
   const text = render({
-    rules: [{ body: '提交前必须运行类型检查。' }],
-    workingContext: [{ text: 'Working note.' }],
-    memories: [{ content: 'Formal memory.' }],
+    rules: [{ body: '提交前必须运行类型检查。' }, { body: '不得改写架构决策。' }],
+    complete: true,
   });
-  const positions = ['Runtime rules', '提交前必须运行类型检查。', 'Working context', 'Formal memories'].map(needle => text.indexOf(needle));
+  assert.match(text, /^准则（用户确认，按此执行）：/);
+  const positions = ['提交前必须运行类型检查。', '不得改写架构决策。'].map(needle => text.indexOf(needle));
   assert.ok(positions.every(position => position >= 0), text);
   assert.deepEqual([...positions].sort((left, right) => left - right), positions);
+  // No block other than the rules is rendered into the prompt.
+  assert.doesNotMatch(text, /Working context|Formal memories|Runtime rules/);
 });
 
-test('an omitted rule budget is named and empty views render nothing', () => {
-  const omitted = render({ rules: [], rulesBudget: { exceeded: true }, memories: [{ content: 'memory' }] });
-  assert.match(omitted, /Runtime rules were omitted: the budget was exceeded\./);
+test('an incomplete or empty delivery renders nothing at all', () => {
+  assert.equal(render({ rules: [], complete: true }), '');
   assert.equal(render({}), '');
-  assert.equal(render({ rules: [{ body: '   ' }], workingContext: [{ text: '' }], memories: [] }), '');
+  // A partial set must not look like the whole set: the host reports the failure instead.
+  assert.equal(render({ rules: [{ body: '第一条准则。' }], complete: false, failure: 'output_limit' }), '');
+  assert.equal(render({ rules: [{ body: '   ' }, { body: '' }], complete: true }), '');
 });
 
-test('a partial rule omission is named without dropping the injected rules', () => {
-  const text = render({
-    rules: [{ body: '第一条准则。' }],
-    rulesBudget: { exceeded: true, omittedCount: 2 },
-    memories: [{ content: 'memory' }],
-  });
-  assert.match(text, /第一条准则。/);
-  assert.match(text, /Runtime rules omitted: 2 complete lower-priority entries did not fit\./);
-});
-
-test('memory rows keep their excerpt marker', () => {
-  const text = render({ memories: [{ content: 'global one' }, { content: 'excerpt one', excerpt: true }] });
-  assert.match(text, /- global one/);
-  assert.match(text, /- excerpt one \[excerpt\]/);
+test('a rule body is trimmed at the edges and keeps multi-line text', () => {
+  const text = render({ rules: [{ body: '  第一行\n第二行  ' }], complete: true });
+  assert.match(text, /- 第一行\n第二行/);
+  assert.equal(text.includes('undefined'), false);
 });

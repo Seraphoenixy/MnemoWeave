@@ -50,12 +50,12 @@ function boundedInt(name: string, fallback: number, min: number): number {
 }
 
 const retentionDays = boundedInt('MNEMOWEAVE_SYNC_RETENTION_DAYS', 90, 1);
-const maxChangesPerScope = boundedInt('MNEMOWEAVE_SYNC_MAX_CHANGES', 50_000, 1);
+const maxChangesPerStream = boundedInt('MNEMOWEAVE_SYNC_MAX_CHANGES', 50_000, 1);
 const receiptDays = boundedInt('MNEMOWEAVE_SYNC_RECEIPT_DAYS', 365, 1);
 
 function prune(): void {
   try {
-    const result = store.prune({ retentionDays, maxChangesPerScope, receiptDays });
+    const result = store.prune({ retentionDays, maxChangesPerStream, receiptDays });
     process.stderr.write(`${JSON.stringify({ event: 'prune', ...result })}\n`);
   } catch (error) {
     process.stderr.write(`${JSON.stringify({ event: 'prune_failed', error: error instanceof Error ? error.message : 'unknown' })}\n`);
@@ -66,7 +66,7 @@ prune();
 if (pruneIntervalMs > 0) setInterval(prune, pruneIntervalMs).unref();
 
 server.listen(port, host, () => {
-  process.stderr.write(`${JSON.stringify({ listening: `http://${host}:${port}`, protocol: SYNC_PROTOCOL_VERSION, version: '0.1.0' })}\n`);
+  process.stderr.write(`${JSON.stringify({ listening: `http://${host}:${port}`, protocol: SYNC_PROTOCOL_VERSION, version: '0.2.0' })}\n`);
 });
 
 function shutdown(signal: string): void {

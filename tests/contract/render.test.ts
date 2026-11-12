@@ -1,46 +1,44 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { renderView } from '../../packages/client/src/render.ts';
+import { renderRules } from '../../packages/client/src/render.ts';
 
-/** The injected text is the only part the model sees; its block order and wording are contract. */
+/**
+ * The injected text is the only part the model sees, and it carries the rules and nothing else.
+ * Every visible enabled rule is delivered whole: there is no budget that trims or selects a
+ * subset, because a partial block looks like a rule the user removed.
+ */
 
-test('the rendered injection keeps the fixed block order', () => {
-  const text = renderView({
-    guidance: 'Server guidance line.',
+test('every rule is delivered whole, in the order the Server returned', () => {
+  const text = renderRules({
     rules: [{ body: '提交前必须运行类型检查。' }, { body: '禁止直接改正式记忆以外的地方。' }],
-    workingContext: [{ text: 'Working note one.' }],
-    memories: [{ content: 'Formal memory one.' }],
+    complete: true,
   });
-  const positions = ['Server guidance line.', 'Runtime rules', '提交前必须运行类型检查。', 'Working context', 'Formal memories']
-    .map(needle => text.indexOf(needle));
+  const positions = ['提交前必须运行类型检查。', '禁止直接改正式记忆以外的地方。'].map(needle => text.indexOf(needle));
   assert.ok(positions.every(position => position >= 0), text);
-  assert.deepEqual([...positions].sort((left, right) => left - right), positions, 'blocks must appear in guidance → rules → context → memories order');
+  assert.deepEqual([...positions].sort((left, right) => left - right), positions);
+  assert.match(text, /^准则（用户确认，按此执行）：/);
 });
 
-test('rules are delivered whole as bullets and keep their text', () => {
-  const text = renderView({ rules: [{ body: ' 准则一 ' }, { body: '准则二' }] });
-  assert.match(text, /Runtime rules \(confirmed by the user, follow them\):/);
+test('rules are trimmed at the edges and rendered as bullets', () => {
+  const text = renderRules({ rules: [{ body: ' 准则一 ' }, { body: '准则二' }], complete: true });
   assert.match(text, /- 准则一/);
   assert.match(text, /- 准则二/);
   assert.equal(text.includes('undefined'), false);
 });
 
-test('an exhausted rule budget is named instead of silently dropping the block', () => {
-  const text = renderView({ rules: [], rulesBudget: { exceeded: true }, memories: [{ content: 'Still delivered.' }] });
-  assert.match(text, /Runtime rules were omitted: the budget was exceeded\./);
-  assert.match(text, /Formal memories/);
-  assert.ok(text.indexOf('Runtime rules were omitted') < text.indexOf('Formal memories'));
+test('an incomplete delivery renders nothing so the host reports the failure', () => {
+  const text = renderRules({ rules: [{ body: '准则一' }], complete: false, failure: 'output_limit' });
+  assert.equal(text, '');
 });
 
-test('a view without rules renders no rule block and no omission note', () => {
-  const text = renderView({ memories: [{ content: 'Only memory.' }] });
-  assert.equal(text.includes('Runtime rules'), false);
-  assert.equal(text.includes('omitted'), false);
-  assert.equal(text, 'Formal memories:\n- Only memory.');
+test('an empty set renders nothing and no note', () => {
+  assert.equal(renderRules({ rules: [], complete: true }), '');
+  assert.equal(renderRules({ rules: [{ body: '   ' }, { body: '' }], complete: true }), '');
+  assert.equal(renderRules({}), '');
 });
 
 test('empty or blank rule bodies never produce an empty bullet', () => {
-  const text = renderView({ rules: [{ body: '   ' }, { body: '' }, { body: 'kept' }] });
+  const text = renderRules({ rules: [{ body: '   ' }, { body: '' }, { body: 'kept' }], complete: true });
   assert.equal(text.includes('- \n'), false);
   assert.match(text, /- kept/);
 });

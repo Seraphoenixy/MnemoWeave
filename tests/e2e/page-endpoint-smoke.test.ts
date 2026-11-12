@@ -42,16 +42,15 @@ test('every endpoint the page uses answers through the Host channel', async () =
   const seeded: string[] = [];
   const shapes = [
     { content: '页面冒烟：全局范围的决策。', scope: 'global' as const, meta: { category: 'decision', importance: 5, tags: ['冒烟'], entities: ['MnemoWeave'] } },
-    { content: '页面冒烟：项目范围的约束。', scope: 'project' as const, projectId: 'alpha', meta: { category: 'context', importance: 3, tags: [], entities: ['DSH'] } },
+    { content: '页面冒烟：另一条共享约束。', scope: 'shared' as const, meta: { category: 'context', importance: 3, tags: [], entities: ['DSH'] } },
     { content: '页面冒烟：没有分类的条目。', scope: 'global' as const, meta: {} },
   ];
   for (const [index, shape] of shapes.entries()) {
     const request = RememberInput.parse({
       idempotencyKey: `page-smoke-${index}`, content: shape.content, knowledgeType: 'Practice', tags: shape.meta.tags ?? [],
-      ...(shape.scope === 'global' ? {} : { projectId: shape.projectId }),
       provenance: {
         source: 'local-user', sourceReference: `page-smoke:${index}`, evidence: ['fixture'], verificationStatus: 'verified',
-        confidence: 1, applicability: 'global', limitations: '无', lastVerified: '2026-11-10T00:00:00.000Z',
+        confidence: 1, applicability: 'shared collection', limitations: '无', lastVerified: '2026-11-10T00:00:00.000Z',
       },
     });
     const written = await seedProvider.persistReviewed(shape.content, `candidate:${randomUUID()}`);
@@ -61,6 +60,9 @@ test('every endpoint the page uses answers through the Host channel', async () =
     );
     seeded.push(published.memoryId);
   }
+  // The archive page is bounded to a registered workspace; registering is explicit.
+  const workspaceId = '11111111-1111-4111-8111-111111111111';
+  seed.workspaces.register(workspaceId, 'smoke workspace');
   seed.close();
 
   const app = configure({
@@ -106,7 +108,10 @@ test('every endpoint the page uses answers through the Host channel', async () =
     await ok('config');
     await ok('injection');
     await ok('rules');
-    await ok('archives');
+    // The archive page is always bounded to a registered workspace.
+    const noWorkspace = await rpc('archives', {});
+    assert.equal(noWorkspace.ok, false, 'an archive list without a workspace is refused');
+    await ok('archives', { workspaceId });
 
     // Memories tab: list, an alternate order, a filter, then a detail and a historical read.
     const list = await ok('memories', { limit: 50 }) as { items: Array<{ memoryId: string; entryVersion: number; category?: string }> };
@@ -130,7 +135,10 @@ test('every endpoint the page uses answers through the Host channel', async () =
     // Graph tab.
     const graph = await ok('graph', { limit: 100 }) as { nodes: unknown[] };
     assert.equal(graph.nodes.length, 3);
-    await ok('graph', { projectId: 'alpha', limit: 100 });
+    // A removed owner filter is refused rather than silently ignored.
+    const removedFilter = await rpc('graph', { projectId: 'alpha', limit: 100 });
+    assert.equal(removedFilter.ok, false);
+    assert.equal((removedFilter as { error: { code: string } }).error.code, 'INVALID_INPUT');
 
     // Sync tab: nothing configured here, so the page must get a definite answer either way.
     const sync = await rpc('sync', {});

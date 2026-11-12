@@ -26,7 +26,7 @@ import { mnemonBinary } from './mnemon-binary.ts';
 const DEVICE_TOKEN = 'd'.repeat(32);
 const B_TOKEN = 'b'.repeat(32);
 const NOW = '2026-11-10T06:00:00.000Z';
-const SCOPE = 'project:alpha';
+const STREAM = 'formal-memories';
 const ENTRY = '44444444-4444-4444-8444-444444444444';
 
 let remote: SyncStore;
@@ -45,15 +45,15 @@ function formalPayload(version: number): SyncEntryDraftValue['payload'] {
 }
 
 function draft(version: number, body: string, withdrawnAt: string | null = null): SyncEntryDraftValue {
-  return { entryId: ENTRY, kind: 'formal', scope: SCOPE, content: plainContent(body), payload: formalPayload(version), withdrawnAt };
+  return { entryId: ENTRY, kind: 'formal-memory', content: plainContent(body), payload: formalPayload(version), withdrawnAt };
 }
 
 before(async () => {
   const dir = join('work', 'sync-roundtrip', randomUUID());
   mkdirSync(dir, { recursive: true });
   remote = new SyncStore({ path: join(dir, 'remote.db'), now: () => NOW });
-  remote.enroll('device-local', DEVICE_TOKEN, [{ scope: SCOPE, canRead: true, canWrite: true }]);
-  remote.enroll('device-b', B_TOKEN, [{ scope: SCOPE, canRead: true, canWrite: true }]);
+  remote.enroll('device-local', DEVICE_TOKEN, [{ stream: STREAM, canRead: true, canWrite: true }]);
+  remote.enroll('device-b', B_TOKEN, [{ stream: STREAM, canRead: true, canWrite: true }]);
   server = createSyncServer({ gateway: remote, now: () => new Date(NOW) });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -86,18 +86,18 @@ function localCoordinator(): SyncCoordinator {
 }
 
 function apply(coordinator: SyncCoordinator) {
-  return coordinator.applyScope(SCOPE, (row) => applyInboxEntry(row, { store: repo.memory, provider: providerAdapter, now: () => NOW }));
+  return coordinator.applyStream(STREAM, (row) => applyInboxEntry(row, { store: repo.memory, provider: providerAdapter, now: () => NOW }));
 }
 
 test('a change written on another machine reaches the local Provider and the mapping', async () => {
   const accepted = remote.submit(B_TOKEN, buildChange({ changeId: randomUUID(), baseVersion: 0, operation: 'create', entry: draft(1, '同步链路的正式记忆。') }));
   const coordinator = localCoordinator();
-  const pulled = await coordinator.pullScope(SCOPE);
+  const pulled = await coordinator.pullStream(STREAM);
   assert.equal(pulled.received, 1);
-  assert.equal(repo.ledger.cursor(SCOPE), 0, 'pulling must not advance the cursor');
+  assert.equal(repo.ledger.cursor(STREAM), 0, 'pulling must not advance the cursor');
   const applied = await apply(coordinator);
   assert.equal(applied.applied, 1);
-  assert.equal(repo.ledger.cursor(SCOPE), 1);
+  assert.equal(repo.ledger.cursor(STREAM), 1);
   const providerId = repo.memory.formalProviderId(ENTRY, 1);
   assert.ok(providerId, 'the local mapping must record the Provider id');
   assert.equal((await provider.readMemory(providerId!)).content, '同步链路的正式记忆。');
@@ -115,10 +115,10 @@ test('a change written on another machine reaches the local Provider and the map
 test('a later revision replaces the previous one and keeps the supersedes edge', async () => {
   remote.submit(B_TOKEN, buildChange({ changeId: randomUUID(), baseVersion: 1, operation: 'update', entry: draft(2, '第二版正式记忆。') }));
   const coordinator = localCoordinator();
-  await coordinator.pullScope(SCOPE);
+  await coordinator.pullStream(STREAM);
   const applied = await apply(coordinator);
   assert.equal(applied.applied, 1);
-  assert.equal(repo.ledger.cursor(SCOPE), 2);
+  assert.equal(repo.ledger.cursor(STREAM), 2);
   const first = repo.memory.formalProviderId(ENTRY, 1);
   const second = repo.memory.formalProviderId(ENTRY, 2);
   assert.ok(first && second && first !== second);
@@ -131,10 +131,10 @@ test('a later revision replaces the previous one and keeps the supersedes edge',
 test('a withdrawal stops recall but keeps the history readable', async () => {
   remote.submit(B_TOKEN, buildChange({ changeId: randomUUID(), baseVersion: 2, operation: 'delete', entry: draft(3, '第二版正式记忆。', NOW) }));
   const coordinator = localCoordinator();
-  await coordinator.pullScope(SCOPE);
+  await coordinator.pullStream(STREAM);
   const applied = await apply(coordinator);
   assert.equal(applied.applied, 1);
-  assert.equal(repo.ledger.cursor(SCOPE), 3);
+  assert.equal(repo.ledger.cursor(STREAM), 3);
   assert.equal(repo.memory.entryVersion(ENTRY), 3);
   // The protocol promises withdrawn history stays readable: the Provider copy is not deleted,
   // only the catalog stops treating it as current. Physical deletion used to make `show` fail

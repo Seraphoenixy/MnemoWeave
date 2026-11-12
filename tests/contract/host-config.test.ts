@@ -27,19 +27,25 @@ function tempEnv(name: string): NodeJS.ProcessEnv {
 test('resolution order is stored preference, then profile, then environment, then default', () => {
   const env = tempEnv('order');
   // Environment only.
-  const fromEnv = resolveHostConfig({}, { ...env, MNEMOWEAVE_SERVER: 'http://127.0.0.1:5555', MNEMOWEAVE_HOST_ID: 'env-host', MNEMOWEAVE_PROJECT_ID: 'env-proj' });
+  const workspace = '11111111-1111-4111-8111-111111111111';
+  const fromEnv = resolveHostConfig({}, { ...env, MNEMOWEAVE_SERVER: 'http://127.0.0.1:5555', MNEMOWEAVE_HOST_ID: 'env-host', MNEMOWEAVE_WORKSPACE_ID: workspace });
   assert.equal(fromEnv.serverUrl, 'http://127.0.0.1:5555');
   assert.equal(fromEnv.hostId, 'env-host');
-  assert.equal(fromEnv.projectId, 'env-proj');
+  assert.equal(fromEnv.workspaceId, workspace);
   assert.equal(fromEnv.sources.serverUrl, 'environment');
 
   // A profile value wins over the environment.
-  const fromProfile = resolveHostConfig({ serverUrl: 'http://127.0.0.1:6666', hostId: 'profile-host', projectId: 'profile-proj' }, { ...env, MNEMOWEAVE_SERVER: 'http://127.0.0.1:5555', MNEMOWEAVE_HOST_ID: 'env-host' });
+  const other = '22222222-2222-4222-8222-222222222222';
+  const fromProfile = resolveHostConfig({ serverUrl: 'http://127.0.0.1:6666', hostId: 'profile-host', workspaceId: other }, { ...env, MNEMOWEAVE_SERVER: 'http://127.0.0.1:5555', MNEMOWEAVE_HOST_ID: 'env-host' });
   assert.equal(fromProfile.serverUrl, 'http://127.0.0.1:6666');
   assert.equal(fromProfile.hostId, 'profile-host');
-  assert.equal(fromProfile.projectId, 'profile-proj');
+  assert.equal(fromProfile.workspaceId, other);
   assert.equal(fromProfile.sources.serverUrl, 'profile');
-  assert.equal(fromProfile.sources.projectId, 'profile');
+  assert.equal(fromProfile.sources.workspaceId, 'profile');
+
+  // The retired project variables no longer name a scope; only the workspace binding is read.
+  const legacy = resolveHostConfig({}, { ...env, MNEMOWEAVE_PROJECT_ID: 'legacy-project' });
+  assert.equal(legacy.workspaceId, undefined);
 
   // The stored preference wins over both for the Host identity.
   writePreferences({ hostId: 'pref-host' }, env);
@@ -89,7 +95,11 @@ test('preferences reject bad values and unknown keys instead of clamping silentl
   assert.deepEqual(validatePreferences({ defaultTab: 'sync' }), { defaultTab: 'settings' });
   // Scope is retired with the global memory model: a stored value is dropped, not rejected.
   assert.deepEqual(validatePreferences({ defaultScope: 'everything' }), {});
-  assert.deepEqual(validatePreferences({ projectId: 'old-project' }), {});
+  // The retired project binding is dropped as well; an unknown key still fails.
+  assert.throws(() => validatePreferences({ projectId: 'old-project' }), /unknown preference/);
+  // A workspace binding is a UUID or null; anything else is refused.
+  assert.deepEqual(validatePreferences({ workspaceId: '11111111-1111-4111-8111-111111111111' }), { workspaceId: '11111111-1111-4111-8111-111111111111' });
+  assert.throws(() => validatePreferences({ workspaceId: 'not-a-uuid' }), /workspaceId/);
   // The injection budget is part of the turn deadline, so the upper bound is enforced.
   assert.throws(() => validatePreferences({ injectTimeoutMs: 5_000 }), /injectTimeoutMs/);
   assert.throws(() => validatePreferences({ injectTimeoutMs: 10 }), /injectTimeoutMs/);
@@ -238,8 +248,8 @@ test('the page and the injection hook read the same saved values', () => {
   const pageView = service.settings();
   // The hook resolves independently, from the same file.
   const hookView = resolveHostConfig({ token: TOKEN }, env, readPreferences(env));
-  // The project dimension is retired from injection settings, so both halves resolve it as absent.
-  assert.equal(pageView.injection.projectId ?? null, hookView.projectId ?? null);
+  // The workspace binding is the one scope an injection setting carries, and both halves agree.
+  assert.equal(pageView.injection.workspaceId ?? null, hookView.workspaceId ?? null);
   assert.equal(pageView.injection.injectTimeoutMs, hookView.injectTimeoutMs);
   assert.equal(hookView.injectTimeoutMs, 900);
 });

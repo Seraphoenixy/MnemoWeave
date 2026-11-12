@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { ArchiveCreate, RuleCreate, RuleEdit } from '../../packages/core/contracts/src/index.ts';
-import { MnemoWeaveError } from '../../packages/core/contracts/src/index.ts';
+import { MnemoWeaveError, RULE_CAPACITY_BYTES } from '../../packages/core/contracts/src/index.ts';
 import {
   planArchive, planArchiveEdit, planArchiveState, planRuleCreate, planRuleEdit,
   archiveActiveBytes, ruleBytes, ruleUsage, toArchiveRecord, toRuleRecord,
@@ -10,12 +10,17 @@ import {
 import type { LocalRuleRow } from '../../packages/core/application/src/sync-apply.ts';
 
 const NOW = '2026-11-10T12:00:00.000Z';
+const WORKSPACE = '11111111-1111-4111-8111-111111111111';
 
 function rule(overrides: Partial<LocalRuleRow> = {}): LocalRuleRow {
   return {
     entryId: randomUUID(), body: '短准则', enabled: true, version: 1, withdrawnAt: null,
     importance: 'normal', pinned: false, createdAt: NOW, ...overrides,
   };
+}
+
+function archiveDraft(body = '正文', workspaceId = WORKSPACE) {
+  return ArchiveCreate.parse({ workspaceId, title: '标题', body, source: 'user', verification: 'open', evidence: '证据' });
 }
 
 test('a rule that fits is created at version 1', () => {
@@ -32,53 +37,85 @@ test('a body over the per-rule byte limit is refused before any write', () => {
   );
 });
 
-test('capacity is measured in UTF-8 bytes plus the entry delimiter', () => {
+test('capacity is 10,000 UTF-8 bytes plus the entry delimiter, with no maintenance target', () => {
   const rows = [rule({ body: 'a'.repeat(100) }), rule({ body: 'b'.repeat(100) })];
   assert.equal(ruleBytes(rows), 204);
   const usage = ruleUsage(rows);
   assert.equal(usage.usedBytes, 204);
-  assert.equal(usage.limitBytes, 14 * 1024);
+  assert.equal(usage.limitBytes, RULE_CAPACITY_BYTES);
+  assert.equal(RULE_CAPACITY_BYTES, 10_000);
   assert.equal(usage.itemMaxBytes, 8 * 1024);
-  assert.equal(usage.targetBytes, Math.floor(14 * 1024 * 0.7));
+  // Nothing is packed down to a lower target: the whole visible set stays resident.
+  assert.equal(Object.hasOwn(usage, 'targetBytes'), false);
 });
 
-test('the pending rule and pinned entries survive, lower priority entries are archived', () => {
-  const critical = rule({ body: 'c'.repeat(8000), importance: 'critical' });
-  const normal = rule({ body: 'n'.repeat(8000), importance: 'normal' });
-  const plan = planRuleCreate(RuleCreate.parse({ body: 'pending' }), [critical, normal]);
-  assert.equal(plan.active.length, 2);
-  assert.deepEqual(plan.active.map(row => row.entryId).sort(), [critical.entryId, plan.row.entryId].sort());
-  assert.equal(plan.archived.length, 1);
-  assert.equal(plan.archived[0]!.ruleId, normal.entryId);
-  assert.equal(plan.archived[0]!.body, normal.body);
-  assert.equal(plan.archived[0]!.ruleVersion, normal.version);
-  assert.equal(plan.archived[0]!.importance, 'normal');
-  assert.equal(plan.archived[0]!.reason, 'capacity');
-});
-
-test('pinned entries win over importance when maintenance has to choose', () => {
-  const pinned = rule({ body: 'p'.repeat(400), importance: 'low', pinned: true });
-  const normal = rule({ body: 'n'.repeat(300), importance: 'normal' });
-  const plan = planRuleCreate(RuleCreate.parse({ body: 'pending' }), [pinned, normal], { capacityBytes: 600, itemMaxBytes: 1000 });
-  assert.equal(plan.archived.length, 1);
-  assert.equal(plan.archived[0]!.ruleId, normal.entryId);
-  assert.deepEqual(plan.active.map(row => row.entryId).sort(), [pinned.entryId, plan.row.entryId].sort());
-});
-
-test('mandatory entries that cannot fit are refused, not silently dropped', () => {
-  const pinned = rule({ body: 'p'.repeat(8000), pinned: true });
+test('a write above capacity is refused and leaves the existing set unchanged', () => {
+  const critical = rule({ body: 'c'.repeat(5000), importance: 'critical' });
+  const normal = rule({ body: 'n'.repeat(4000), importance: 'normal' });
+  // 9,000 bytes plus delimiters is close to the limit, so a small addition still fits.
+  assert.equal(planRuleCreate(RuleCreate.parse({ body: 'pending' }), [critical, normal]).active.length, 3);
   assert.throws(
-    () => planRuleCreate(RuleCreate.parse({ body: 'q'.repeat(8000) }), [pinned]),
+    () => planRuleCreate(RuleCreate.parse({ body: 'p'.repeat(2000) }), [critical, normal]),
     (error: unknown) => error instanceof MnemoWeaveError && error.code === 'RULE_CAPACITY_EXCEEDED',
   );
 });
 
-test('editing appends a version and runs capacity maintenance with the edit applied', () => {
-  const current = rule({ body: 'c'.repeat(12000), importance: 'low' });
-  const plan = planRuleEdit(current, RuleEdit.parse({ body: 'short', enabled: false }), [current]);
+test('an over-capacity set is refused rather than trimmed, even when lower priorities would fit', () => {
+  // 6,000 + 4,000 + 1,000 with delimiters exceeds 10,000. No entry is archived to make room.
+  const critical = rule({ body: 'c'.repeat(6000), importance: 'critical' });
+  const normal = rule({ body: 'n'.repeat(3000), importance: 'normal' });
+  assert.throws(
+    () => planRuleCreate(RuleCreate.parse({ body: 'p'.repeat(1200) }), [critical, normal]),
+    (error: unknown) => error instanceof MnemoWeaveError && error.code === 'RULE_CAPACITY_EXCEEDED',
+  );
+  assert.equal(critical.body.length, 6000);
+  assert.equal(normal.body.length, 3000);
+});
+
+test('a collection exactly at the capacity limit is accepted and one byte more is not', () => {
+  // Per-entry limit is 8 KiB, so the collection limit is reached with two entries plus the
+  // 4-byte delimiter: 8,192 + 1,804 + 4 = 10,000.
+  const first = rule({ body: 'x'.repeat(8_192) });
+  const atLimit = planRuleCreate(RuleCreate.parse({ body: 'y'.repeat(1_804) }), [first]);
+  assert.equal(atLimit.usage.usedBytes, 10_000);
+  assert.throws(
+    () => planRuleCreate(RuleCreate.parse({ body: 'y'.repeat(1_805) }), [first]),
+    (error: unknown) => error instanceof MnemoWeaveError && error.code === 'RULE_CAPACITY_EXCEEDED',
+  );
+});
+
+test('disabling keeps the bytes measured; only a removal frees capacity', () => {
+  const existing = rule({ body: 'x'.repeat(8_192) });
+  const second = rule({ body: 'y'.repeat(1_798) });
+  assert.equal(ruleBytes([existing, second]), 9_994);
+  // A disabled rule is not injected, but it still occupies the collection: the contract counts
+  // every non-removed rule, so disabling cannot be used to make room for another.
+  const disabled = planRuleEdit(existing, RuleEdit.parse({ enabled: false, baseVersion: 1 }), [existing, second]);
+  assert.equal(disabled.row.enabled, false);
+  assert.equal(disabled.usage.usedBytes, ruleBytes([existing, second]));
+  assert.deepEqual(disabled.active.map(row => row.entryId), [second.entryId], 'only the enabled rows are injected');
+  assert.throws(
+    () => planRuleCreate(RuleCreate.parse({ body: 'z'.repeat(10) }), [disabled.row, second]),
+    (error: unknown) => error instanceof MnemoWeaveError && error.code === 'RULE_CAPACITY_EXCEEDED',
+  );
+  // A removal leaves the measured set and frees its bytes.
+  const removed = planRuleEdit(existing, RuleEdit.parse({ remove: true, baseVersion: 1 }), [existing, second]);
+  assert.equal(removed.row.enabled, false);
+  assert.notEqual(removed.row.withdrawnAt, null);
+  assert.equal(removed.usage.usedBytes, ruleBytes([second]));
+  // A removal that makes the set smaller is always accepted, even from an over-capacity state.
+  const over = rule({ body: 'o'.repeat(8_192) });
+  const big = rule({ body: 'b'.repeat(8_192) });
+  assert.throws(() => planRuleCreate(RuleCreate.parse({ body: 'x' }), [over, big]));
+  assert.equal(planRuleEdit(over, RuleEdit.parse({ remove: true, baseVersion: 1 }), [over, big]).usage.usedBytes, 8_192);
+});
+
+test('editing appends a version and keeps the edit inside the measured set', () => {
+  const current = rule({ body: 'short', importance: 'low' });
+  const plan = planRuleEdit(current, RuleEdit.parse({ body: 'shorter', enabled: false, baseVersion: 1 }), [current]);
   assert.equal(plan.row.version, 2);
   assert.equal(plan.row.enabled, false);
-  assert.equal(plan.row.body, 'short');
+  assert.equal(plan.row.body, 'shorter');
 });
 
 test('a rule record reports importance, pinning and body bytes without a scope', () => {
@@ -87,15 +124,6 @@ test('a rule record reports importance, pinning and body bytes without a scope',
   assert.equal(record.version, 3);
   assert.equal(record.bodyBytes, Buffer.byteLength('短准则', 'utf8'));
   assert.equal(record.pinned, true);
-});
-
-test('maintenance keeps priority order instead of skipping to a smaller lower-priority rule', () => {
-  const critical = rule({ body: 'c'.repeat(400), importance: 'critical' });
-  const normal = rule({ body: 'n'.repeat(200), importance: 'normal' });
-  const low = rule({ body: 'l'.repeat(10), importance: 'low' });
-  const plan = planRuleCreate(RuleCreate.parse({ body: 'pending' }), [critical, normal, low], { capacityBytes: 600, itemMaxBytes: 1000 });
-  assert.deepEqual(plan.active.map(row => row.entryId).sort(), [critical.entryId, plan.row.entryId].sort());
-  assert.deepEqual(plan.archived.map(row => row.ruleId).sort(), [normal.entryId, low.entryId].sort());
 });
 
 test('UTF-8 byte accounting keeps multi-byte text inside the per-rule limit', () => {
@@ -107,33 +135,39 @@ test('UTF-8 byte accounting keeps multi-byte text inside the per-rule limit', ()
 });
 
 test('archive capacity excludes archived and withdrawn entries', () => {
-  const active = planArchive(ArchiveCreate.parse({ projectId: 'alpha', title: 'a', body: '正文', source: 'user', verification: 'open', evidence: '证据' }));
+  const active = planArchive(archiveDraft());
   const archived = planArchiveState(active, 'archived', [active]);
   const rows = [archived, { ...active, entryId: randomUUID(), withdrawnAt: NOW }];
   assert.equal(archiveActiveBytes(rows), 0);
 });
 
-test('an archive over the project capacity is refused without touching existing rows', () => {
-  const existing = planArchive(ArchiveCreate.parse({ projectId: 'alpha', title: 'a', body: 'a'.repeat(100), source: 'user', verification: 'open', evidence: '证据' }));
+test('an archive over the workspace capacity is refused without touching existing rows', () => {
+  const existing = planArchive(archiveDraft('a'.repeat(100)));
   assert.throws(
-    () => planArchive(ArchiveCreate.parse({ projectId: 'alpha', title: 'b', body: 'b'.repeat(100), source: 'user', verification: 'open', evidence: '证据' }), [existing], NOW, 150),
+    () => planArchive(archiveDraft('b'.repeat(100)), [existing], NOW, 150),
     (error: unknown) => error instanceof MnemoWeaveError && error.code === 'ARCHIVE_CAPACITY_EXCEEDED',
   );
 });
 
+test('capacity is per workspace: another workspace does not consume this one', () => {
+  const other = '22222222-2222-4222-8222-222222222222';
+  const existing = planArchive(archiveDraft('a'.repeat(100)));
+  // The same workspace is full, the other one is empty.
+  assert.throws(() => planArchive(archiveDraft('b'.repeat(100), WORKSPACE), [existing], NOW, 150));
+  assert.equal(planArchive(archiveDraft('b'.repeat(100), other), [existing], NOW, 150).workspaceId, other);
+});
+
 test('an archive body over 2 MiB is refused with its own code', () => {
   assert.throws(
-    () => planArchive(ArchiveCreate.parse({ projectId: 'alpha', title: 'a', body: 'x'.repeat(2 * 1024 * 1024 + 1), source: 'user', verification: 'open', evidence: '证据' })),
+    () => planArchive(archiveDraft('x'.repeat(2 * 1024 * 1024 + 1))),
     (error: unknown) => error instanceof MnemoWeaveError && error.code === 'ARCHIVE_BODY_TOO_LARGE',
   );
 });
-test('an archive keeps its project, verification state and active byte count', () => {
-  const draft = ArchiveCreate.parse({
-    projectId: 'alpha', title: '标题', body: '正文', source: 'user', verification: 'open', evidence: '证据',
-  });
-  const row = planArchive(draft);
+
+test('an archive keeps its workspace, verification state and active byte count', () => {
+  const row = planArchive(archiveDraft());
   const record = toArchiveRecord(row);
-  assert.equal(record.projectId, 'alpha');
+  assert.equal(record.workspaceId, WORKSPACE);
   assert.equal(record.verification, 'open');
   assert.equal(record.version, 1);
   assert.equal(record.withdrawnAt, null);
@@ -142,9 +176,7 @@ test('an archive keeps its project, verification state and active byte count', (
 });
 
 test('archived archives do not consume active capacity and can be restored', () => {
-  const base = planArchive(ArchiveCreate.parse({
-    projectId: 'alpha', title: '标题', body: '正文', source: 'user', verification: 'open', evidence: '证据',
-  }));
+  const base = planArchive(archiveDraft());
   const archived = planArchiveState(base, 'archived', [base]);
   assert.equal(archived.state, 'archived');
   assert.equal(archived.version, 2);
@@ -156,4 +188,14 @@ test('archived archives do not consume active capacity and can be restored', () 
   const restored = planArchiveState(archived, 'active', [archived]);
   assert.equal(restored.state, 'active');
   assert.equal(restored.version, 3);
+});
+
+test('restoring into a full workspace is refused instead of dropping another archive', () => {
+  const active = planArchive(archiveDraft('a'.repeat(100)));
+  const archived = planArchiveState(active, 'archived', [active]);
+  const other = planArchive(archiveDraft('b'.repeat(100)));
+  assert.throws(
+    () => planArchiveState(archived, 'active', [archived, other], NOW, 150),
+    (error: unknown) => error instanceof MnemoWeaveError && error.code === 'ARCHIVE_CAPACITY_EXCEEDED',
+  );
 });

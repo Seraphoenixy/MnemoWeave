@@ -1,11 +1,17 @@
 import { MnemoWeaveError } from '../../contracts/src/index.ts';
-import type { ReadGrantRecord } from '../../contracts/src/index.ts';
-import { assertGrant } from './access.ts';
+import type { Caller } from './access.ts';
 
+/**
+ * Source / Strategy / Pipeline composition.
+ *
+ * A Source declares the capabilities it provides, a Strategy declares which steps a read needs,
+ * and the pipeline executes them in order. The caller identity is passed through unchanged, so a
+ * Step can never widen its own reach.
+ */
 export interface Source {
   readonly id: string;
   readonly capabilities: readonly string[];
-  read(capability: string, input: unknown, context: { grant: ReadGrantRecord; signal?: AbortSignal | undefined }): Promise<unknown>;
+  read(capability: string, input: unknown, context: { caller: Caller; signal?: AbortSignal | undefined }): Promise<unknown>;
 }
 export interface CompositionPlan { readonly steps: readonly { sourceId: string; capability: string }[] }
 export interface Strategy { plan(sources: readonly { id: string; capabilities: readonly string[] }[]): CompositionPlan }
@@ -32,13 +38,13 @@ export class SourceRegistry {
 export class CompositionPipeline {
   private readonly steps: readonly { source: Source; capability: string }[];
   constructor(steps: readonly { source: Source; capability: string }[]) { this.steps = steps; }
-  async execute(input: unknown, grant: ReadGrantRecord, signal?: AbortSignal): Promise<unknown> {
+  async execute(input: unknown, caller: Caller, signal?: AbortSignal): Promise<unknown> {
     let value = input;
     for (const step of this.steps) {
-      signal?.throwIfAborted(); assertGrant(grant);
-      value = await step.source.read(step.capability, value, { grant, signal });
+      signal?.throwIfAborted();
+      value = await step.source.read(step.capability, value, { caller, ...(signal === undefined ? {} : { signal }) });
     }
-    signal?.throwIfAborted(); assertGrant(grant);
+    signal?.throwIfAborted();
     return value;
   }
 }

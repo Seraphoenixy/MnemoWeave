@@ -40,19 +40,43 @@ test('Real Mnemon: Remember, deduplicate, HTTP + stdio MCP Recall', { timeout: 6
     assert.ok(http.memories.some(memory => memory.id === first.id && memory.content === content));
     const transport = new StdioClientTransport({ command: process.execPath, args: ['apps/server/src/mcp-main.ts'], cwd: resolve('.'), env: { MNEMOWEAVE_MCP_MODE: 'standalone',
       MNEMON_BINARY: binary, MNEMON_DATA_DIR: dataDir, MNEMON_STORE: 'acceptance',
+      // Isolated acceptance mode owns its own state directory; it never opens the user's store.
+      MNEMOWEAVE_STATE_DIR: resolve(dataDir, 'state'),
       ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
     } });
     const client = new Client({ name: 'mnemoweave-acceptance', version: '0.1.0' });
     try {
       await client.connect(transport);
       const tools = await client.listTools();
-      assert.ok(tools.tools.some(tool => tool.name === 'recall'));
-      assert.ok(!tools.tools.some(tool => tool.name === 'remember'));
+      // The general MCP surface: reads plus a candidate submission. A standalone acceptance app
+      // has a candidate store, so both are registered; neither can publish.
+      for (const name of ['recall', 'read_memory', 'remember', 'candidate_status', 'provider_health', 'read_conflict']) {
+        assert.ok(tools.tools.some(tool => tool.name === name), name);
+      }
+      assert.equal(tools.tools.some(tool => tool.name === 'memory_view'), false, 'the aggregate View is gone');
+      const submitted = await client.callTool({
+        name: 'remember',
+        arguments: {
+          idempotencyKey: `native-mcp-${Date.now()}`,
+          content: 'MCP candidate: the acceptance store is isolated.',
+          knowledgeType: 'Constraint',
+          provenance: {
+            source: 'e2e', sourceReference: 'native mcp', evidence: ['fixture'],
+            verificationStatus: 'unverified', confidence: 0.5, applicability: 'acceptance only',
+            limitations: 'test data', lastVerified: null,
+          },
+        },
+      });
+      // A candidate receipt, never a publication.
+      const candidateBody = JSON.parse((submitted.content as { text: string }[])[0]!.text) as { status: string };
+      assert.notEqual(candidateBody.status, 'persisted');
       const result = await client.callTool({ name: 'recall', arguments: { query: 'MnemoWeave acceptance fixture', limit: 5 } });
       assert.notEqual(result.isError, true);
       const parts = result.content as { type: string; text?: string }[];
       const mcp = JSON.parse(parts[0]!.text!) as typeof http;
-      assert.ok(mcp.memories.some(memory => memory.id === first.id));
+      // The standalone MCP owns its own state directory, so a record written straight to the
+      // Provider is not in its catalog and is excluded rather than handed to the model.
+      assert.equal(mcp.memories.some(memory => memory.id === first.id), false);
       await writeFile(join(dataDir, 'acceptance-result.json'), JSON.stringify({ first, duplicate, http, mcp }, null, 2));
     } finally { await client.close(); }
   } finally { await new Promise<void>((done, fail) => { server.closeAllConnections(); server.close(error => error ? fail(error) : done()); }); }

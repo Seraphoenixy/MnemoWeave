@@ -1,21 +1,25 @@
 import { createServer } from 'node:http';
 import type { IncomingMessage } from 'node:http';
 import { randomUUID } from 'node:crypto';
-import { MnemoWeaveError, REQUEST_BODY_MAX_BYTES, SyncChangeInput, SyncPullInput, publicError, statusForCode } from '../../../core/contracts/src/index.ts';
+import { MnemoWeaveError, REQUEST_BODY_MAX_BYTES, SYNC_PROTOCOL_HEADER, SYNC_PROTOCOL_VERSION, SyncChangeInput, SyncPullInput, publicError, statusForCode } from '../../../core/contracts/src/index.ts';
 import { VersionConflictError } from '../../../core/application/src/sync.ts';
-import type { SyncAcceptedValue, SyncChangeRequest, SyncEntryValue, SyncPullPageValue, SyncPullRequest, SyncScopesValue, SyncSnapshotValue } from '../../../core/contracts/src/index.ts';
+import type { SyncAcceptedValue, SyncChangeRequest, SyncEntryValue, SyncPullPageValue, SyncPullRequest, SyncSnapshotValue, SyncStreamsValue } from '../../../core/contracts/src/index.ts';
 
 /**
- * Remote sync surface. Only the three local Servers call it; hosts never see it.
- * The gateway port keeps this package free of the storage and Provider layers.
+ * Remote sync surface. Only the local Servers call it; hosts never see it. The gateway port keeps
+ * this package free of the storage and Provider layers.
+ *
+ * Every request except liveness must name protocol 2. A missing or different version is HTTP 409
+ * with `SYNC_PROTOCOL_MISMATCH`, so a local Server that still speaks protocol 1 stops instead of
+ * sending a change whose stream the remote cannot derive the same way.
  */
 export interface SyncGateway {
   submit(token: string, change: SyncChangeRequest): SyncAcceptedValue;
   pull(token: string, query: SyncPullRequest): SyncPullPageValue;
   receipt(token: string, changeId: string): SyncAcceptedValue;
   entry(token: string, entryId: string): SyncEntryValue;
-  snapshot(token: string, scope: string): SyncSnapshotValue;
-  scopes(token: string): SyncScopesValue;
+  snapshot(token: string, stream: string): SyncSnapshotValue;
+  streams(token: string): SyncStreamsValue;
 }
 
 /** Served routes; the sync document and tests must agree with this list. */
@@ -25,7 +29,7 @@ export const syncRoutes = [
   { method: 'GET', path: '/v1/sync/receipts/{changeId}' },
   { method: 'GET', path: '/v1/sync/entries/{entryId}' },
   { method: 'GET', path: '/v1/sync/snapshot' },
-  { method: 'GET', path: '/v1/sync/scopes' },
+  { method: 'GET', path: '/v1/sync/streams' },
   { method: 'GET', path: '/v1/sync/health' },
 ] as const;
 
@@ -34,7 +38,8 @@ export interface SyncServerOptions {
   now?: () => Date;
 }
 
-export const SYNC_PROTOCOL_VERSION = 1;
+export { SYNC_PROTOCOL_VERSION };
+export const SYNC_PROTOCOL = SYNC_PROTOCOL_VERSION;
 const MAX_BODY_BYTES = REQUEST_BODY_MAX_BYTES;
 
 export function createSyncServer(options: SyncServerOptions) {
@@ -50,17 +55,22 @@ export function createSyncServer(options: SyncServerOptions) {
       const token = bearer(req);
       const url = new URL(req.url ?? '/', 'http://sync.invalid');
       if (req.method === 'GET' && url.pathname === '/v1/sync/health') {
-        // Liveness still proves the caller is a live device: an unknown or revoked
-        // token must not learn anything about the service.
-        options.gateway.scopes(token);
+        // Liveness still proves the caller is a live device: an unknown or revoked token must not
+        // learn anything about the service.
+        options.gateway.streams(token);
         return reply(200, { ready: true, protocol: SYNC_PROTOCOL_VERSION, now: now().toISOString() });
       }
-      if (req.method === 'GET' && url.pathname === '/v1/sync/scopes') {
-        return reply(200, options.gateway.scopes(token));
+      const declared = req.headers[SYNC_PROTOCOL_HEADER];
+      const value = Array.isArray(declared) ? declared[0] : declared;
+      if (value === undefined || value.trim() !== String(SYNC_PROTOCOL_VERSION)) {
+        return reply(409, { code: 'SYNC_PROTOCOL_MISMATCH', expected: SYNC_PROTOCOL_VERSION, traceId });
+      }
+      if (req.method === 'GET' && url.pathname === '/v1/sync/streams') {
+        return reply(200, options.gateway.streams(token));
       }
       if (req.method === 'GET' && url.pathname === '/v1/sync/changes') {
         const query = SyncPullInput.parse({
-          scope: url.searchParams.get('scope') ?? '',
+          stream: url.searchParams.get('stream') ?? '',
           since: numberParam(url, 'since', 0),
           limit: numberParam(url, 'limit', 200),
         });
@@ -79,9 +89,9 @@ export function createSyncServer(options: SyncServerOptions) {
         return reply(200, options.gateway.entry(token, entryMatch[1]!));
       }
       if (req.method === 'GET' && url.pathname === '/v1/sync/snapshot') {
-        const scope = url.searchParams.get('scope');
-        if (!scope) throw new MnemoWeaveError('INVALID_INPUT');
-        return reply(200, options.gateway.snapshot(token, scope));
+        const stream = url.searchParams.get('stream');
+        if (!stream) throw new MnemoWeaveError('INVALID_INPUT');
+        return reply(200, options.gateway.snapshot(token, stream));
       }
       return reply(404, { code: 'NOT_FOUND', traceId });
     } catch (error) {

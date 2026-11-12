@@ -40,48 +40,72 @@ test('Failed receipt insertion rolls back candidate insertion', async () => {
   assert.equal(repo.submit(fixture()).status, 'pending_review');
   repo.close(); inject.close();
 });
-test('schema v17 keeps formal memories and rules global and adds archive state and memory ownership', async () => {
+test('schema v22 is the workspace model: no owner on a memory, workspaces and streams on the rest', async () => {
   await mkdir('work/tests', { recursive: true });
-  const path = join(await mkdtemp(resolve('work/tests/schema12-')), 'governance.db');
+  const path = join(await mkdtemp(resolve('work/tests/schema22-')), 'governance.db');
   const repo = new SqliteCandidates(path);
   repo.close();
   const inspect = new DatabaseSync(path);
   try {
-    assert.equal(Number(inspect.prepare('PRAGMA user_version').get()!['user_version']), 21);
+    assert.equal(Number(inspect.prepare('PRAGMA user_version').get()!['user_version']), 22);
     const tables = new Set((inspect.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map((row) => row.name));
-    for (const name of ['entry_versions', 'share_outbox', 'sync_state', 'sync_outbox', 'sync_inbox', 'formal_map', 'runtime_rules', 'project_archives', 'project_bindings', 'runtime_injections', 'runtime_rule_archive', 'project_archive_revisions', 'diagnostic_jobs']) assert.ok(tables.has(name), name);
-    for (const legacy of ['sync_log', 'sync_grants', 'sync_license_state']) assert.equal(tables.has(legacy), false, legacy);
+    for (const name of [
+      'entry_versions', 'share_outbox', 'sync_state', 'sync_outbox', 'sync_inbox', 'formal_map',
+      'runtime_rules', 'project_archives', 'project_bindings', 'runtime_injections',
+      'runtime_rule_archive', 'project_archive_revisions', 'diagnostic_jobs',
+      'workspaces', 'workspace_bindings', 'session_workspaces', 'write_task_receipts',
+      'archive_distillations', 'turn_sessions', 'turn_no_retention',
+    ]) assert.ok(tables.has(name), name);
+    for (const legacy of ['sync_log', 'sync_grants', 'sync_license_state', 'legacy_project_owners']) {
+      // The backup table exists only when there was something to preserve.
+      if (legacy === 'legacy_project_owners') continue;
+      assert.equal(tables.has(legacy), false, legacy);
+    }
     const ruleColumns = new Set((inspect.prepare("SELECT name FROM pragma_table_info('runtime_rules')").all() as { name: string }[]).map(row => row.name));
     for (const name of ['importance', 'pinned', 'created_at', 'archived_at']) assert.ok(ruleColumns.has(name), name);
-    const archiveColumns = new Set((inspect.prepare("SELECT name FROM pragma_table_info('project_archives')").all() as { name: string }[]).map(row => row.name));
-    for (const name of ['state', 'archived_at']) assert.ok(archiveColumns.has(name), name);
-    // v14 adds classification columns to an existing table rather than a new table.
     const revisionColumns = new Set((inspect.prepare("SELECT name FROM pragma_table_info('catalog_revisions')").all() as { name: string }[]).map(row => row.name));
     for (const name of ['knowledge_type', 'category', 'importance', 'tags_json', 'entities_json']) assert.ok(revisionColumns.has(name), name);
-    // v17 adds the owner to the memory itself; revisions keep their scope column.
+    // A memory has no owner: the shared collection is the whole store.
     const memoryColumns = new Set((inspect.prepare("SELECT name FROM pragma_table_info('catalog_memories')").all() as { name: string }[]).map(row => row.name));
-    assert.ok(memoryColumns.has('project_id'), 'project_id');
+    assert.equal(memoryColumns.has('project_id'), false, 'no owner column on a formal memory');
+    // An archive is keyed by a workspace instead.
+    const archiveColumns = new Set((inspect.prepare("SELECT name FROM pragma_table_info('project_archives')").all() as { name: string }[]).map(row => row.name));
+    for (const name of ['state', 'archived_at', 'workspace_id']) assert.ok(archiveColumns.has(name), name);
+    assert.equal(archiveColumns.has('project_id'), false);
+    // Sync ledgers are keyed by stream.
+    for (const table of ['sync_state', 'sync_outbox', 'sync_inbox']) {
+      const columns = new Set((inspect.prepare(`SELECT name FROM pragma_table_info('${table}')`).all() as { name: string }[]).map(row => row.name));
+      assert.ok(columns.has('stream'), `${table} keeps one row per stream`);
+      assert.equal(columns.has('scope'), false, `${table} has no scope`);
+    }
   } finally {
     inspect.close();
   }
 });
-test('a v16 store gains memory ownership and durable jobs without rewriting existing rows', async () => {  await mkdir('work/tests', { recursive: true });
-  const path = join(await mkdtemp(resolve('work/tests/schema17-')), 'governance.db');
+test('a v21 store loses the memory owner column and keeps the attribution as a backup', async () => {
+  await mkdir('work/tests', { recursive: true });
+  const path = join(await mkdtemp(resolve('work/tests/schema21-')), 'governance.db');
   const created = new SqliteCandidates(path);
   created.close();
-  // Rebuild the previous shape: the owner column and its index did not exist at v16.
+  // Rebuild the v21 shape: the owner column and its index existed, and a memory carried one.
   const downgrade = new DatabaseSync(path);
-  downgrade.exec('DROP INDEX IF EXISTS catalog_memories_project; ALTER TABLE catalog_memories DROP COLUMN project_id; PRAGMA user_version=16;');
+  downgrade.exec(`
+    ALTER TABLE catalog_memories ADD COLUMN project_id TEXT;
+    CREATE INDEX IF NOT EXISTS catalog_memories_project ON catalog_memories(project_id);
+    PRAGMA user_version=21;
+  `);
   downgrade.close();
   const migrated = new SqliteCandidates(path);
   migrated.close();
   const inspect = new DatabaseSync(path);
   try {
-    assert.equal(Number(inspect.prepare('PRAGMA user_version').get()!['user_version']), 21);
+    assert.equal(Number(inspect.prepare('PRAGMA user_version').get()!['user_version']), 22);
     const columns = new Set((inspect.prepare("SELECT name FROM pragma_table_info('catalog_memories')").all() as { name: string }[]).map(row => row.name));
-    assert.ok(columns.has('project_id'), 'the owner column is added');
-    // Old records were general knowledge; the migration must not invent an owner for them.
-    assert.equal(inspect.prepare('SELECT count(*) n FROM catalog_memories WHERE project_id IS NOT NULL').get()!['n'], 0);
+    assert.equal(columns.has('project_id'), false, 'the owner column is dropped, not merely ignored');
+    // The attribution survives in the backup table so an operator can still answer where a
+    // memory came from; no read path consults it.
+    const backup = inspect.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='legacy_project_owners'").get();
+    assert.ok(backup, 'the legacy attribution is preserved');
   } finally {
     inspect.close();
   }
@@ -112,13 +136,13 @@ test('idle-review runs are single-flight and refuse late items after finishing',
   assert.equal(run.state, 'running');
   assert.equal(run.attempt, 1);
   assert.throws(() => repo.events.beginIdleRun('host-1', 's-1'), (error: unknown) => (error as { code?: string }).code === 'INVALID_STATE');
-  const updated = repo.events.recordIdleRunItem('host-1', run.id, { index: 0, action: 'create', state: 'applied', targetId: 'memory-1' });
+  const updated = repo.events.recordIdleRunItem('host-1', run.id, { index: 0, action: 'create', kind: 'rule', state: 'applied', targetId: 'memory-1' });
   assert.equal(updated.items.length, 1);
-  assert.throws(() => repo.events.recordIdleRunItem('host-1', run.id, { index: 0, action: 'create', state: 'applied' }), (error: unknown) => (error as { code?: string }).code === 'INVALID_INPUT');
+  assert.throws(() => repo.events.recordIdleRunItem('host-1', run.id, { index: 0, action: 'create', kind: 'rule', state: 'applied' }), (error: unknown) => (error as { code?: string }).code === 'INVALID_INPUT');
   const finished = repo.events.finishIdleRun('host-1', run.id, 'succeeded');
   assert.equal(finished.state, 'succeeded');
   assert.ok(finished.finishedAt !== null);
-  assert.throws(() => repo.events.recordIdleRunItem('host-1', run.id, { index: 1, action: 'skip', state: 'skipped' }), (error: unknown) => (error as { code?: string }).code === 'INVALID_STATE');
+  assert.throws(() => repo.events.recordIdleRunItem('host-1', run.id, { index: 1, action: 'skip', kind: 'formal-memory', state: 'skipped' }), (error: unknown) => (error as { code?: string }).code === 'INVALID_STATE');
   const second = repo.events.beginIdleRun('host-1', 's-1');
   assert.equal(second.attempt, 2);
   repo.close();
@@ -145,4 +169,89 @@ test('Rejected existing databases preserve their journal mode, data and version'
       assert.equal(inspect.prepare("SELECT count(*) n FROM sqlite_master WHERE name LIKE 'governance_%'").get()!['n'], 0);
     } finally { inspect.close(); }
   }
+});
+
+test('a partially failed idle-review run keeps finished actions and releases the rest', async () => {
+  await mkdir('work/tests', { recursive: true });
+  const path = join(await mkdtemp(resolve('work/tests/idle-retry-')), 'governance.db');
+  const repo = new SqliteCandidates(path);
+  try {
+    // Two turns carrying a durable signal each.
+    for (const [index, text] of ['以后都用 pnpm，不要用 npm', '默认分支是 main，不要直接推送'].entries()) {
+      repo.turns.observe('host-1', {
+        protocolVersion: '1', adapterVersion: '0.1.0', eventId: `event-${index}`, sessionId: 's-1', turnId: String(index + 1),
+        kind: 'message.user', occurredAt: '2026-11-10T00:00:00.000Z', receivedAt: '2026-11-10T00:00:00.000Z',
+        sourceRef: 'test', payload: { text },
+      });
+    }
+    repo.events.recordIdleReview('host-1', 's-1', 2, [
+      { id: '11111111-1111-4111-8111-111111111111', sessionId: 's-1', turnId: 1, eventId: 'event-0', text: '以后都用 pnpm，不要用 npm', reason: 'standing-instruction', createdAt: '2026-11-10T00:00:00.000Z' },
+      { id: '22222222-2222-4222-8222-222222222222', sessionId: 's-1', turnId: 2, eventId: 'event-1', text: '默认分支是 main，不要直接推送', reason: 'standing-instruction', createdAt: '2026-11-10T00:00:00.000Z' },
+    ]);
+    const started = repo.events.beginIdleRunWithSignals('host-1', 's-1', 10);
+    assert.equal(started.signals.length, 2);
+    // One action finished, the other failed.
+    repo.events.recordIdleRunItem('host-1', started.run.id, { index: 0, action: 'create', kind: 'rule', state: 'applied', targetId: 'rule-1' });
+    repo.events.recordIdleRunItem('host-1', started.run.id, { index: 1, action: 'create', kind: 'rule', state: 'failed', detail: { reason: 'RULE_CAPACITY_EXCEEDED' } });
+    repo.events.finishIdleRun('host-1', started.run.id, 'failed', 'RULE_CAPACITY_EXCEEDED');
+    // Only the unfinished signal is offered to the next attempt.
+    const pending = repo.events.pendingIdleSessions('host-1');
+    assert.deepEqual(pending, [{ sessionId: 's-1', count: 1 }]);
+    const retry = repo.events.beginIdleRunWithSignals('host-1', 's-1', 10);
+    assert.deepEqual(retry.signals.map(signal => signal.id), ['22222222-2222-4222-8222-222222222222']);
+    // A succeeded run consumes everything it reserved.
+    repo.events.recordIdleRunItem('host-1', retry.run.id, { index: 0, action: 'create', kind: 'rule', state: 'applied' });
+    repo.events.finishIdleRun('host-1', retry.run.id, 'succeeded');
+    assert.deepEqual(repo.events.pendingIdleSessions('host-1'), []);
+  } finally { repo.close(); }
+});
+
+test('the user\'s own turn text is kept as review evidence and expires with the turn bookkeeping', async () => {
+  await mkdir('work/tests', { recursive: true });
+  const path = join(await mkdtemp(resolve('work/tests/turn-messages-')), 'governance.db');
+  const repo = new SqliteCandidates(path);
+  try {
+    const turn = (turnId: string, text: string, noRetention = false) => ({
+      protocolVersion: '1', adapterVersion: '0.1.0', eventId: `message-${turnId}`, sessionId: 's-1', turnId,
+      kind: 'message.user' as const, occurredAt: '2026-11-10T00:00:00.000Z', receivedAt: '2026-11-10T00:00:00.000Z',
+      sourceRef: 'test', payload: { text, ...(noRetention ? { noRetention: true as const } : {}) },
+    });
+    repo.turns.observe('host-a', turn('1', '以后都用 pnpm，不要用 npm'));
+    repo.turns.observe('host-a', turn('2', '这次不要留存', true));
+    // An assistant turn is not stored: only the user's own text is evidence.
+    repo.turns.observe('host-a', {
+      protocolVersion: '1', adapterVersion: '0.1.0', eventId: 'assistant-1', sessionId: 's-1', turnId: '2',
+      kind: 'message.assistant.final', occurredAt: '2026-11-10T00:00:00.000Z', receivedAt: '2026-11-10T00:00:00.000Z',
+      sourceRef: 'test', payload: { text: 'final reply' },
+    });
+    const messages = repo.turns.messages('host-a', 's-1');
+    assert.deepEqual(messages.map(message => message.turnId), ['1', '2']);
+    assert.equal(messages[0]?.text, '以后都用 pnpm，不要用 npm', 'the wording is kept as the user wrote it');
+    assert.equal(messages[1]?.noRetention, true, 'the marker travels so a scan can skip that turn');
+    // Another host or session sees nothing.
+    assert.deepEqual(repo.turns.messages('host-b', 's-1'), []);
+    assert.deepEqual(repo.turns.messages('host-a', 's-9'), []);
+    // The same event id replayed does not add a second row.
+    repo.turns.observe('host-a', turn('1', '以后都用 pnpm，不要用 npm'));
+    assert.equal(repo.turns.messages('host-a', 's-1').length, 2);
+  } finally { repo.close(); }
+});
+
+test('an idle-review action must name the open run and may not write a formal memory', async () => {
+  await mkdir('work/tests', { recursive: true });
+  const path = join(await mkdtemp(resolve('work/tests/idle-run-bound-')), 'governance.db');
+  const repo = new SqliteCandidates(path);
+  try {
+    const run = repo.events.beginIdleRun('host-1', 's-1');
+    // The run is found by id for its own Host only.
+    assert.equal(repo.events.idleRun('host-1', run.id)?.state, 'running');
+    assert.equal(repo.events.idleRun('host-2', run.id), null);
+    repo.events.finishIdleRun('host-1', run.id, 'succeeded');
+    // A finished run no longer accepts an action, so a late write cannot be authorized by it.
+    assert.equal(repo.events.idleRun('host-1', run.id)?.state, 'succeeded');
+    assert.throws(
+      () => repo.events.recordIdleRunItem('host-1', run.id, { index: 5, action: 'skip', kind: 'rule', state: 'skipped' }),
+      (error: unknown) => (error as { code?: string }).code === 'INVALID_STATE',
+    );
+  } finally { repo.close(); }
 });

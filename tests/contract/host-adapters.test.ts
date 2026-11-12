@@ -10,9 +10,10 @@ const hookInput = (event: string, extra: Record<string, unknown> = {}) => ({
   session_id: 'sess-zcode-1', hook_event_name: event, ...extra,
 });
 
+const turn = { sessionId: 'sess-zcode-1', turnId: 'turn-1', trigger: 'session_started' as const };
 const handlerBase: HandlerOptions = {
   serverUrl: 'http://127.0.0.1:1', token: 'local-adapter-test-token-012345678', hostId: 'host-z',
-  recallAndAssemble: async () => ({ text: 'context body', viewId: 'view-1' }),
+  readRules: async () => 'context body',
 };
 
 test('ZCode hook normalization maps the verified event set onto the MnemoWeave envelope', () => {
@@ -35,12 +36,15 @@ test('ZCode hook normalization maps the verified event set onto the MnemoWeave e
   assert.equal(stop.payload.text, 'final reply text');
 });
 
-test('ZCode additionalContext injection honors the HOST-06 deadline', async () => {
-  const injected = await injectContext(handlerBase, 'Fix the failing test', 'turn-1');
+test('ZCode additionalContext injection carries the rule block and honors the deadline', async () => {
+  const injected = await injectContext(handlerBase, 'turn-1', turn);
   assert.ok(injected?.additionalContext.includes('context body'));
-  assert.ok(injected?.additionalContext.includes('view-1'));
-  const missed = await injectContext({ ...handlerBase, deadlineMs: 60, recallAndAssemble: () => new Promise<{ text: string; viewId: string }>(resolve => setTimeout(() => resolve({ text: 'late', viewId: 'view-2' }), 500)) }, 'anything', 'turn-2');
+  assert.match(injected!.additionalContext, /turn-1/);
+  const missed = await injectContext({ ...handlerBase, deadlineMs: 60, readRules: () => new Promise<string>(resolve => setTimeout(() => resolve('late'), 500)) }, 'turn-2', turn);
   assert.equal(missed, undefined, 'deadline miss emits nothing instead of blocking the session');
+  // A host that cannot hold every rule reports failure rather than injecting a partial set.
+  const incomplete = await injectContext({ ...handlerBase, readRules: async () => undefined }, 'turn-3', turn);
+  assert.equal(incomplete, undefined);
 });
 
 test('ZCode workspace config generation enables hooks and merges without losing state', async () => {

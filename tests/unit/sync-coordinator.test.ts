@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { streamOf } from '../../packages/core/contracts/src/index.ts';
 import type { SyncInboxRecord, SyncLedgerPort, SyncOutboxRecord, SyncRemotePort, SyncStateRecord } from '../../packages/core/application/src/sync.ts';
 import { SyncCoordinator, VersionConflictError, buildChange, plainContent } from '../../packages/core/application/src/sync.ts';
 import type { SyncAcceptedValue, SyncChangeRecordValue, SyncChangeRequest, SyncEntryDraftValue, SyncPullPageValue } from '../../packages/core/contracts/src/index.ts';
@@ -12,20 +13,20 @@ class MemoryLedger implements SyncLedgerPort {
   outboxRows: SyncOutboxRecord[] = [];
   inboxRows: SyncInboxRecord[] = [];
 
-  state(scope: string): SyncStateRecord {
-    return this.states.get(scope) ?? { scope, cursor: 0, lastPullAt: null, lastError: null };
+  state(stream: string): SyncStateRecord {
+    return this.states.get(stream) ?? { stream, cursor: 0, lastPullAt: null, lastError: null };
   }
-  cursor(scope: string): number { return this.state(scope).cursor; }
-  setCursor(scope: string, cursor: number, at: string): void {
-    const current = this.state(scope);
+  cursor(stream: string): number { return this.state(stream).cursor; }
+  setCursor(stream: string, cursor: number, at: string): void {
+    const current = this.state(stream);
     if (cursor <= current.cursor) return;
-    this.states.set(scope, { ...current, cursor, lastPullAt: at });
+    this.states.set(stream, { ...current, cursor, lastPullAt: at });
   }
-  setError(scope: string, error: string | null, at: string): void {
-    this.states.set(scope, { ...this.state(scope), lastError: error, lastPullAt: at });
+  setError(stream: string, error: string | null, at: string): void {
+    this.states.set(stream, { ...this.state(stream), lastError: error, lastPullAt: at });
   }
   enqueue(change: SyncChangeRequest, at: string): void {
-    this.outboxRows.push({ changeId: change.changeId, scope: change.entry.scope, entryId: change.entry.entryId, baseVersion: change.baseVersion, operation: change.operation, entry: change.entry, state: 'pending', attempts: 0, lastError: null, createdAt: at, updatedAt: at });
+    this.outboxRows.push({ changeId: change.changeId, stream: streamOf(change.entry.kind, change.entry.payload), entryId: change.entry.entryId, baseVersion: change.baseVersion, operation: change.operation, entry: change.entry, state: 'pending', attempts: 0, lastError: null, createdAt: at, updatedAt: at });
   }
   outbox(state?: SyncOutboxRecord['state'], limit = 100): SyncOutboxRecord[] {
     return (state ? this.outboxRows.filter((row) => row.state === state) : this.outboxRows).slice(0, limit);
@@ -41,34 +42,34 @@ class MemoryLedger implements SyncLedgerPort {
     if (row) Object.assign(row, { state, lastError: error, attempts: row.attempts + 1, updatedAt: at });
   }
   receive(record: SyncChangeRecordValue): boolean {
-    if (this.inboxRows.some((row) => row.scope === record.scope && row.seq === record.seq)) return false;
-    this.inboxRows.push({ scope: record.scope, seq: record.seq, changeId: record.changeId, entryId: record.entryId, version: record.version, operation: record.operation, entry: record.entry, state: 'received', error: null });
+    if (this.inboxRows.some((row) => row.stream === record.stream && row.seq === record.seq)) return false;
+    this.inboxRows.push({ stream: record.stream, seq: record.seq, changeId: record.changeId, entryId: record.entryId, version: record.version, operation: record.operation, entry: record.entry, state: 'received', error: null });
     return true;
   }
-  inbox(scope: string, limit = 100): SyncInboxRecord[] {
-    return this.inboxRows.filter((row) => row.scope === scope && row.state !== 'applied').slice(0, limit);
+  inbox(stream: string, limit = 100): SyncInboxRecord[] {
+    return this.inboxRows.filter((row) => row.stream === stream && row.state !== 'applied').slice(0, limit);
   }
-  inboxEntry(scope: string, seq: number): SyncInboxRecord | null {
-    return this.inboxRows.find((row) => row.scope === scope && row.seq === seq) ?? null;
+  inboxEntry(stream: string, seq: number): SyncInboxRecord | null {
+    return this.inboxRows.find((row) => row.stream === stream && row.seq === seq) ?? null;
   }
   inboxChange(changeId: string): SyncInboxRecord | null {
     return this.inboxRows.find((row) => row.changeId === changeId) ?? null;
   }
-  markInbox(scope: string, seq: number, state: SyncInboxRecord['state'], error: string | null = null): void {
-    const row = this.inboxRows.find((item) => item.scope === scope && item.seq === seq);
+  markInbox(stream: string, seq: number, state: SyncInboxRecord['state'], error: string | null = null): void {
+    const row = this.inboxRows.find((item) => item.stream === stream && item.seq === seq);
     if (row) Object.assign(row, { state, error });
   }
-  progress(scope: string, fromSeq: number, limit = 200): { seq: number; applied: boolean }[] {
-    return this.inboxRows.filter((row) => row.scope === scope && row.seq > fromSeq).sort((left, right) => left.seq - right.seq).slice(0, limit).map((row) => ({ seq: row.seq, applied: row.state === 'applied' }));
+  progress(stream: string, fromSeq: number, limit = 200): { seq: number; applied: boolean }[] {
+    return this.inboxRows.filter((row) => row.stream === stream && row.seq > fromSeq).sort((left, right) => left.seq - right.seq).slice(0, limit).map((row) => ({ seq: row.seq, applied: row.state === 'applied' }));
   }
-  resetScope(scope: string, cursor: number, at: string): void {
-    this.inboxRows = this.inboxRows.filter((row) => !(row.scope === scope && row.seq <= cursor));
-    if (cursor > this.state(scope).cursor) this.states.set(scope, { ...this.state(scope), cursor, lastPullAt: at });
+  resetScope(stream: string, cursor: number, at: string): void {
+    this.inboxRows = this.inboxRows.filter((row) => !(row.stream === stream && row.seq <= cursor));
+    if (cursor > this.state(stream).cursor) this.states.set(stream, { ...this.state(stream), cursor, lastPullAt: at });
   }
 }
 
 function draft(): SyncEntryDraftValue {
-  return { entryId: randomUUID(), kind: 'runtime', scope: 'project:alpha', content: plainContent('提交前必须运行类型检查。'), payload: { enabled: true }, withdrawnAt: null };
+  return { entryId: randomUUID(), kind: 'rule', content: plainContent('提交前必须运行类型检查。'), payload: { enabled: true }, withdrawnAt: null };
 }
 
 function change(baseVersion = 0): SyncChangeRequest {
@@ -76,14 +77,14 @@ function change(baseVersion = 0): SyncChangeRequest {
 }
 
 function accepted(changeRequest: SyncChangeRequest, version = 1, seq = 1): SyncAcceptedValue {
-  return { changeId: changeRequest.changeId, entryId: changeRequest.entry.entryId, scope: changeRequest.entry.scope, version, seq, duplicate: false };
+  return { changeId: changeRequest.changeId, entryId: changeRequest.entry.entryId, stream: streamOf(changeRequest.entry.kind, changeRequest.entry.payload), version, seq, duplicate: false };
 }
 
 function remote(overrides: Partial<SyncRemotePort> = {}): SyncRemotePort {
   return {
     async push(changeRequest) { return accepted(changeRequest); },
-    async pull(scope): Promise<SyncPullPageValue> { return { scope, changes: [], nextSince: 0, hasMore: false, retentionFloor: 0 }; },
-    async snapshot(scope) { return { scope, asOfSeq: 0, nextSince: 0, entries: [] }; },
+    async pull(stream): Promise<SyncPullPageValue> { return { stream, changes: [], nextSince: 0, hasMore: false, retentionFloor: 0 }; },
+    async snapshot(stream) { return { stream, asOfSeq: 0, nextSince: 0, entries: [] }; },
     async receipt() { return null; },
     ...overrides,
   };
@@ -99,10 +100,10 @@ test('a confirmed push is queued for application, not applied twice', async () =
   assert.equal(ledger.inboxRows.length, 1);
   assert.equal(ledger.inboxRows[0]?.version, 1);
   assert.equal(ledger.inboxRows[0]?.entry.version, 1);
-  assert.equal(ledger.cursor('project:alpha'), 0);
-  const result = await coordinator.applyScope('project:alpha', async () => ({ status: 'applied' }));
+  assert.equal(ledger.cursor('rules'), 0);
+  const result = await coordinator.applyStream('rules', async () => ({ status: 'applied' }));
   assert.deepEqual(result, { applied: 1, cursor: 1 });
-  assert.equal(ledger.cursor('project:alpha'), 1);
+  assert.equal(ledger.cursor('rules'), 1);
 });
 
 test('a version conflict stops the change and keeps it for rebasing', async () => {
@@ -125,7 +126,7 @@ test('an unknown outcome is resolved by the receipt, a queued one stays pending'
   let mode: 'unknown' | 'queued' = 'unknown';
   const coordinator = new SyncCoordinator(remote({
     async push() { throw mode === 'unknown' ? unknown : Object.assign(new Error('refused'), { reachedRemote: false }); },
-    async receipt(changeId) { return { changeId, entryId: request.entry.entryId, scope: request.entry.scope, version: 1, seq: 1, duplicate: true }; },
+    async receipt(changeId) { return { changeId, entryId: request.entry.entryId, stream: streamOf(request.entry.kind, request.entry.payload), version: 1, seq: 1, duplicate: true }; },
   }), ledger, () => NOW);
 
   ledger.enqueue(request, NOW);
@@ -149,35 +150,35 @@ test('an unknown outcome is resolved by the receipt, a queued one stays pending'
 test('pulling receives a page but leaves the cursor to the apply step', async () => {
   const ledger = new MemoryLedger();
   const base = change();
-  const record = { changeId: base.changeId, entryId: base.entry.entryId, scope: base.entry.scope, version: 1, seq: 1, operation: base.operation, entry: { ...base.entry, version: 1 }, deviceId: 'device-a', recordedAt: NOW };
+  const record = { changeId: base.changeId, entryId: base.entry.entryId, stream: streamOf(base.entry.kind, base.entry.payload), version: 1, seq: 1, operation: base.operation, entry: { ...base.entry, version: 1 }, deviceId: 'device-a', recordedAt: NOW };
   const coordinator = new SyncCoordinator(remote({
-    async pull(scope) { return { scope, changes: [record], nextSince: 1, hasMore: false, retentionFloor: 1 }; },
+    async pull(stream) { return { stream, changes: [record], nextSince: 1, hasMore: false, retentionFloor: 1 }; },
   }), ledger, () => NOW);
-  assert.deepEqual(await coordinator.pullScope('project:alpha'), { received: 1, needsSnapshot: false, gapAt: null });
-  assert.equal(ledger.cursor('project:alpha'), 0);
+  assert.deepEqual(await coordinator.pullStream('rules'), { received: 1, needsSnapshot: false, gapAt: null, mismatched: 0 });
+  assert.equal(ledger.cursor('rules'), 0);
   assert.equal(ledger.inboxRows.length, 1);
 });
 
 test('a gap or an expired retention floor is reported instead of applied', async () => {
   const ledger = new MemoryLedger();
   const base = change();
-  const record = (seq: number) => ({ changeId: base.changeId, entryId: base.entry.entryId, scope: base.entry.scope, version: seq, seq, operation: base.operation, entry: { ...base.entry, version: seq }, deviceId: 'device-a', recordedAt: NOW });
-  const gap = new SyncCoordinator(remote({ async pull(scope) { return { scope, changes: [record(3)], nextSince: 3, hasMore: false, retentionFloor: 1 }; } }), ledger, () => NOW);
-  assert.deepEqual(await gap.pullScope('project:alpha'), { received: 0, needsSnapshot: false, gapAt: 1 });
-  assert.equal(ledger.state('project:alpha').lastError, 'GAP:1');
-  const floor = new SyncCoordinator(remote({ async pull(scope) { return { scope, changes: [], nextSince: 9, hasMore: false, retentionFloor: 9 }; } }), new MemoryLedger(), () => NOW);
-  assert.deepEqual(await floor.pullScope('project:alpha'), { received: 0, needsSnapshot: true, gapAt: null });
+  const record = (seq: number) => ({ changeId: base.changeId, entryId: base.entry.entryId, stream: streamOf(base.entry.kind, base.entry.payload), version: seq, seq, operation: base.operation, entry: { ...base.entry, version: seq }, deviceId: 'device-a', recordedAt: NOW });
+  const gap = new SyncCoordinator(remote({ async pull(stream) { return { stream, changes: [record(3)], nextSince: 3, hasMore: false, retentionFloor: 1 }; } }), ledger, () => NOW);
+  assert.deepEqual(await gap.pullStream('rules'), { received: 0, needsSnapshot: false, gapAt: 1, mismatched: 0 });
+  assert.equal(ledger.state('rules').lastError, 'GAP:1');
+  const floor = new SyncCoordinator(remote({ async pull(stream) { return { stream, changes: [], nextSince: 9, hasMore: false, retentionFloor: 9 }; } }), new MemoryLedger(), () => NOW);
+  assert.deepEqual(await floor.pullStream('rules'), { received: 0, needsSnapshot: true, gapAt: null, mismatched: 0 });
 });
 
 test('a row that needs review blocks the cursor and later rows wait', async () => {
   const ledger = new MemoryLedger();
   const base = change();
   for (const seq of [1, 2]) {
-    ledger.receive({ changeId: base.changeId, entryId: base.entry.entryId, scope: base.entry.scope, version: seq, seq, operation: base.operation, entry: { ...base.entry, version: seq }, deviceId: 'device-a', recordedAt: NOW });
+    ledger.receive({ changeId: base.changeId, entryId: base.entry.entryId, stream: streamOf(base.entry.kind, base.entry.payload), version: seq, seq, operation: base.operation, entry: { ...base.entry, version: seq }, deviceId: 'device-a', recordedAt: NOW });
   }
   const coordinator = new SyncCoordinator(remote(), ledger, () => NOW);
   const seen: number[] = [];
-  const result = await coordinator.applyScope('project:alpha', async (row) => {
+  const result = await coordinator.applyStream('rules', async (row) => {
     seen.push(row.seq);
     return row.seq === 1 ? { status: 'applied' as const } : { status: 'needs_review' as const, error: 'WRITE_UNKNOWN' };
   });
@@ -191,15 +192,15 @@ test('a row that needs review blocks the cursor and later rows wait', async () =
 test('a snapshot replaces the inbox and applies every entry it carries', async () => {
   const ledger = new MemoryLedger();
   const stale = draft();
-  ledger.inboxRows.push({ scope: 'project:alpha', seq: 1, changeId: randomUUID(), entryId: stale.entryId, version: 1, operation: 'create', entry: { ...stale, version: 1 }, state: 'received', error: null });
+  ledger.inboxRows.push({ stream: 'rules', seq: 1, changeId: randomUUID(), entryId: stale.entryId, version: 1, operation: 'create', entry: { ...stale, version: 1 }, state: 'received', error: null });
   const entry = { ...draft(), version: 5 };
   const coordinator = new SyncCoordinator(remote({
-    async snapshot(scope) { return { scope, asOfSeq: 40, nextSince: 40, entries: [entry] }; },
+    async snapshot(stream) { return { stream, asOfSeq: 40, nextSince: 40, entries: [entry] }; },
   }), ledger, () => NOW);
   const applied: string[] = [];
-  const result = await coordinator.captureSnapshot('project:alpha', async (row) => { applied.push(row.entryId); return { status: 'applied' as const }; });
+  const result = await coordinator.captureSnapshot('rules', async (row) => { applied.push(row.entryId); return { status: 'applied' as const }; });
   assert.deepEqual(result, { applied: 1, failed: 0, cursor: 40 });
-  assert.equal(ledger.cursor('project:alpha'), 40);
+  assert.equal(ledger.cursor('rules'), 40);
   assert.equal(ledger.inboxRows.length, 0, 'rows covered by the snapshot are dropped');
   assert.deepEqual(applied, [entry.entryId]);
 });
@@ -208,11 +209,11 @@ test('a snapshot entry that cannot be applied is counted and surfaced as an erro
   const ledger = new MemoryLedger();
   const entry = { ...draft(), version: 2 };
   const coordinator = new SyncCoordinator(remote({
-    async snapshot(scope) { return { scope, asOfSeq: 3, nextSince: 3, entries: [entry] }; },
+    async snapshot(stream) { return { stream, asOfSeq: 3, nextSince: 3, entries: [entry] }; },
   }), ledger, () => NOW);
-  const result = await coordinator.captureSnapshot('project:alpha', async () => ({ status: 'needs_review' as const, error: 'PROVIDER_UNAVAILABLE' }));
+  const result = await coordinator.captureSnapshot('rules', async () => ({ status: 'needs_review' as const, error: 'PROVIDER_UNAVAILABLE' }));
   assert.deepEqual(result, { applied: 0, failed: 1, cursor: 0 });
-  assert.equal(ledger.state('project:alpha').lastError, 'SNAPSHOT_APPLY_INCOMPLETE');
+  assert.equal(ledger.state('rules').lastError, 'SNAPSHOT_APPLY_INCOMPLETE');
 });
 
 /**
@@ -222,30 +223,30 @@ test('a snapshot entry that cannot be applied is counted and surfaced as an erro
  */
 test('a failed snapshot leaves the cursor where it was so the next pass replays it', async () => {
   const ledger = new MemoryLedger();
-  ledger.setCursor('project:alpha', 7, NOW);
+  ledger.setCursor('rules', 7, NOW);
   const stale = draft();
-  ledger.inboxRows.push({ scope: 'project:alpha', seq: 8, changeId: randomUUID(), entryId: stale.entryId, version: 1, operation: 'create', entry: { ...stale, version: 1 }, state: 'received', error: null });
+  ledger.inboxRows.push({ stream: 'rules', seq: 8, changeId: randomUUID(), entryId: stale.entryId, version: 1, operation: 'create', entry: { ...stale, version: 1 }, state: 'received', error: null });
   const first = { ...draft(), version: 5 };
   const second = { ...draft(), version: 6 };
   const coordinator = new SyncCoordinator(remote({
-    async snapshot(scope) { return { scope, asOfSeq: 40, nextSince: 40, entries: [first, second] }; },
+    async snapshot(stream) { return { stream, asOfSeq: 40, nextSince: 40, entries: [first, second] }; },
   }), ledger, () => NOW);
-  const result = await coordinator.captureSnapshot('project:alpha', async (row) => (
+  const result = await coordinator.captureSnapshot('rules', async (row) => (
     row.entryId === second.entryId ? { status: 'needs_review' as const, error: 'PROVIDER_UNAVAILABLE' } : { status: 'applied' as const }
   ));
   assert.deepEqual(result, { applied: 1, failed: 1, cursor: 7 }, 'the cursor must not move past unwritten entries');
-  assert.equal(ledger.cursor('project:alpha'), 7);
-  assert.equal(ledger.state('project:alpha').lastError, 'SNAPSHOT_APPLY_INCOMPLETE');
+  assert.equal(ledger.cursor('rules'), 7);
+  assert.equal(ledger.state('rules').lastError, 'SNAPSHOT_APPLY_INCOMPLETE');
   assert.equal(ledger.inboxRows.length, 1, 'the covered inbox rows must survive for the replay');
 
   // A retry that succeeds commits the cut point and only then drops the covered rows.
   const retry = new SyncCoordinator(remote({
-    async snapshot(scope) { return { scope, asOfSeq: 40, nextSince: 40, entries: [first, second] }; },
+    async snapshot(stream) { return { stream, asOfSeq: 40, nextSince: 40, entries: [first, second] }; },
   }), ledger, () => NOW);
-  const done = await retry.captureSnapshot('project:alpha', async () => ({ status: 'applied' as const }));
+  const done = await retry.captureSnapshot('rules', async () => ({ status: 'applied' as const }));
   assert.deepEqual(done, { applied: 2, failed: 0, cursor: 40 });
-  assert.equal(ledger.cursor('project:alpha'), 40);
-  assert.equal(ledger.state('project:alpha').lastError, null);
+  assert.equal(ledger.cursor('rules'), 40);
+  assert.equal(ledger.state('rules').lastError, null);
   assert.equal(ledger.inboxRows.length, 0);
 });
 
@@ -261,10 +262,10 @@ test('a snapshot replays every revision so the history chain matches the change 
     withdrawnAt: '2026-11-10T08:30:00.000Z',
   };
   const coordinator = new SyncCoordinator(remote({
-    async snapshot(scope) { return { scope, asOfSeq: 40, nextSince: 40, entries: [entry] }; },
+    async snapshot(stream) { return { stream, asOfSeq: 40, nextSince: 40, entries: [entry] }; },
   }), ledger, () => NOW);
   const seen: Array<{ version: number; withdrawn: boolean }> = [];
-  const result = await coordinator.captureSnapshot('project:alpha', async (row) => {
+  const result = await coordinator.captureSnapshot('rules', async (row) => {
     seen.push({ version: row.version, withdrawn: row.entry.withdrawnAt !== null });
     return { status: 'applied' as const };
   });
@@ -286,7 +287,7 @@ test('overlapping applies record the row once and agree on the cursor', async ()
   const ledger = new MemoryLedger();
   const base = change();
   for (const seq of [1, 2, 3]) {
-    ledger.receive({ changeId: base.changeId, entryId: base.entry.entryId, scope: base.entry.scope, version: seq, seq, operation: base.operation, entry: { ...base.entry, version: seq }, deviceId: 'device-a', recordedAt: NOW });
+    ledger.receive({ changeId: base.changeId, entryId: base.entry.entryId, stream: streamOf(base.entry.kind, base.entry.payload), version: seq, seq, operation: base.operation, entry: { ...base.entry, version: seq }, deviceId: 'device-a', recordedAt: NOW });
   }
   const coordinator = new SyncCoordinator(remote(), ledger, () => NOW);
   const apply = async () => {
@@ -294,10 +295,10 @@ test('overlapping applies record the row once and agree on the cursor', async ()
     return { status: 'applied' as const };
   };
   const [first, second] = await Promise.all([
-    coordinator.applyScope('project:alpha', apply),
-    coordinator.applyScope('project:alpha', apply),
+    coordinator.applyStream('rules', apply),
+    coordinator.applyStream('rules', apply),
   ]);
-  assert.equal(ledger.cursor('project:alpha'), 3);
+  assert.equal(ledger.cursor('rules'), 3);
   assert.equal(ledger.inboxRows.filter((row) => row.state === 'applied').length, 3, 'each row is recorded applied once');
   assert.ok(first.applied + second.applied >= 3);
 });

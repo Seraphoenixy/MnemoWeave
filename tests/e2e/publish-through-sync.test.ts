@@ -19,7 +19,7 @@ import { RememberInput } from '../../packages/core/contracts/src/index.ts';impor
  */
 
 const DEVICE_TOKEN = 'd'.repeat(32);
-const SCOPE = 'project:alpha';
+const STREAM = 'formal-memories';
 
 test('a memory published by the reviewed worker path is shared with the remote', async () => {
   const dir = resolve('work', 'publish-to-sync', randomUUID());
@@ -27,7 +27,7 @@ test('a memory published by the reviewed worker path is shared with the remote',
   mkdirSync(join(dir, 'state'), { recursive: true });
 
   const remote = new SyncStore({ path: join(dir, 'remote.db') });
-  remote.enroll('device-local', DEVICE_TOKEN, [{ scope: SCOPE, canRead: true, canWrite: true }]);
+  remote.enroll('device-local', DEVICE_TOKEN, [{ stream: STREAM, canRead: true, canWrite: true }]);
   const server: Server = createSyncServer({ gateway: remote });
   await new Promise<void>((done) => server.listen(0, '127.0.0.1', () => done()));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -42,12 +42,12 @@ test('a memory published by the reviewed worker path is shared with the remote',
     MNEMOWEAVE_SYNC_INTERVAL_MS: '0',
   });
   try {
-    assert.equal(remote.pull(DEVICE_TOKEN, { scope: SCOPE, since: 0, limit: 50 }).changes.length, 0, 'nothing shared yet');
+    assert.equal(remote.pull(DEVICE_TOKEN, { stream: STREAM, since: 0, limit: 50 }).changes.length, 0, 'nothing shared yet');
 
     // Submit through the public surface. With no model route configured the worker parks
     // the candidate for a human decision, so wait for that state before approving.
     const submitted = await app.app.remember({
-      idempotencyKey: `publish-${randomUUID()}`, content: '通过授权写入链路发布的正式记忆。', knowledgeType: 'Practice', tags: [], projectId: 'alpha',
+      idempotencyKey: `publish-${randomUUID()}`, content: '通过授权写入链路发布的正式记忆。', knowledgeType: 'Practice', tags: [],
       provenance: {
         source: 'local-user', sourceReference: 'e2e:publish', evidence: ['publish'], verificationStatus: 'verified',
         confidence: 1, applicability: 'alpha', limitations: '无（验收固定值）', lastVerified: '2026-11-10T12:00:00.000Z',
@@ -77,16 +77,16 @@ test('a memory published by the reviewed worker path is shared with the remote',
     const deadline = Date.now() + 60_000;
     let changes: ReturnType<typeof remote.pull>['changes'] = [];
     while (Date.now() < deadline) {
-      changes = remote.pull(DEVICE_TOKEN, { scope: SCOPE, since: 0, limit: 50 }).changes;
+      changes = remote.pull(DEVICE_TOKEN, { stream: STREAM, since: 0, limit: 50 }).changes;
       if (changes.length > 0) break;
       await new Promise((done) => setTimeout(done, 250));
     }
 
     assert.equal(changes.length, 1, 'the reviewed publication must reach the remote without a later edit');
     assert.equal(changes[0]?.operation, 'create');
-    assert.equal(changes[0]?.entry.kind, 'formal');
-    assert.equal(changes[0]?.entry.scope, SCOPE);
-    assert.equal(changes[0]?.entry.content.data, '通过审核发布的正式记忆。');
+    assert.equal(changes[0]?.entry.kind, 'formal-memory');
+    assert.equal(changes[0]?.stream, STREAM);
+    assert.equal(changes[0]?.entry.content.data, '通过授权写入链路发布的正式记忆。');
   } catch (error) {
     console.error('PUBLISH_SYNC_E2E_FAILED', error);
     throw error;

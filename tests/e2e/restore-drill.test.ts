@@ -30,13 +30,12 @@ test('an isolated copy restores rules, an archive with history, and a formal mem
   let providerId = '';
   try {
     repo.memory.upsertRule({ entryId: 'rule-restore', body: '提交前必须运行类型检查。', enabled: true, version: 1, withdrawnAt: null }, '2026-11-10T00:00:00.000Z');
-    repo.memory.upsertArchive({ entryId: 'archive-restore', projectId: 'alpha', title: '串口约定', body: '原始正文：9600。', source: 'user', verification: 'open', evidence: '实测', version: 1, withdrawnAt: null }, '2026-11-10T00:00:00.000Z');
-    repo.memory.upsertArchive({ entryId: 'archive-restore', projectId: 'alpha', title: '串口约定', body: '现行正文：115200。', source: 'user', verification: 'open', evidence: '复测', version: 2, withdrawnAt: null, state: 'active' }, '2026-11-10T01:00:00.000Z');
+    repo.memory.upsertArchive({ entryId: 'archive-restore', workspaceId: '11111111-1111-4111-8111-111111111111', title: '串口约定', body: '原始正文：9600。', source: 'user', verification: 'open', evidence: '实测', version: 1, withdrawnAt: null }, '2026-11-10T00:00:00.000Z');
+    repo.memory.upsertArchive({ entryId: 'archive-restore', workspaceId: '11111111-1111-4111-8111-111111111111', title: '串口约定', body: '现行正文：115200。', source: 'user', verification: 'open', evidence: '复测', version: 2, withdrawnAt: null, state: 'active' }, '2026-11-10T01:00:00.000Z');
     const written = await provider.persistReviewed(content, `candidate:${randomUUID()}`);
     providerId = written.id;
     const request = RememberInput.parse({
       idempotencyKey: `restore-${logicalId}`, content, knowledgeType: 'Practice', tags: ['restore'],
-      projectId: 'alpha',
       provenance: {
         source: 'local-user', sourceReference: 'restore-drill', evidence: ['drill'], verificationStatus: 'verified',
         confidence: 1, applicability: 'project', limitations: '无', lastVerified: '2026-11-10T00:00:00.000Z',
@@ -57,9 +56,11 @@ test('an isolated copy restores rules, an archive with history, and a formal mem
     assert.equal(archive?.title, '串口约定');
     assert.equal(archive?.body, '现行正文：115200。');
     assert.deepEqual(restored.memory.archiveHistory('archive-restore').map(row => row.version), [2, 1]);
-    assert.equal(restored.memory.archiveUsage('alpha').activeBytes > 0, true);
+    assert.equal(restored.memory.archiveUsage('11111111-1111-4111-8111-111111111111').activeBytes > 0, true);
+    // The formal memory is in the shared collection: no workspace field is written or read.
     const publication = restored.catalog.get(logicalId);
-    assert.equal(publication.projectId, 'alpha');
+    assert.equal(Object.hasOwn(publication, 'projectId'), false);
+    assert.equal(archive?.workspaceId, '11111111-1111-4111-8111-111111111111');
     const recalled = await new MnemonCliProvider({ binary: mnemonBinary(), dataDir: restoredProvider, store: 'restore-drill' }).recall({ query: '隔离恢复演练', limit: 5 });
     const hit = recalled.memories.find(memory => memory.id === providerId);
     assert.ok(hit, 'the formal memory is recalled from the restored Provider store');

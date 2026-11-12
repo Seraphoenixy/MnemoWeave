@@ -50,7 +50,7 @@ export class SessionEventStore {
       const payload = selection === 'metadata' ? {} : event.payload;
       this.db.prepare(`INSERT INTO session_events(host_id,event_id,session_id,turn_id,project_id,kind,occurred_at,received_at,source_ref,adapter_version,protocol_version,stage,important,protected_reason,archived_at,inferred,payload_json)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,'hot',?,NULL,NULL,?,?)`).run(
-        hostId, event.eventId, event.sessionId, event.turnId ?? null, event.projectId ?? null, event.kind, event.occurredAt, event.receivedAt, event.sourceRef,
+        hostId, event.eventId, event.sessionId, event.turnId ?? null, null, event.kind, event.occurredAt, event.receivedAt, event.sourceRef,
         event.adapterVersion, event.protocolVersion, event.inferred === true ? 1 : this.isImportant(event) ? 1 : 0, event.inferred === true ? 1 : 0, JSON.stringify(payload),
       );
       return { status: 'stored' as const, eventId: event.eventId };
@@ -82,7 +82,6 @@ export class SessionEventStore {
       FROM idle_review_signals WHERE host_id=? AND session_id=? ORDER BY turn_id, id`).all(hostId, sessionId).map(row => ({
       id: String(row['id']), sessionId: String(row['session_id']), turnId: Number(row['turn_id']),
       eventId: String(row['event_id']), text: String(row['text']),
-      projectId: row['project_id'] === null ? null : String(row['project_id']),
       reason: String(row['reason']) as IdleReviewSignalRecord['reason'], createdAt: String(row['created_at']),
     }));
     return { lastTurn: state === undefined ? 0 : Number(state['last_turn']), signals };
@@ -92,7 +91,7 @@ export class SessionEventStore {
     this.transaction(() => {
       for (const signal of signals) {
         this.db.prepare('INSERT OR IGNORE INTO idle_review_signals(host_id,session_id,id,turn_id,event_id,text,project_id,reason,created_at) VALUES(?,?,?,?,?,?,?,?,?)')
-          .run(hostId, sessionId, signal.id, signal.turnId, signal.eventId, signal.text, signal.projectId, signal.reason, signal.createdAt);
+          .run(hostId, sessionId, signal.id, signal.turnId, signal.eventId, signal.text, null, signal.reason, signal.createdAt);
       }
       this.db.prepare(`INSERT INTO idle_review_state(host_id,session_id,last_turn,updated_at) VALUES(?,?,?,?)
         ON CONFLICT(host_id,session_id) DO UPDATE SET last_turn=MAX(idle_review_state.last_turn, excluded.last_turn), updated_at=excluded.updated_at`)
@@ -115,16 +114,15 @@ export class SessionEventStore {
       if (this.db.prepare("SELECT id FROM idle_review_runs WHERE host_id=? AND session_id=? AND state='running'").get(hostId, sessionId)) throw new MnemoWeaveError('INVALID_STATE');
       const attempt = Number((this.db.prepare('SELECT COALESCE(MAX(attempt),0) n FROM idle_review_runs WHERE host_id=? AND session_id=?').get(hostId, sessionId)!['n'])) + 1;
       const id = randomUUID();
-      this.db.prepare('INSERT INTO idle_review_runs(id,host_id,session_id,state,attempt,started_at,finished_at,error,items_json) VALUES(?,?,?,?,?,?,?,?,?)')
-        .run(id, hostId, sessionId, 'running', attempt, new Date().toISOString(), null, '', '[]');
       const rows = this.db.prepare(`SELECT id,session_id,turn_id,event_id,text,project_id,reason,created_at
         FROM idle_review_signals WHERE host_id=? AND session_id=? AND run_id IS NULL ORDER BY turn_id, id LIMIT ?`).all(hostId, sessionId, limit);
       const signals = rows.map(row => ({
         id: String(row['id']), sessionId: String(row['session_id']), turnId: Number(row['turn_id']),
         eventId: String(row['event_id']), text: String(row['text']),
-        projectId: row['project_id'] === null ? null : String(row['project_id']),
         reason: String(row['reason']) as IdleReviewSignalRecord['reason'], createdAt: String(row['created_at']),
       }));
+      this.db.prepare('INSERT INTO idle_review_runs(id,host_id,session_id,state,attempt,started_at,finished_at,error,items_json,signal_ids_json) VALUES(?,?,?,?,?,?,?,?,?,?)')
+        .run(id, hostId, sessionId, 'running', attempt, new Date().toISOString(), null, '', '[]', JSON.stringify(signals.map(signal => signal.id)));
       for (const signal of signals) this.db.prepare('UPDATE idle_review_signals SET run_id=? WHERE host_id=? AND id=?').run(id, hostId, signal.id);
       return { run: this.idleRunRow(hostId, id), signals };
     });
@@ -135,9 +133,24 @@ export class SessionEventStore {
       WHERE host_id=? AND run_id IS NULL GROUP BY session_id ORDER BY MAX(turn_id) DESC LIMIT 20`)
       .all(hostId).map(row => ({ sessionId: String(row['session_id']), count: Number(row['n']) }));
   }
-  /** A failed or cancelled run releases its reservation so the next attempt sees the signals. */
-  private releaseIdleRun(hostId: string, runId: string): void {
-    this.db.prepare('UPDATE idle_review_signals SET run_id=NULL WHERE host_id=? AND run_id=?').run(hostId, runId);
+  /**
+   * Release the reservations a run must not keep.
+   *
+   * A succeeded run consumes every signal it reserved. A failed or cancelled run keeps the ones
+   * whose action reached a terminal state (applied or skipped) and releases the rest, so the next
+   * attempt retries only the unfinished work instead of repeating writes that already happened.
+   */
+  private releaseIdleRun(hostId: string, runId: string, keep: readonly string[]): void {
+    const placeholders = keep.map(() => '?').join(',');
+    const sql = keep.length === 0
+      ? 'UPDATE idle_review_signals SET run_id=NULL WHERE host_id=? AND run_id=?'
+      : `UPDATE idle_review_signals SET run_id=NULL WHERE host_id=? AND run_id=? AND id NOT IN (${placeholders})`;
+    this.db.prepare(sql).run(hostId, runId, ...keep);
+  }
+  /** One run by id, scoped to its Host; another Host's run is not found. */
+  idleRun(hostId: string, runId: string): IdleReviewRunRecord | null {
+    const row = this.db.prepare('SELECT 1 FROM idle_review_runs WHERE host_id=? AND id=?').get(hostId, runId);
+    return row === undefined ? null : this.idleRunRow(hostId, runId);
   }
   idleRuns(hostId: string, sessionId: string): IdleReviewRunRecord[] {
     return this.db.prepare('SELECT id FROM idle_review_runs WHERE host_id=? AND session_id=? ORDER BY started_at DESC').all(hostId, sessionId)
@@ -171,15 +184,28 @@ export class SessionEventStore {
       if (run.state !== 'running') throw new MnemoWeaveError('INVALID_STATE');
       this.db.prepare('UPDATE idle_review_runs SET state=?, finished_at=?, error=? WHERE host_id=? AND id=?')
         .run(state, new Date().toISOString(), error ?? '', hostId, runId);
-      if (state !== 'succeeded') this.releaseIdleRun(hostId, runId);
+      if (state !== 'succeeded') {
+        // A signal is finished when its item reached a terminal state; only the rest are retried.
+        const reserved = this.reservedSignals(hostId, runId);
+        const finished = run.items.filter(item => item.state === 'applied' || item.state === 'skipped').map(item => reserved[item.index]);
+        this.releaseIdleRun(hostId, runId, finished.filter((id): id is string => id !== undefined));
+      }
       return this.idleRunRow(hostId, runId);
     });
+  }
+  /** The signals a run reserved, in the order they were offered to the task. */
+  private reservedSignals(hostId: string, runId: string): string[] {
+    const row = this.db.prepare('SELECT signal_ids_json FROM idle_review_runs WHERE host_id=? AND id=?').get(hostId, runId);
+    if (row === undefined) return [];
+    try {
+      const parsed: unknown = JSON.parse(String(row['signal_ids_json'] ?? '[]'));
+      return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === 'string') : [];
+    } catch { return []; }
   }
   private toRecord(row: Record<string, unknown>): EventRecord {
     return {
       eventId: String(row['event_id']), hostId: String(row['host_id']), sessionId: String(row['session_id']),
       turnId: row['turn_id'] === null ? null : String(row['turn_id']),
-      projectId: row['project_id'] === null ? null : String(row['project_id']),
       kind: row['kind'] as EventRecord['kind'], occurredAt: String(row['occurred_at']), receivedAt: String(row['received_at']),
       sourceRef: String(row['source_ref']), adapterVersion: String(row['adapter_version']), protocolVersion: String(row['protocol_version']),
       stage: row['stage'] as EventRecord['stage'], important: row['important'] === 1,

@@ -1,115 +1,105 @@
 import { performance } from 'node:perf_hooks';
-import { MnemoWeaveError } from '../../../core/contracts/src/index.ts';
-import type { ViewRecord } from '../../../core/contracts/src/index.ts';
 
-/** Host-agnostic retrieval source: the Bridge (local-first) or the Server. */
-export interface InjectionRecallSource {
-  recall(query: string, limit?: number): Promise<{
-    status: 'ok' | 'unauthorized' | 'unavailable' | 'corrupted';
-    reason?: string;
-    memories?: { id: string; content: string; score?: number }[];
-    dataTime?: string;
-  }>;
-  /** Live revocation check (AUTH-02); must consult the current server/license state. */
-  isRevoked(): Promise<boolean>;
-  isViewUsable?(view: ViewRecord): Promise<boolean>;
+/**
+ * Host-agnostic resident-rule delivery.
+ *
+ * The only thing injected is the complete rule set. There is no bounded View, no session
+ * projection and no memory budget: a rule block either arrives whole or the delivery fails and the
+ * host reports it. A partial set would let the model believe a rule was removed when it was
+ * merely not delivered.
+ */
+
+export interface RuleSource {
+  rules(): Promise<{ rules: Array<{ entryId: string; version: number; body: string; importance?: 'critical' | 'normal' | 'low'; bodyBytes: number }>; usedBytes: number; limitBytes: number; complete: boolean }>;
+  /** Live authorization check; a revoked session must not receive a fresh block. */
+  isAuthorized?(): Promise<boolean>;
 }
+
+export type InjectionStatus = 'injected' | 'unavailable' | 'denied' | 'incomplete';
 
 export interface InjectionOutcome {
-  status: 'injected' | 'unavailable' | 'denied' | 'budget_exceeded';
+  status: InjectionStatus;
   reason: string;
-  /** viewId is present only on real delivery — never on a miss (HOST-04). */
-  viewId?: string;
-  viewGeneration?: number;
-  usedLocalReplica: boolean;
-  deliveredAtTurn: string;
-  dataTime?: string;
+  /** Present only on a real delivery; never on a miss. */
+  deliveredAtTurn?: string;
+  usedBytes?: number;
+  limitBytes?: number;
 }
-
-export type InjectionTrigger = 'session_started' | 'message_user' | 'tool_failure' | 'tool_important' | 'explicit_recall' | 'budget_near' | 'license_change';
 
 export interface InjectionTurn { sessionId: string; turnId: string }
 
-const DEFAULT_DEADLINE_MS = 2_000; // HOST-06
+const DEFAULT_DEADLINE_MS = 2_000;
 
 /**
- * Host-agnostic injection controller (HOST-04/05/06): session-start full views,
- * incremental triggers only, a monotonic foreground deadline with explicit unavailability,
- * revocation denial mid-deadline, and late results delivered only as new views.
+ * Host-agnostic injection controller: one complete rule delivery per turn, a monotonic foreground
+ * deadline, and an explicit miss. Late results are never delivered into a new turn.
  */
 export class InjectionController {
-  private currentView: ViewRecord | undefined;
-  private currentSession: string | undefined;
+  private readonly deadlineMs: number;
+  private readonly source: RuleSource;
+  private current: { sessionId: string; turnId: string; text: string } | undefined;
   private generation = 0;
   private disposed = false;
-  private late: { sessionId: string; view: ViewRecord; generation: number } | undefined;
-  private readonly deadlineMs: number;
-  private readonly recallSource: InjectionRecallSource;
-  private readonly assemble: (query: string | null, memories: { id: string; content: string; score?: number }[]) => Promise<ViewRecord>;
-  constructor(
-    recallSource: InjectionRecallSource,
-    assemble: (query: string | null, memories: { id: string; content: string; score?: number }[]) => Promise<ViewRecord>,
-    options: { deadlineMs?: number } = {},
-  ) { this.recallSource = recallSource; this.assemble = assemble; this.deadlineMs = options.deadlineMs ?? DEFAULT_DEADLINE_MS; }
-  currentViewFor(sessionId: string): ViewRecord | undefined { return !this.disposed && this.currentSession === sessionId ? this.currentView : undefined; }
-  isIncrementalTrigger(trigger: InjectionTrigger): boolean { return trigger !== 'session_started'; }
-  dispose(): void { this.disposed = true; this.generation++; this.late = undefined; this.currentView = undefined; }
-  async inject(trigger: InjectionTrigger, turn: InjectionTurn, query: string | null, usedLocalReplica: boolean, override?: typeof this.assemble): Promise<InjectionOutcome> {
+  constructor(source: RuleSource, options: { deadlineMs?: number } = {}) {
+    this.source = source;
+    this.deadlineMs = options.deadlineMs ?? DEFAULT_DEADLINE_MS;
+  }
+
+  /** The block already delivered for this session, if the host may reuse it inside one turn. */
+  currentBlockFor(sessionId: string): string | undefined {
+    return !this.disposed && this.current?.sessionId === sessionId ? this.current.text : undefined;
+  }
+
+  /** Same turn, same text: reuse. A new turn reads again, even when nothing changed. */
+  cachedForTurn(sessionId: string, turnId: string): string | undefined {
+    if (this.disposed || this.current?.sessionId !== sessionId) return undefined;
+    return this.current.turnId === turnId ? this.current.text : undefined;
+  }
+
+  dispose(): void { this.disposed = true; this.generation += 1; this.current = undefined; }
+
+  async inject(turn: InjectionTurn): Promise<InjectionOutcome> {
     const deadline = performance.now() + this.deadlineMs;
-    const previousGeneration = this.generation;
     const generation = ++this.generation;
-    const assemble = override ?? this.assemble;
-    const outcome = (status: InjectionOutcome['status'], reason: string): InjectionOutcome => ({ status, reason, usedLocalReplica, deliveredAtTurn: turn.turnId });
     const live = () => !this.disposed && this.generation === generation;
-    const deadlineResult = Symbol('deadline');
-    const bounded = async <T>(operation: Promise<T>): Promise<T | typeof deadlineResult> => {
+    const bounded = async <T>(operation: Promise<T>): Promise<T | undefined> => {
       const remaining = deadline - performance.now();
-      if (remaining <= 0) { void operation.catch(() => undefined); return deadlineResult; }
+      if (remaining <= 0) { void operation.catch(() => undefined); return undefined; }
       let timer: ReturnType<typeof setTimeout> | undefined;
-      try { return await Promise.race([operation, new Promise<typeof deadlineResult>(resolve => { timer = setTimeout(() => resolve(deadlineResult), remaining); })]); }
-      finally { if (timer) clearTimeout(timer); }
+      try {
+        return await Promise.race([
+          operation,
+          new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), remaining); }),
+        ]);
+      } finally { if (timer) clearTimeout(timer); }
     };
-    const authorized = async (): Promise<InjectionOutcome | undefined> => {
-      const revoked = await bounded(this.recallSource.isRevoked());
-      if (!live()) return outcome('unavailable', 'turn superseded or session ended');
-      if (revoked === deadlineResult) return outcome('unavailable', 'authorization deadline exceeded');
-      if (revoked) return outcome('denied', 'revoked');
-      return undefined;
-    };
-    const deliver = async (view: ViewRecord, reason: string): Promise<InjectionOutcome> => {
-      const denied = await authorized(); if (denied) return denied;
-      if (this.recallSource.isViewUsable) {
-        const usable = await bounded(this.recallSource.isViewUsable(view));
-        if (usable !== true || !live()) return outcome('unavailable', 'view authorization or runtime revision changed');
-      }
-      this.currentView = view; this.currentSession = turn.sessionId;
-      return { ...outcome('injected', reason), viewId: view.viewId, viewGeneration: view.generation, usedLocalReplica: view.delivery === 'local_replica' || usedLocalReplica, dataTime: view.dataTime ?? view.createdAt };
-    };
-    const registerLate = (view: ViewRecord): void => { if (live()) this.late = { sessionId: turn.sessionId, view, generation }; };
     try {
-      if (this.disposed) return outcome('unavailable', 'session ended');
-      const denied = await authorized(); if (denied) return denied;
-      const pending = this.late; this.late = undefined;
-      if (query === null && pending?.sessionId === turn.sessionId && pending.generation === previousGeneration) return deliver(pending.view, 'late result delivered as a new view');
-      let memories: { id: string; content: string; score?: number }[] = [];
-      if (query !== null) {
-        const retrieval = this.recallSource.recall(query);
-        const result = await bounded(retrieval);
-        if (result === deadlineResult) {
-          // Reuse the original read: never submit a second request on timeout.
-          void retrieval.then(result => result.status === 'ok' && live() ? assemble(query, result.memories ?? []).then(registerLate) : undefined).catch(() => undefined);
-          return outcome('unavailable', 'foreground deadline exceeded; normal tasks may continue');
-        }
-        if (!live()) return outcome('unavailable', 'turn superseded or session ended');
-        if (result.status !== 'ok') return outcome(result.status === 'unauthorized' ? 'denied' : 'unavailable', result.reason ?? result.status);
-        memories = result.memories ?? [];
+      if (this.disposed) return { status: 'unavailable', reason: 'session ended' };
+      if (this.source.isAuthorized) {
+        const authorized = await bounded(this.source.isAuthorized());
+        if (!live()) return { status: 'unavailable', reason: 'turn superseded or session ended' };
+        if (authorized === undefined) return { status: 'unavailable', reason: 'authorization deadline exceeded' };
+        if (authorized !== true) return { status: 'denied', reason: 'revoked' };
       }
-      const assembly = assemble(query, memories);
-      const view = await bounded(assembly);
-      if (view === deadlineResult) { void assembly.then(registerLate).catch(() => undefined); return outcome('unavailable', 'foreground deadline exceeded during assembly'); }
-      return deliver(view, trigger);
-    } catch (error) {
-      return outcome(error instanceof MnemoWeaveError && error.code === 'VIEW_BUDGET_EXCEEDED' ? 'budget_exceeded' : 'unavailable', 'view assembly or authorization unavailable');
+      const delivered = await bounded(this.source.rules());
+      if (delivered === undefined) return { status: 'unavailable', reason: 'foreground deadline exceeded; normal tasks may continue' };
+      if (!live()) return { status: 'unavailable', reason: 'turn superseded or session ended' };
+      if (!delivered.complete) return { status: 'incomplete', reason: 'the host output limit could not hold every rule', usedBytes: delivered.usedBytes, limitBytes: delivered.limitBytes };
+      const text = renderRules(delivered.rules);
+      if (text !== '') this.current = { sessionId: turn.sessionId, turnId: turn.turnId, text };
+      return { status: 'injected', reason: 'resident rules delivered whole', deliveredAtTurn: turn.turnId, usedBytes: delivered.usedBytes, limitBytes: delivered.limitBytes };
+    } catch {
+      return { status: 'unavailable', reason: 'rule delivery unavailable' };
     }
   }
+}
+
+/**
+ * Render every rule whole, in the order the Server returned. No rule is trimmed, reordered or
+ * dropped here; an empty set renders nothing.
+ */
+export function renderRules(rules: ReadonlyArray<{ body: string }>): string {
+  const bodies = rules.map(rule => rule.body.trim()).filter(body => body !== '');
+  if (bodies.length === 0) return '';
+  return `准则（用户确认，按此执行）：\n${bodies.map(body => `- ${body}`).join('\n')}`;
 }

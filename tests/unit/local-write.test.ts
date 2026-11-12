@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { MnemoWeaveError } from '../../packages/core/contracts/src/index.ts';
 import type { SyncInboxRecord, SyncLedgerPort, SyncOutboxRecord, SyncStateRecord } from '../../packages/core/application/src/sync.ts';
 import type { SyncChangeRecordValue, SyncChangeRequest } from '../../packages/core/contracts/src/index.ts';
-import { archiveDraft, planEditChange, ruleDraft, ruleScope, submitLocalChange } from '../../packages/core/application/src/local-write.ts';
+import { archiveDraft, planEditChange, ruleDraft, streamFor, submitLocalChange } from '../../packages/core/application/src/local-write.ts';
 
 const NOW = '2026-11-10T13:00:00.000Z';
 
@@ -21,13 +21,13 @@ function ledger(nextState: SyncOutboxRecord['state'] = 'confirmed'): FakeLedger 
     rows,
     inboxRows,
     nextState,
-    state: (scope: string): SyncStateRecord => ({ scope, cursor: 0, lastPullAt: null, lastError: null }),
+    state: (stream: string): SyncStateRecord => ({ stream, cursor: 0, lastPullAt: null, lastError: null }),
     cursor: () => 0,
     setCursor: () => undefined,
     setError: () => undefined,
     enqueue: (change: SyncChangeRequest, at: string) => {
       rows.push({
-        changeId: change.changeId, scope: change.entry.scope, entryId: change.entry.entryId,
+        changeId: change.changeId, stream: change.entry.kind === 'rule' ? 'rules' : 'formal-memories', entryId: change.entry.entryId,
         baseVersion: change.baseVersion, operation: change.operation, entry: change.entry,
         state: 'pending', attempts: 0, lastError: null, createdAt: at, updatedAt: at,
       });
@@ -40,9 +40,9 @@ function ledger(nextState: SyncOutboxRecord['state'] = 'confirmed'): FakeLedger 
       if (row) row.state = state;
     },
     receive: (_record: SyncChangeRecordValue) => true,
-    inbox: (scope: string, limit = 100) => inboxRows.filter((row) => row.scope === scope).slice(0, limit),
+    inbox: (stream: string, limit = 100) => inboxRows.filter((row) => row.stream === stream).slice(0, limit),
     inboxChange: (changeId: string) => inboxRows.find((row) => row.changeId === changeId) ?? null,
-    inboxEntry: (scope: string, seq: number) => inboxRows.find((row) => row.scope === scope && row.seq === seq) ?? null,
+    inboxEntry: (stream: string, seq: number) => inboxRows.find((row) => row.stream === stream && row.seq === seq) ?? null,
     markInbox: () => undefined,
     progress: () => [],
   };
@@ -56,7 +56,7 @@ function flushTo(fake: FakeLedger) {
       row.state = fake.nextState;
       if (fake.nextState === 'confirmed') {
         fake.inboxRows.push({
-          scope: row.scope, seq: 1, changeId: row.changeId, entryId: row.entryId, version: row.baseVersion + 1,
+          stream: row.stream, seq: 1, changeId: row.changeId, entryId: row.entryId, version: row.baseVersion + 1,
           operation: row.operation, entry: { ...row.entry, version: row.baseVersion + 1 }, state: 'received', error: null,
         });
       }
@@ -65,7 +65,7 @@ function flushTo(fake: FakeLedger) {
 }
 
 const draft = () => ({
-  entryId: randomUUID(), kind: 'runtime' as const, scope: 'global',
+  entryId: randomUUID(), kind: 'rule' as const,
   content: { format: 'plain' as const, data: 'x', contentHash: 'a'.repeat(64), byteLength: 1 },
   payload: { enabled: true }, withdrawnAt: null,
 });
@@ -73,7 +73,7 @@ const draft = () => ({
 test('a local write reports what the remote answered', async () => {
   for (const [state, expected] of [['confirmed', 'confirmed'], ['pending', 'queued'], ['unknown', 'unknown']] as const) {
     const fake = ledger(state);
-    const result = await submitLocalChange({ scope: 'global', operation: 'create', entry: draft(), baseVersion: 0 }, { ledger: fake, flush: flushTo(fake), now: () => NOW });
+    const result = await submitLocalChange({ operation: 'create', entry: draft(), baseVersion: 0 }, { ledger: fake, flush: flushTo(fake), now: () => NOW });
     assert.equal(result.state, expected, state);
     assert.equal(fake.rows.length, 1);
     assert.equal(fake.rows[0]?.baseVersion, 0);
@@ -86,7 +86,7 @@ test('a conflict or review demand fails the write instead of claiming success', 
   for (const [state, code] of [['conflict', 'VERSION_CONFLICT'], ['needs_review', 'NEEDS_REVIEW']] as const) {
     const fake = ledger(state);
     await assert.rejects(
-      submitLocalChange({ scope: 'global', operation: 'update', entry: draft(), baseVersion: 3 }, { ledger: fake, flush: flushTo(fake), now: () => NOW }),
+      submitLocalChange({ operation: 'update', entry: draft(), baseVersion: 3 }, { ledger: fake, flush: flushTo(fake), now: () => NOW }),
       (error: unknown) => error instanceof MnemoWeaveError && error.code === code,
     );
   }
@@ -95,40 +95,44 @@ test('a conflict or review demand fails the write instead of claiming success', 
 test('a second write waits while the same entry is still unconfirmed', async () => {
   const fake = ledger('pending');
   const entry = draft();
-  await submitLocalChange({ scope: 'global', operation: 'create', entry, baseVersion: 0 }, { ledger: fake, flush: flushTo(fake), now: () => NOW });
+  await submitLocalChange({ operation: 'create', entry, baseVersion: 0 }, { ledger: fake, flush: flushTo(fake), now: () => NOW });
   await assert.rejects(
-    submitLocalChange({ scope: 'global', operation: 'update', entry, baseVersion: 0 }, { ledger: fake, flush: flushTo(fake), now: () => NOW }),
+    submitLocalChange({ operation: 'update', entry, baseVersion: 0 }, { ledger: fake, flush: flushTo(fake), now: () => NOW }),
     (error: unknown) => error instanceof MnemoWeaveError && error.code === 'SYNC_QUEUED',
   );
   assert.equal(fake.rows.length, 1, 'the queued change must not be duplicated');
 });
 
-test('a rule travels in the global scope and an archive in its project scope', () => {
+test('a rule travels in the rules stream and an archive in its workspace stream', () => {
   const rule = { entryId: randomUUID(), body: '准则正文', enabled: false, version: 2, withdrawnAt: null };
-  // Rules are not project-scoped: every session applies the same set.
-  assert.equal(ruleScope(), 'global');
+  // Rules are not scoped: every session applies the same set, and the entry names no stream.
   const ruleEntry = ruleDraft(rule);
-  assert.equal(ruleEntry.kind, 'runtime');
+  assert.equal(ruleEntry.kind, 'rule');
+  assert.equal(Object.hasOwn(ruleEntry, 'scope'), false);
   assert.deepEqual(ruleEntry.payload, { enabled: false });
   assert.equal(ruleEntry.content.format, 'plain');
   assert.equal(ruleEntry.content.byteLength, Buffer.byteLength('准则正文', 'utf8'));
 
-  const archive = { entryId: randomUUID(), projectId: 'alpha', title: '标题', body: '正文', source: 'tool', verification: 'open' as const, evidence: '证据', version: 1, withdrawnAt: null };
+  const workspaceId = randomUUID();
+  const archive = { entryId: randomUUID(), workspaceId, title: '标题', body: '正文', source: 'tool', verification: 'open' as const, evidence: '证据', version: 1, withdrawnAt: null };
   const archiveEntry = archiveDraft(archive);
-  assert.equal(archiveEntry.kind, 'archive');
-  assert.equal(archiveEntry.scope, 'project:alpha');
-  assert.deepEqual(archiveEntry.payload, { title: '标题', source: 'tool', verification: 'open', evidence: '证据', tags: [] });
+  assert.equal(archiveEntry.kind, 'workspace-archive');
+  // The workspace travels in the payload; the derived stream is what the remote authorizes.
+  assert.deepEqual(archiveEntry.payload, {
+    workspaceId, title: '标题', source: 'tool', verification: 'open', evidence: '证据', tags: [],
+  });
+  assert.equal(streamFor(archiveEntry), `workspace-archives:${workspaceId}`);
 });
 
 test('an edit becomes a formal change that supersedes its previous version', () => {
   const entryId = randomUUID();
-  const first = planEditChange({ entryId, scope: 'project:alpha', content: '第一版正文', entryVersion: 0 });
+  const first = planEditChange({ entryId, content: '第一版正文', entryVersion: 0, category: 'fact', importance: 3, tags: [], entities: [] });
   assert.equal(first.operation, 'create');
   assert.equal(first.baseVersion, 0);
-  assert.equal(first.entry.kind, 'formal');
+  assert.equal(first.entry.kind, 'formal-memory');
   assert.deepEqual((first.entry.payload as { relations: unknown[] }).relations, []);
 
-  const second = planEditChange({ entryId, scope: 'project:alpha', content: '第二版正文', entryVersion: 3 });
+  const second = planEditChange({ entryId, content: '第二版正文', entryVersion: 3, category: 'fact', importance: 3, tags: [], entities: [] });
   assert.equal(second.operation, 'update');
   assert.equal(second.baseVersion, 3);
   assert.equal(second.entry.content.data, '第二版正文');
@@ -149,12 +153,12 @@ test('a write is still resolved once confirmed history fills the default page', 
   const history = Array.from({ length: 150 }, () => 'confirmed' as const);
   for (const state of history) {
     const historical = draft();
-    await submitLocalChange({ scope: 'global', operation: 'create', entry: historical, baseVersion: 0 }, { ledger: fake, flush: flushTo(fake), now: () => NOW });
+    await submitLocalChange({ operation: 'create', entry: historical, baseVersion: 0 }, { ledger: fake, flush: flushTo(fake), now: () => NOW });
     assert.equal(fake.rows.at(-1)?.state, state);
   }
 
   const entry = draft();
-  const result = await submitLocalChange({ scope: 'global', operation: 'create', entry, baseVersion: 0 }, { ledger: fake, flush: flushTo(fake), now: () => NOW });
+  const result = await submitLocalChange({ operation: 'create', entry, baseVersion: 0 }, { ledger: fake, flush: flushTo(fake), now: () => NOW });
   assert.equal(result.state, 'confirmed', 'a confirmed write past the first page must not report INTERNAL');
   assert.deepEqual(result.accepted, { version: 1, seq: 1 });
   assert.equal(fake.rows.length, 151);
@@ -164,17 +168,17 @@ test('outstanding work past the default page still blocks a second write', async
   const fake = ledger('confirmed');
   for (let index = 0; index < 150; index += 1) {
     const historical = draft();
-    await submitLocalChange({ scope: 'global', operation: 'create', entry: historical, baseVersion: 0 }, { ledger: fake, flush: flushTo(fake), now: () => NOW });
+    await submitLocalChange({ operation: 'create', entry: historical, baseVersion: 0 }, { ledger: fake, flush: flushTo(fake), now: () => NOW });
   }
   // Park one entry with an unconfirmed change, then push it past the first page.
   const entry = draft();
   fake.nextState = 'pending';
-  await submitLocalChange({ scope: 'global', operation: 'create', entry, baseVersion: 0 }, { ledger: fake, flush: flushTo(fake), now: () => NOW });
+  await submitLocalChange({ operation: 'create', entry, baseVersion: 0 }, { ledger: fake, flush: flushTo(fake), now: () => NOW });
   for (let index = 0; index < 150; index += 1) {
-    await submitLocalChange({ scope: 'global', operation: 'create', entry: draft(), baseVersion: 0 }, { ledger: fake, flush: flushTo(fake), now: () => NOW });
+    await submitLocalChange({ operation: 'create', entry: draft(), baseVersion: 0 }, { ledger: fake, flush: flushTo(fake), now: () => NOW });
   }
   await assert.rejects(
-    submitLocalChange({ scope: 'global', operation: 'update', entry, baseVersion: 0 }, { ledger: fake, flush: () => flushTo(fake)(), now: () => NOW }),
+    submitLocalChange({ operation: 'update', entry, baseVersion: 0 }, { ledger: fake, flush: () => flushTo(fake)(), now: () => NOW }),
     (error: unknown) => error instanceof MnemoWeaveError && error.code === 'SYNC_QUEUED',
   );
 });

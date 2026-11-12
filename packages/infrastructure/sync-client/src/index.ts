@@ -1,13 +1,17 @@
-import { MnemoWeaveError, SyncAccepted, SyncChangeInput, SyncEntry, SyncPullInput, SyncPullPage, SyncScopesOutput, SyncSnapshot } from '../../../core/contracts/src/index.ts';
-import type { ErrorCode, SyncAcceptedValue, SyncChangeRequest, SyncEntryValue, SyncPullPageValue, SyncPullRequest, SyncScopesValue, SyncSnapshotValue } from '../../../core/contracts/src/index.ts';
+import { MnemoWeaveError, SYNC_PROTOCOL_HEADER, SYNC_PROTOCOL_VERSION, SyncAccepted, SyncChangeInput, SyncEntry, SyncPullInput, SyncPullPage, SyncSnapshot, SyncStreamsOutput } from '../../../core/contracts/src/index.ts';
+import type { ErrorCode, SyncAcceptedValue, SyncChangeRecordValue, SyncChangeRequest, SyncEntryValue, SyncPullPageValue, SyncPullRequest, SyncSnapshotValue, SyncStreamsValue } from '../../../core/contracts/src/index.ts';
 import { VersionConflictError } from '../../../core/application/src/sync.ts';
 import type { SyncRemotePort } from '../../../core/application/src/sync.ts';
 
 /**
- * Local Server side of the sync protocol. It never decides versions: the remote
- * assigns them, and every failure keeps the distinction the UI needs — a request
- * that never left the machine is queued and safe to retry, one that timed out
- * after sending has an unknown outcome until a changeId lookup answers.
+ * Local Server side of the sync protocol. It never decides versions: the remote assigns them, and
+ * every failure keeps the distinction the UI needs — a request that never left the machine is
+ * queued and safe to retry, one that timed out after sending has an unknown outcome until a
+ * changeId lookup answers.
+ *
+ * Every request names the protocol version. A remote that answers with a mismatch stops the
+ * caller from guessing: a protocol-1 remote has no streams, so the answer is an explicit
+ * `SYNC_PROTOCOL_MISMATCH` rather than a retry that could half-apply a change.
  */
 export class SyncTransportError extends MnemoWeaveError {
   readonly reachedRemote: boolean;
@@ -21,6 +25,7 @@ export class SyncTransportError extends MnemoWeaveError {
 const KNOWN_CODES: readonly ErrorCode[] = [
   'INVALID_INPUT', 'UNAUTHORIZED', 'NOT_FOUND', 'DEVICE_REVOKED', 'SCOPE_FORBIDDEN',
   'VERSION_CONFLICT', 'CHANGE_ID_REUSED', 'CHANGE_ID_EXPIRED', 'SNAPSHOT_REQUIRED',
+  'RULE_CAPACITY_EXCEEDED', 'ARCHIVE_CAPACITY_EXCEEDED',
 ];
 
 export interface SyncClientOptions {
@@ -58,11 +63,12 @@ export class SyncClient implements SyncRemotePort {
   async health(): Promise<SyncHealth> {
     const body = await this.send('/v1/sync/health') as SyncHealth;
     if (body.ready !== true || typeof body.protocol !== 'number') throw new MnemoWeaveError('PROVIDER_PROTOCOL');
+    if (body.protocol !== SYNC_PROTOCOL_VERSION) throw new MnemoWeaveError('UNSUPPORTED_VERSION');
     return body;
   }
 
-  async scopes(): Promise<SyncScopesValue> {
-    return SyncScopesOutput.parse(await this.send('/v1/sync/scopes'));
+  async streams(): Promise<SyncStreamsValue> {
+    return SyncStreamsOutput.parse(await this.send('/v1/sync/streams'));
   }
 
   async submitChange(change: SyncChangeRequest): Promise<SyncAcceptedValue> {
@@ -76,17 +82,14 @@ export class SyncClient implements SyncRemotePort {
 
   async pullChanges(query: SyncPullRequest): Promise<SyncPullPageValue> {
     const parsed = SyncPullInput.parse(query);
-    const search = new URLSearchParams({ scope: parsed.scope, since: String(parsed.since), limit: String(parsed.limit) });
+    const search = new URLSearchParams({ stream: parsed.stream, since: String(parsed.since), limit: String(parsed.limit) });
     return SyncPullPage.parse(await this.send(`/v1/sync/changes?${search.toString()}`));
   }
 
-  /** Port adapter used by the coordinator. */
-  push(change: SyncChangeRequest): Promise<SyncAcceptedValue> {
-    return this.submitChange(change);
-  }
+  push(change: SyncChangeRequest): Promise<SyncAcceptedValue> { return this.submitChange(change); }
 
-  pull(scope: string, since: number, limit: number): Promise<SyncPullPageValue> {
-    return this.pullChanges({ scope, since, limit });
+  pull(stream: string, since: number, limit: number): Promise<SyncPullPageValue> {
+    return this.pullChanges({ stream, since, limit });
   }
 
   /** `null` means the remote has no receipt: the change never landed. */
@@ -103,8 +106,8 @@ export class SyncClient implements SyncRemotePort {
     return SyncEntry.parse(await this.send(`/v1/sync/entries/${encodeURIComponent(entryId)}`));
   }
 
-  async snapshot(scope: string): Promise<SyncSnapshotValue> {
-    return SyncSnapshot.parse(await this.send(`/v1/sync/snapshot?${new URLSearchParams({ scope }).toString()}`));
+  async snapshot(stream: string): Promise<SyncSnapshotValue> {
+    return SyncSnapshot.parse(await this.send(`/v1/sync/snapshot?${new URLSearchParams({ stream }).toString()}`));
   }
 
   private async send(path: string, init: RequestInit = {}): Promise<unknown> {
@@ -114,9 +117,17 @@ export class SyncClient implements SyncRemotePort {
       const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
         ...init,
         signal: controller.signal,
-        headers: { authorization: `Bearer ${this.token}`, ...(init.headers ?? {}) },
+        headers: {
+          authorization: `Bearer ${this.token}`,
+          [SYNC_PROTOCOL_HEADER]: String(SYNC_PROTOCOL_VERSION),
+          ...(init.headers ?? {}),
+        },
       });
       const text = await response.text();
+      if (response.status === 409) {
+        const parsed = text ? JSON.parse(text) as { code?: unknown } : {};
+        if (parsed.code === 'SYNC_PROTOCOL_MISMATCH') throw new MnemoWeaveError('UNSUPPORTED_VERSION');
+      }
       const body: unknown = text ? JSON.parse(text) : {};
       if (!response.ok) throw this.mapError(response.status, body);
       return body;
@@ -154,7 +165,6 @@ function neverLeftMachine(error: unknown): boolean {
     seen.add(current);
     const code = (current as { code?: unknown }).code;
     if (code === 'ECONNREFUSED' || code === 'ENOTFOUND' || code === 'EAI_AGAIN') return true;
-    // The fetch implementation rejects some ports before opening a socket.
     if ((current as { message?: unknown }).message === 'bad port') return true;
     const cause = (current as { cause?: unknown }).cause;
     if (cause) queue.push(cause);

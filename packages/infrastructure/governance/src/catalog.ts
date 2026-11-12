@@ -52,9 +52,8 @@ export class SqliteMemoryCatalog implements MemoryCatalogReader {
   setSyncHook(hook: SyncHook | undefined): void { this.syncHook = hook; }
   private emit(op: string, entityId: string, payload: Record<string, unknown>): void { if (this.syncHook) this.syncHook(op, entityId, payload); }
   /**
-   * Whether this database already carries the memory owner. The catalogue migrates at schema 2,
-   * before the governance layer reaches the version that adds the column, so the backfill must
-   * still write a usable row without it.
+   * Ownership columns exist in older databases but carry no meaning in the shared collection.
+   * Every new row writes `scope='global'` and no owner; the reader never exposes either field.
    */
   private hasProjectColumn(): boolean {
     return this.db.prepare("SELECT 1 FROM pragma_table_info('catalog_memories') WHERE name='project_id'").get() !== undefined;
@@ -126,7 +125,7 @@ export class SqliteMemoryCatalog implements MemoryCatalogReader {
     this.assertUnambiguousPublication(providerId);
     const memoryId = randomUUID(); const revisionId = randomUUID();
     if (this.hasProjectColumn()) {
-      this.db.prepare('INSERT INTO catalog_memories(id,current_revision_id,state,scope,applicability,project_id) VALUES(?,?,?,?,?,?)').run(memoryId, null, 'active', request.projectId ? 'project' : 'global', request.provenance.applicability, request.projectId ?? null);
+      this.db.prepare('INSERT INTO catalog_memories(id,current_revision_id,state,scope,applicability,project_id) VALUES(?,?,?,?,?,?)').run(memoryId, null, 'active', 'global', request.provenance.applicability, null);
     } else {
       this.db.prepare('INSERT INTO catalog_memories VALUES(?,?,?,?,?)').run(memoryId, null, 'active', 'global', request.provenance.applicability);
     }
@@ -183,17 +182,7 @@ export class SqliteMemoryCatalog implements MemoryCatalogReader {
     const relations = this.db.prepare('SELECT * FROM catalog_relations WHERE source_memory_id=? OR target_memory_id=?').all(memoryId,memoryId).map(row => ({ id: row['id'], kind: row['kind'], sourceMemoryId: row['source_memory_id'], sourceRevisionId: row['source_revision_id'], targetMemoryId: row['target_memory_id'], targetRevisionId: row['target_revision_id'], effectiveAt: row['effective_at'], reason: row['reason'], evidence: JSON.parse(String(row['evidence_json'])), nativeProjected: row['native_projected'] === 1 }));
     const conflicts=this.db.prepare('SELECT id FROM catalog_conflicts WHERE target_memory_id=?').all(memoryId).map(row=>this.getConflict(String(row['id'])));
     const current = revisions.find(row => row.id === memory['current_revision_id']);
-    return MemoryDescriptor.parse({ id: memory['id'], currentRevisionId: memory['current_revision_id'], state: memory['state'], applicability: memory['applicability'], ...(this.hasProjectColumn() ? { projectId: memory['project_id'] ?? null } : {}), revisions, relations,conflicts });
-  }
-  /** Owning project of one memory; null means general knowledge. */
-  memoryProject(memoryId: string): string | null {
-    const row = this.db.prepare('SELECT project_id FROM catalog_memories WHERE id=?').get(memoryId);
-    if (!row) throw new MnemoWeaveError('NOT_FOUND');
-    return row['project_id'] === null || row['project_id'] === undefined ? null : String(row['project_id']);
-  }
-  /** Distinct owning projects present in the catalogue. */
-  projects(): string[] {
-    return this.db.prepare('SELECT DISTINCT project_id FROM catalog_memories WHERE project_id IS NOT NULL ORDER BY project_id').all().map(row => String(row['project_id']));
+    return MemoryDescriptor.parse({ id: memory['id'], currentRevisionId: memory['current_revision_id'], state: memory['state'], applicability: memory['applicability'], revisions, relations, conflicts });
   }
   /**
    * Every catalogued relation, for the graph view.
@@ -338,19 +327,13 @@ export class SqliteMemoryCatalog implements MemoryCatalogReader {
     meta?: RevisionMeta;
   }): void {
     const meta = input.meta ?? {};
-    // The revision records the scope it was written under. Reading it from the memory row keeps
-    // the two in step even when a synced revision arrives for an existing owner. A database that
-    // predates the owner column keeps the older global scope.
-    const owner = this.hasProjectColumn()
-      ? this.db.prepare('SELECT project_id FROM catalog_memories WHERE id=?').get(input.memoryId)
-      : undefined;
     this.db.prepare(`INSERT INTO catalog_revisions(
       id,memory_id,revision_number,parent_id,provider_memory_id,content_hash,candidate_id,
       published_at,effective_at,applicability,scope,knowledge_type,category,importance,tags_json,entities_json
     ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
       input.id, input.memoryId, input.number, input.parentId, input.providerMemoryId, input.contentHash,
       input.candidateId, input.publishedAt, input.effectiveAt, input.applicability,
-      owner?.['project_id'] === null || owner?.['project_id'] === undefined ? 'global' : 'project',
+      'global',
       meta.knowledgeType ?? null, meta.category ?? null, meta.importance ?? null,
       meta.tags === undefined ? null : JSON.stringify(meta.tags),
       meta.entities === undefined ? null : JSON.stringify(meta.entities),
@@ -365,7 +348,7 @@ export class SqliteMemoryCatalog implements MemoryCatalogReader {
     this.assertUnambiguousPublication(providerId,plan.memoryId);
     if (plan.kind !== 'revise') {
       if (this.hasProjectColumn()) {
-        this.db.prepare('INSERT INTO catalog_memories(id,current_revision_id,state,scope,applicability,project_id) VALUES(?,?,?,?,?,?)').run(plan.memoryId,null,'active',request.projectId ? 'project' : 'global',request.provenance.applicability,request.projectId ?? null);
+        this.db.prepare('INSERT INTO catalog_memories(id,current_revision_id,state,scope,applicability,project_id) VALUES(?,?,?,?,?,?)').run(plan.memoryId,null,'active','global',request.provenance.applicability,null);
       } else {
         this.db.prepare('INSERT INTO catalog_memories VALUES(?,?,?,?,?)').run(plan.memoryId,null,'active','global',request.provenance.applicability);
       }
@@ -484,7 +467,7 @@ export class SqliteMemoryCatalog implements MemoryCatalogReader {
       if (!memory) {
         const revisionId = randomUUID();
         if (this.hasProjectColumn()) {
-          this.db.prepare('INSERT INTO catalog_memories(id,current_revision_id,state,scope,applicability,project_id) VALUES(?,?,?,?,?,?)').run(memoryId, null, 'active', request.projectId ? 'project' : 'global', request.provenance.applicability, request.projectId ?? null);
+          this.db.prepare('INSERT INTO catalog_memories(id,current_revision_id,state,scope,applicability,project_id) VALUES(?,?,?,?,?,?)').run(memoryId, null, 'active', 'global', request.provenance.applicability, null);
         } else {
           this.db.prepare('INSERT INTO catalog_memories VALUES(?,?,?,?,?)').run(memoryId, null, 'active', 'global', request.provenance.applicability);
         }

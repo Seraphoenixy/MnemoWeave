@@ -79,8 +79,12 @@ export function validatePreferences(patch) {
         if (typeof value !== 'number' || !Number.isInteger(value) || value < 5 || value > 200) throw new Error('pageSize must be an integer between 5 and 200');
         next.pageSize = value;
         break;
-      case 'projectId':
-        // Retired with the injection project; see `defaultScope` above.
+      case 'workspaceId':
+        // An explicit workspace binding for cases where the host has no workspace root directory.
+        if (value !== null && (typeof value !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value))) {
+          throw new Error('workspaceId must be null or a UUID');
+        }
+        next.workspaceId = value === null ? null : value;
         break;
       case 'injectTimeoutMs':
         // The injection budget is part of the turn's 2-second deadline, so it cannot exceed it.
@@ -174,11 +178,16 @@ export function resolveHostConfig(entryConfig, env = process.env, preferences = 
   const hostId = storedHost ?? entryHost ?? envHost ?? DEFAULT_HOST_ID;
   sources.hostId = storedHost !== undefined ? 'preference' : entryHost !== undefined ? 'profile' : envHost !== undefined ? 'environment' : 'default';
 
-  const entryProject = pick(entry.projectId);
-  const envProject = pick(env.MNEMOWEAVE_PROJECT_ID);
-  const storedProject = preferences.projectId ?? undefined;
-  const projectId = storedProject ?? entryProject ?? envProject;
-  sources.projectId = storedProject !== undefined ? 'preference' : entryProject !== undefined ? 'profile' : envProject !== undefined ? 'environment' : 'default';
+  // The project-based configuration is gone with the workspace model. A stale value is reported
+  // once so the operator moves to `MNEMOWEAVE_WORKSPACE_ID` instead of wondering why it is ignored.
+  if (pick(entry.projectId) !== undefined || pick(env.MNEMOWEAVE_PROJECT_ID) !== undefined) {
+    process.stderr.write(`${JSON.stringify({ event: 'config_expired', variable: 'MNEMOWEAVE_PROJECT_ID', replacement: 'MNEMOWEAVE_WORKSPACE_ID' })}\n`);
+  }
+  const entryWorkspace = pick(entry.workspaceId);
+  const envWorkspace = pick(env.MNEMOWEAVE_WORKSPACE_ID);
+  const storedWorkspace = preferences.workspaceId ?? undefined;
+  const workspaceId = storedWorkspace ?? entryWorkspace ?? envWorkspace;
+  sources.workspaceId = storedWorkspace !== undefined ? 'preference' : entryWorkspace !== undefined ? 'profile' : envWorkspace !== undefined ? 'environment' : 'default';
 
   const entryTimeout = typeof entry.timeoutMs === 'number' ? entry.timeoutMs : undefined;
   const injectTimeoutMs = entryTimeout ?? preferences.injectTimeoutMs;
@@ -188,7 +197,7 @@ export function resolveHostConfig(entryConfig, env = process.env, preferences = 
     serverUrl,
     token,
     hostId,
-    projectId,
+    workspaceId,
     injectTimeoutMs: Math.min(Math.max(injectTimeoutMs, MIN_INJECT_TIMEOUT_MS), MAX_INJECT_TIMEOUT_MS),
     autoStart: preferences.autoStart,
     preferences: {
@@ -205,7 +214,7 @@ export function resolveHostConfig(entryConfig, env = process.env, preferences = 
   return {
     serverUrl: resolved.serverUrl,
     hostId: resolved.hostId,
-    projectId: resolved.projectId ?? null,
+    workspaceId: resolved.workspaceId ?? null,
     injectTimeoutMs: resolved.injectTimeoutMs,
     autoStart: resolved.autoStart,
     taskName: resolved.taskName,

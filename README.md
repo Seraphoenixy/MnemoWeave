@@ -38,7 +38,7 @@ $env:MNEMOWEAVE_OPERATOR_TOKEN = [Convert]::ToHexString([Security.Cryptography.R
 node dist/apps/server/src/main.js
 ```
 
-默认地址为 `http://127.0.0.1:4317`。将服务令牌配置给宿主，operator 令牌仅供管理端。stdio MCP 入口为 `dist/apps/server/src/mcp-main.js`。治理库当前 schema v21，迁移和恢复见 [实现文档](docs/implementation.md)。
+默认地址为 `http://127.0.0.1:4317`。将服务令牌配置给宿主，operator 令牌仅供管理端。stdio MCP 入口为 `dist/apps/server/src/mcp-main.js`。治理库当前 schema v22，迁移和恢复见 [实现文档](docs/implementation.md)。
 
 ## 发布与安装
 

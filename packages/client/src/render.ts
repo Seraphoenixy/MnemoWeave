@@ -1,37 +1,19 @@
-/** Renders one immutable View into the text a Host injects into the conversation. */
-export interface RenderableView {
-  viewId?: string | undefined;
-  guidance?: string | undefined;
+/** Renders the complete resident rule set into the text a Host injects into the conversation. */
+export interface RenderableRules {
   rules?: Array<{ body?: string | undefined }> | undefined;
-  rulesBudget?: { exceeded?: boolean | undefined } | undefined;
-  workingContext?: Array<{ text?: string | undefined }> | undefined;
-  memories?: Array<{
-    content: string;
-    excerpt?: boolean | undefined;
-    applicability?: string | undefined;
-    sourceReference?: string | undefined;
-  }> | undefined;
+  /** False when the host could not deliver every rule whole; a partial set is never rendered. */
+  complete?: boolean | undefined;
+  failure?: 'deadline' | 'output_limit' | 'request_failed' | undefined;
 }
 
 /**
- * Injection order is fixed: server guidance, then the confirmed rules, then working context,
- * then formal memories. A rule omitted for budget is named instead of disappearing, so the
- * model can tell "no rules apply" from "rules were dropped".
+ * Every rule whole, in the order the Server returned. The renderer never trims, reorders or
+ * drops a rule to fit: it renders nothing when the delivery was incomplete, and the host reports
+ * the failure instead. A partial block would let the model believe a rule had been removed.
  */
-export function renderView(view: RenderableView): string {
-  const blocks: string[] = [];
-  if (typeof view.guidance === 'string' && view.guidance.trim() !== '') blocks.push(view.guidance.trim());
-  const rules = (view.rules ?? []).map(rule => rule.body ?? '').filter(body => body.trim() !== '');
-  if (rules.length > 0) blocks.push(`Runtime rules (confirmed by the user, follow them):\n${rules.map(rule => `- ${rule.trim()}`).join('\n')}`);
-  else if (view.rulesBudget?.exceeded === true) blocks.push('Runtime rules were omitted: the budget was exceeded.');
-  const working = (view.workingContext ?? []).map(entry => entry.text ?? '').filter(text => text.trim() !== '');
-  if (working.length > 0) blocks.push(`Working context (unverified session material):\n${working.join('\n')}`);
-  const memories = (view.memories ?? []).filter(memory => memory.content.trim() !== '');
-  if (memories.length > 0) {
-    blocks.push(`Formal memories:\n${memories.map(memory => {
-      const truncated = memory.excerpt === true ? ' [excerpt]' : '';
-      return `- ${memory.content}${truncated}`;
-    }).join('\n')}`);
-  }
-  return blocks.join('\n\n');
+export function renderRules(view: RenderableRules): string {
+  if (view.complete === false) return '';
+  const bodies = (view.rules ?? []).map(rule => rule.body ?? '').filter(body => body.trim() !== '');
+  if (bodies.length === 0) return '';
+  return `准则（用户确认，按此执行）：\n${bodies.map(body => `- ${body.trim()}`).join('\n')}`;
 }

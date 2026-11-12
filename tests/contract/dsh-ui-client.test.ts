@@ -131,7 +131,9 @@ test('the page renders its editable shell and names unavailable data instead of 
   assert.doesNotMatch(html, /直连 MnemoWeave Server/, 'no subtitle repeats the transport');
   assert.doesNotMatch(html, /主机:/, 'the host id is not repeated in the header');
   // The five class tabs are the top-level navigation; overview is the landing page.
-  for (const label of ['概览', '运行时记忆', '项目档案', '正式记忆', '设置']) assert.match(html, new RegExp(label));
+  // The tab bar uses the workspace model's names; the retired labels must not reappear.
+  for (const label of ['概览', '准则', '工作区档案', '正式记忆', '设置']) assert.match(html, new RegExp(label));
+  for (const retired of ['运行时记忆', '项目档案']) assert.doesNotMatch(html, new RegExp(retired));
   assert.match(html, /最近一次注入/);
   assert.match(html, /尚无注入记录/);
   assert.match(html, /本机与远端同步/);
@@ -165,7 +167,7 @@ test('the page calls the Host channel by endpoint and keeps Server error codes',
   await api.edit({ memoryId: 'memory-1', content: 'next text', reason: 'fix', entryVersion: 3 });
   await api.injection();
   await api.rules();
-  await api.archives();
+  await api.archives('11111111-1111-4111-8111-111111111111');
   await api.sync();
   await api.syncRefresh();
   assert.deepEqual(calls.map(call => call.endpoint), ['status', 'config', 'memories', 'memory', 'edit', 'injection', 'rules', 'archives', 'sync', 'syncRefresh']);
@@ -315,21 +317,24 @@ test('the Host RPC validates requests before the Server call and passes Server c
 test('the Host RPC exposes rules, archives and the local-to-remote sync state', async () => {
   const source = {
     ...stubSource({}),
-    rules: async () => [{ entryId: 'r1', scope: 'global', projectId: null, body: '准则', enabled: true, version: 1, withdrawnAt: null }],
-    archives: async () => [{ entryId: 'a1', projectId: 'alpha', title: '标题', body: '正文', source: 'tool', verification: 'open', evidence: '证据', version: 1, withdrawnAt: null }],
-    sync: async () => ({ enabled: true, scopes: [{ scope: 'global', cursor: 3, lastPullAt: null, lastError: null, pending: 1, unknown: 0, unapplied: 0 }], updatedAt: '2026-11-10T08:00:00.000Z' }),
-    refreshSync: async () => ({ scopes: ['global'], pulled: 1, applied: 1, errors: [], skipped: false }),
+    rules: async () => [{ entryId: 'r1', body: '准则', enabled: true, version: 1, withdrawnAt: null }],
+    archives: async () => [{ entryId: 'a1', workspaceId: '11111111-1111-4111-8111-111111111111', title: '标题', body: '正文', source: 'tool', verification: 'open', evidence: '证据', version: 1, withdrawnAt: null }],
+    sync: async () => ({ enabled: true, protocol: 2, streams: [{ stream: 'rules', cursor: 3, lastPullAt: null, lastError: null, pending: 1, unknown: 0, unapplied: 0 }], updatedAt: '2026-11-10T08:00:00.000Z' }),
+    refreshSync: async () => ({ streams: ['rules'], pulled: 1, applied: 1, errors: [], skipped: false }),
   } as unknown as MemorySource;
   const handler = createRpcHandler(source);
   const rules = await handler('rules', {});
   assert.equal(rules.ok, true);
   if (rules.ok) assert.equal((rules.value as Array<{ body: string }>)[0]?.body, '准则');
-  const archives = await handler('archives', {});
+  // The archive list is always bounded to one workspace; without one the request is refused.
+  const noWorkspace = await handler('archives', {});
+  assert.equal(noWorkspace.ok, false);
+  const archives = await handler('archives', { workspaceId: '11111111-1111-4111-8111-111111111111' });
   assert.equal(archives.ok, true);
-  if (archives.ok) assert.equal((archives.value as Array<{ projectId: string }>)[0]?.projectId, 'alpha');
+  if (archives.ok) assert.equal((archives.value as Array<{ workspaceId: string }>)[0]?.workspaceId, '11111111-1111-4111-8111-111111111111');
   const sync = await handler('sync', {});
   assert.equal(sync.ok, true);
-  if (sync.ok) assert.equal((sync.value as { scopes: Array<{ pending: number }> }).scopes[0]?.pending, 1);
+  if (sync.ok) assert.equal((sync.value as { streams: Array<{ pending: number }> }).streams[0]?.pending, 1);
   const pass = await handler('syncRefresh', {});
   assert.equal(pass.ok, true);
 });

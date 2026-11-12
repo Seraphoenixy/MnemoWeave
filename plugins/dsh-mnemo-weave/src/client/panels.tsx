@@ -1,4 +1,4 @@
-import type { UiArchive, UiArchiveCapacity, UiArchiveHistory, UiConfigView, UiConnectionTest, UiEmbeddingDiagnostics, UiExplore, UiGraph, UiInjection, UiMemoryList, UiRegisterTest, UiRule, UiRuleUsage, UiSettings, UiStatus, UiSyncPass, UiSyncStatus, UiWakeTest } from '../shared/contract.ts';
+import type { UiArchive, UiArchiveCapacity, UiArchiveHistory, UiConfigView, UiConnectionTest, UiEmbeddingDiagnostics, UiExplore, UiGraph, UiInjection, UiMemoryList, UiRegisterTest, UiRule, UiRuleUsage, UiSettings, UiStatus, UiSyncPass, UiSyncStatus, UiWakeTest, UiWorkspace } from '../shared/contract.ts';
 import { translate, type Language, type MessageKey } from './i18n.ts';
 import { Modal } from './modal.tsx';
 import { filterEntities, formatDateTime, relativeTime, utf8Bytes } from './view-model.ts';
@@ -62,8 +62,16 @@ function Card({ label, value, hint }: { label: string; value: string; hint?: str
   );
 }
 
-function scopeLabel(value: string, language: Language): string {
-  return value === 'global' ? translate(language, 'common.global') : value;
+/**
+ * A stream is `rules`, `formal-memories` or `workspace-archives:<workspaceId>`. The two fixed
+ * streams get a readable name; a workspace stream keeps its id, because the name is a local
+ * choice and two devices may spell it differently.
+ */
+function streamLabel(value: string, language: Language): string {
+  if (value === 'rules') return translate(language, 'sync.stream.rules');
+  if (value === 'formal-memories') return translate(language, 'sync.stream.formal');
+  if (value.startsWith('workspace-archives:')) return `${translate(language, 'sync.stream.workspace')} ${value.slice('workspace-archives:'.length)}`;
+  return value;
 }
 
 export interface OverviewProps {
@@ -82,9 +90,6 @@ export interface OverviewProps {
 /** One screen: how much of each class exists, what the last injection carried, whether sync runs. */
 export function OverviewPanel(props: OverviewProps): ReactNode {
   const { status, config, injection, memories, rules, archives, sync, language, now } = props;
-  // Projects are an archive dimension: memories and rules no longer carry one.
-  const projects = new Set<string>();
-  for (const archive of archives ?? []) projects.add(archive.projectId);
 
   return (
     <div className="mwui-page">
@@ -92,7 +97,7 @@ export function OverviewPanel(props: OverviewProps): ReactNode {
         <Card label={translate(language, 'overview.memories')} value={memories === null || memories === undefined ? '—' : String(memories.items.length)} hint={translate(language, 'overview.openMemories')} />
         <Card label={translate(language, 'overview.runtime')} value={countOf(rules)} hint={translate(language, 'overview.openRules')} />
         <Card label={translate(language, 'overview.archives')} value={countOf(archives)} hint={translate(language, 'overview.openArchives')} />
-        <Card label={translate(language, 'overview.projects')} value={String(projects.size)} hint={translate(language, 'overview.scopes', { count: projects.size })} />
+        <Card label={translate(language, 'overview.workspaces')} value={String(new Set((archives ?? []).map(archive => archive.workspaceId)).size)} hint={translate(language, 'overview.workspacesHint')} />
       </div>
 
       <section className="mwui-pane">
@@ -102,12 +107,11 @@ export function OverviewPanel(props: OverviewProps): ReactNode {
             ? <span className="mwui-muted">{translate(language, 'injection.none')}</span>
             : (
               <>
-                <div className="mwui-kv"><span>{translate(language, 'injection.rules')}</span><span>{injection.rulesInjected}</span></div>
-                <div className="mwui-kv"><span>{translate(language, 'injection.memories')}</span><span>{injection.memoriesInjected}</span></div>
-                <div className="mwui-kv"><span>{translate(language, 'injection.tokens')}</span><span>{injection.usedTokens}</span></div>
+                <div className="mwui-kv"><span>{translate(language, 'injection.rules')}</span><span>{injection.ruleCount}</span></div>
+                <div className="mwui-kv"><span>{translate(language, 'injection.bytes')}</span><span>{injection.usedBytes}</span></div>
                 <div className="mwui-kv"><span>{translate(language, 'injection.session')}</span><span className="mwui-mono">{injection.sessionId}</span></div>
                 <div className="mwui-kv"><span>{translate(language, 'injection.at')}</span><span>{formatDateTime(injection.createdAt)} · {relativeTime(injection.createdAt, now, language)}</span></div>
-                {injection.rulesOmitted === null ? null : <div className="mwui-kv" data-tone="warn"><span>{translate(language, 'injection.omitted')}</span><span>{injection.rulesOmitted}</span></div>}
+                {injection.failure === undefined ? null : <div className="mwui-kv" data-tone="warn"><span>{translate(language, 'injection.failure')}</span><span>{translate(language, `injection.failure.${injection.failure}` as MessageKey)}</span></div>}
               </>
             )}
         </div>
@@ -122,9 +126,9 @@ export function OverviewPanel(props: OverviewProps): ReactNode {
               ? <span className="mwui-muted">{translate(language, 'sync.off')}</span>
               : (
                 <>
-                  <div className="mwui-kv"><span>{translate(language, 'sync.scopes')}</span><span>{sync.scopes.length}</span></div>
-                  <div className="mwui-kv"><span>{translate(language, 'sync.pending')}</span><span>{sync.scopes.reduce((sum, item) => sum + item.pending, 0)}</span></div>
-                  <div className="mwui-kv"><span>{translate(language, 'sync.unapplied')}</span><span>{sync.scopes.reduce((sum, item) => sum + item.unapplied, 0)}</span></div>
+                  <div className="mwui-kv"><span>{translate(language, 'sync.streams')}</span><span>{sync.streams.length}</span></div>
+                  <div className="mwui-kv"><span>{translate(language, 'sync.pending')}</span><span>{sync.streams.reduce((sum, item) => sum + item.pending, 0)}</span></div>
+                  <div className="mwui-kv"><span>{translate(language, 'sync.unapplied')}</span><span>{sync.streams.reduce((sum, item) => sum + item.unapplied, 0)}</span></div>
                   <div className="mwui-kv"><span>{translate(language, 'sync.updated')}</span><span>{formatDateTime(sync.updatedAt)}</span></div>
                 </>
               )}
@@ -438,11 +442,39 @@ export interface ArchivesProps {
   error: string | null;
   selected: string | null;
   language: Language;
+  /** Workspaces the user may reach; the pane reads one of them at a time. */
+  workspaces?: UiWorkspace[] | undefined;
+  /** The selected workspace; null until one is chosen or when none is accessible. */
+  workspace: string | null;
+  onWorkspace?(workspaceId: string): void;
   onSelect(id: string): void;
   onSave?(draft: import("../shared/contract.ts").UiArchiveDraft, target: UiArchive | null): Promise<void>;
   onSetState?(entryId: string, state: 'active' | 'archived', baseVersion: number): Promise<void>;
+  /** 「提炼为正式记忆」: preview state, its result and the three user actions. */
+  distillation?: DistillationState | null | undefined;
+  /**
+   * Capacity maintenance: the rows that would free room, oldest-confirmed first.
+   *
+   * Offered only after a write was refused for capacity (or while the workspace measures over
+   * it): a suggestion shown at all times would be noise for a workspace with room.
+   */
+  releaseCandidates?: import("../shared/contract.ts").UiArchiveReleaseCandidates | null | undefined;
+  showReleaseCandidates?: boolean | undefined;
 }
-export function ArchivesPanel({ archives, capacities, history, error, selected, language, onSelect, onSave, onSetState }: ArchivesProps): ReactNode {
+export interface DistillationState {
+  draft: import("../shared/contract.ts").UiDistillationDraft | null;
+  skip: import("../shared/contract.ts").UiDistillationSkip | null;
+  busy: boolean;
+  result: import("../shared/contract.ts").UiDistillationResult | null;
+  error: string | null;
+  onStart(entryId: string): void;
+  onConfirm(): void;
+  onDiscard(): void;
+  /** When the user chose 「提炼后归档」, archive the source after a published or duplicate result. */
+  thenArchive: boolean;
+  onToggleThenArchive(enabled: boolean): void;
+}
+export function ArchivesPanel({ archives, capacities, history, error, selected, language, workspaces, workspace, onWorkspace, onSelect, onSave, onSetState, distillation, releaseCandidates, showReleaseCandidates }: ArchivesProps): ReactNode {
   const [draft, setDraft] = useState<UiArchive | null | undefined>(undefined);
   const [query, setQuery] = useState('');
   const [saving, setSaving] = useState(false);
@@ -461,7 +493,7 @@ export function ArchivesPanel({ archives, capacities, history, error, selected, 
     setDirty(false);
   };
   const visible = (archives ?? []).filter(item =>
-    [item.title, item.projectId, item.body].some(value => value.toLowerCase().includes(query.trim().toLowerCase())));
+    [item.title, item.workspaceId, item.body].some(value => value.toLowerCase().includes(query.trim().toLowerCase())));
   const current = (archives ?? []).find(archive => archive.entryId === selected) ?? null;
   const capacity = (capacities ?? []).reduce((sum, item) => ({ activeBytes: sum.activeBytes + item.activeBytes, limitBytes: sum.limitBytes + item.limitBytes, exceeded: sum.exceeded || item.exceeded }), { activeBytes: 0, limitBytes: 0, exceeded: false });
   return (
@@ -473,8 +505,51 @@ export function ArchivesPanel({ archives, capacities, history, error, selected, 
           {capacities === null || capacities === undefined || capacities.length === 0
             ? null
             : <span className="mwui-item-meta" data-tone={capacity.exceeded ? 'warn' : undefined}>{capacity.activeBytes}/{capacity.limitBytes} B</span>}
-          {onSave && <button type="button" className="mwui-button mwui-mini" onClick={() => open(null)}>{translate(language, 'archives.create')}</button>}
+          {onWorkspace === undefined ? null : (
+            <label className="mwui-filter">
+              <span>{translate(language, 'archives.workspacePicker')}</span>
+              <select
+                className="mwui-input mwui-select"
+                aria-label={translate(language, 'archives.workspacePicker')}
+                value={workspace ?? ''}
+                onChange={event => onWorkspace(event.currentTarget.value)}
+              >
+                {(workspaces ?? []).length === 0
+                  ? <option value="">{translate(language, 'archives.noWorkspace')}</option>
+                  : (workspaces ?? []).map(entry => (
+                    <option key={entry.workspaceId} value={entry.workspaceId}>{entry.name}</option>
+                  ))}
+              </select>
+            </label>
+          )}
+          {onSave && workspace !== null && <button type="button" className="mwui-button mwui-mini" onClick={() => open(null)}>{translate(language, 'archives.create')}</button>}
         </div>
+        {releaseCandidates === null || releaseCandidates === undefined || !releaseCandidates.capacity.exceeded
+          ? null
+          : (
+            <div className="mwui-form" role="group" aria-label={translate(language, 'archives.capacityMaintenance')}>
+              <div className="mwui-section-title">{translate(language, 'archives.capacityMaintenance')}</div>
+              <ol className="mwui-list">
+                {releaseCandidates.items.map(item => (
+                  <li key={item.entryId}>
+                    <button type="button" className="mwui-item" onClick={() => onSelect(item.entryId)}>
+                      <span className="mwui-item-title">{item.title}</span>
+                      <span className="mwui-item-meta">
+                        <span>{item.bodyBytes} B</span>
+                        <span>·</span>
+                        <span>{translate(language, 'common.version')} {item.version}</span>
+                        <span>·</span>
+                        <span>{formatDateTime(item.updatedAt)}</span>
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ol>
+              {releaseCandidates.remaining === 0
+                ? null
+                : <div className="mwui-muted">{translate(language, 'archives.capacityRemaining').replace('{count}', String(releaseCandidates.remaining))}</div>}
+            </div>
+          )}
         <input type="search" aria-label={translate(language, 'archives.search')} placeholder={translate(language, 'archives.search')} value={query} onChange={event => setQuery(event.currentTarget.value)} />
         <ul className="mwui-list">
           {archives === undefined
@@ -482,14 +557,14 @@ export function ArchivesPanel({ archives, capacities, history, error, selected, 
             : archives === null
               ? <li className="mwui-empty">{translate(language, 'panel.unavailable')}{error === null ? '' : ` · ${error}`}</li>
             : visible.length === 0
-              ? <li className="mwui-empty">{translate(language, 'archives.empty')}</li>
+              ? <li className="mwui-empty">{translate(language, workspace === null ? 'archives.noWorkspace' : 'archives.empty')}</li>
               : visible.map(archive => (
                 <li key={archive.entryId}>
                   <button type="button" className="mwui-item" data-active={archive.entryId === selected ? 'true' : 'false'} disabled={draft !== undefined} onClick={() => onSelect(archive.entryId)}>
                     <span className="mwui-item-title">{archive.title}</span>
                     <span className="mwui-item-excerpt">{archive.body}</span>
                     <span className="mwui-item-meta">
-                      <span>{archive.projectId}</span>
+                      <span>{translate(language, 'archives.workspace')}</span>
                       <span>·</span>
                       <span>{verificationText(archive.verification, language)}</span>
                       <span>·</span>
@@ -514,6 +589,16 @@ export function ArchivesPanel({ archives, capacities, history, error, selected, 
                   {onSave && current.state === 'active'
                     ? <button type="button" className="mwui-button" onClick={() => open(current)}>{translate(language, 'archives.edit')}</button>
                     : null}
+                  {distillation !== null && distillation !== undefined && current.state !== undefined
+                    ? <button
+                        type="button"
+                        className="mwui-button"
+                        disabled={distillation.busy}
+                        onClick={() => distillation.onStart(current.entryId)}
+                      >
+                        {translate(language, distillation.busy ? 'archives.distillBusy' : 'archives.distill')}
+                      </button>
+                    : null}
                   {onSetState
                     ? <button
                         type="button"
@@ -535,7 +620,7 @@ export function ArchivesPanel({ archives, capacities, history, error, selected, 
               ) : null}
               {stateError === undefined ? null : <div className="mwui-inline-error" role="alert">{stateError}</div>}
               <div className="mwui-chips">
-                <span className="mwui-chip"><span className="mwui-chip-label">{translate(language, 'common.project')}</span><span className="mwui-chip-value">{current.projectId}</span></span>
+                <span className="mwui-chip"><span className="mwui-chip-label">{translate(language, 'archives.workspace')}</span><span className="mwui-chip-value">{current.workspaceId}</span></span>
                 <span className="mwui-chip"><span className="mwui-chip-label">{translate(language, 'archives.source')}</span><span className="mwui-chip-value">{current.source}</span></span>
                 <span className="mwui-chip" data-tone={current.verification === 'verified' ? 'ok' : 'warn'}><span className="mwui-chip-label">{translate(language, 'archives.verification')}</span><span className="mwui-chip-value">{verificationText(current.verification, language)}</span></span>
                 <span className="mwui-chip" data-tone={current.state === 'archived' ? 'warn' : 'ok'}><span className="mwui-chip-label">{translate(language, 'archives.state')}</span><span className="mwui-chip-value">{translate(language, current.state === 'archived' ? 'archives.archived' : 'archives.active')}</span></span>
@@ -550,6 +635,54 @@ export function ArchivesPanel({ archives, capacities, history, error, selected, 
                 <h4 className="mwui-section-title">{translate(language, 'archives.evidence')}</h4>
                 <div className="mwui-content mwui-muted">{current.evidence}</div>
               </div>
+              {distillation === null || distillation === undefined || (distillation.draft === null && distillation.skip === null)
+                ? null
+                : (
+                  <div className="mwui-form" role="group" aria-label={translate(language, 'archives.distillTitle')}>
+                    <h4 className="mwui-section-title">{translate(language, 'archives.distillTitle')}</h4>
+                    {distillation.error === null ? null : <div className="mwui-inline-error" role="alert">{distillation.error}</div>}
+                    {distillation.skip === null ? null : (
+                      <div className="mwui-muted">{translate(language, 'archives.distillSkipped')} · {distillation.skip.reason}</div>
+                    )}
+                    {distillation.draft === null ? null : (
+                      <>
+                        <div className="mwui-content">{distillation.draft.content}</div>
+                        <div className="mwui-item-meta">
+                          <span>{distillation.draft.knowledgeType}</span>
+                          <span>·</span>
+                          <span>{translate(language, 'archives.distillRange')} {distillation.draft.usedRange.start}–{distillation.draft.usedRange.end}</span>
+                          {distillation.draft.usedRange.truncated ? <span>（已截取）</span> : null}
+                        </div>
+                        <div className="mwui-muted">{translate(language, 'archives.distillShare')}</div>
+                        <label className="mwui-filter">
+                          <input
+                            type="checkbox"
+                            checked={distillation.thenArchive}
+                            disabled={distillation.busy || distillation.result !== null}
+                            onChange={event => distillation.onToggleThenArchive(event.currentTarget.checked)}
+                          />
+                          <span>{translate(language, 'archives.distillThenArchive')}</span>
+                        </label>
+                        {distillation.result === null ? null : (
+                          <div className="mwui-item-meta" data-tone={distillation.result.status === 'published' ? 'ok' : 'warn'}>
+                            {translate(language, distillation.result.status === 'published' ? 'archives.distillDone'
+                              : distillation.result.status === 'duplicate' ? 'archives.distillDuplicate'
+                                : distillation.result.status === 'needs_review' ? 'archives.distillReview'
+                                  : 'archives.distillFailed')}
+                          </div>
+                        )}
+                        <div className="mwui-edit-actions">
+                          <button type="button" className="mwui-button" disabled={distillation.busy || distillation.result !== null} onClick={() => distillation.onConfirm()}>
+                            {translate(language, 'archives.distillPublish')}
+                          </button>
+                          <button type="button" className="mwui-button" disabled={distillation.busy} onClick={() => distillation.onDiscard()}>
+                            {translate(language, 'archives.distillDiscard')}
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
               <div>
                 <h4 className="mwui-section-title">{translate(language, 'archives.history')}</h4>
                 {(history ?? []).length === 0
@@ -590,7 +723,7 @@ export function ArchivesPanel({ archives, capacities, history, error, selected, 
             setSaveError(undefined);
             try {
               await onSave({
-                projectId: draft?.projectId ?? String(data.get('projectId') ?? ''),
+                workspaceId: draft?.workspaceId ?? String(data.get('workspaceId') ?? ''),
                 title: String(data.get('title') ?? ''),
                 body: String(data.get('body') ?? ''),
                 evidence: String(data.get('evidence') ?? ''),
@@ -604,8 +737,8 @@ export function ArchivesPanel({ archives, capacities, history, error, selected, 
             }
           }}>
             <label className="mwui-field">
-              <span>{translate(language, 'common.project')}</span>
-              <input className="mwui-input" name="projectId" required maxLength={200} readOnly={draft !== null} defaultValue={draft?.projectId} disabled={saving} />
+              <span>{translate(language, 'archives.workspace')}</span>
+              <input className="mwui-input mwui-mono" name="workspaceId" required readOnly defaultValue={draft?.workspaceId ?? ''} disabled={saving} />
             </label>
             <label className="mwui-field">
               <span>{translate(language, 'archives.title')}</span>
@@ -673,14 +806,14 @@ export function SyncGroup({ sync, error, pass, language, busy, onRefresh }: Sync
                 {pass === null ? null : (
                   <div className="mwui-kv" data-tone={pass.errors.length === 0 ? 'ok' : 'warn'}>
                     <span>{translate(language, 'sync.pass')}</span>
-                    <span>{translate(language, 'sync.passResult', { scopes: pass.scopes.length, pulled: pass.pulled, applied: pass.applied })}{pass.errors.length === 0 ? '' : ` · ${pass.errors.join(', ')}`}</span>
+                    <span>{translate(language, 'sync.passResult', { streams: pass.streams.length, pulled: pass.pulled, applied: pass.applied })}{pass.errors.length === 0 ? '' : ` · ${pass.errors.join(', ')}`}</span>
                   </div>
                 )}
                 {enabled ? (
                   <table className="mwui-table">
                     <thead>
                       <tr>
-                        <th>{translate(language, 'sync.scope')}</th>
+                        <th>{translate(language, 'sync.stream')}</th>
                         <th>{translate(language, 'sync.cursor')}</th>
                         <th>{translate(language, 'sync.pending')}</th>
                         <th>{translate(language, 'sync.unknown')}</th>
@@ -690,17 +823,17 @@ export function SyncGroup({ sync, error, pass, language, busy, onRefresh }: Sync
                       </tr>
                     </thead>
                     <tbody>
-                      {sync.scopes.length === 0
+                      {sync.streams.length === 0
                         ? <tr><td colSpan={7}>{translate(language, 'sync.empty')}</td></tr>
-                        : sync.scopes.map(scope => (
-                          <tr key={scope.scope}>
-                            <td className="mwui-mono">{scopeLabel(scope.scope, language)}</td>
-                            <td>{scope.cursor}</td>
-                            <td data-tone={scope.pending > 0 ? 'warn' : undefined}>{scope.pending}</td>
-                            <td data-tone={scope.unknown > 0 ? 'warn' : undefined}>{scope.unknown}</td>
-                            <td data-tone={scope.unapplied > 0 ? 'warn' : undefined}>{scope.unapplied}</td>
-                            <td>{scope.lastPullAt === null ? '—' : formatDateTime(scope.lastPullAt)}</td>
-                            <td>{scope.lastError === null ? '—' : scope.lastError}</td>
+                        : sync.streams.map(stream => (
+                          <tr key={stream.stream}>
+                            <td className="mwui-mono">{streamLabel(stream.stream, language)}</td>
+                            <td>{stream.cursor}</td>
+                            <td data-tone={stream.pending > 0 ? 'warn' : undefined}>{stream.pending}</td>
+                            <td data-tone={stream.unknown > 0 ? 'warn' : undefined}>{stream.unknown}</td>
+                            <td data-tone={stream.unapplied > 0 ? 'warn' : undefined}>{stream.unapplied}</td>
+                            <td>{stream.lastPullAt === null ? '—' : formatDateTime(stream.lastPullAt)}</td>
+                            <td>{stream.lastError === null ? '—' : stream.lastError}</td>
                           </tr>
                         ))}
                     </tbody>
@@ -1187,9 +1320,9 @@ export function MemoryOverviewPanel(props: MemoryOverviewProps): ReactNode {
           hint={translate(language, 'memory.overview.entitiesHint')}
         />
         <Card
-          label={translate(language, 'memory.overview.projects')}
-          value={String(projects.size)}
-          hint={translate(language, 'memory.overview.projectsHint')}
+          label={translate(language, 'memory.overview.categories')}
+          value={String(categories.size)}
+          hint={translate(language, 'memory.overview.categoriesHint')}
         />
         <Card
           label={translate(language, 'memory.overview.categories')}
@@ -1222,11 +1355,6 @@ export interface MemoryPageHeaderProps {
   active: MemoryView;
   creating: boolean;
   saving: boolean;
-  /** Projects known to the Server; the selector narrows this page only. */
-  projects?: Array<{ projectId: string | null; count: number }> | undefined;
-  /** undefined shows every project, null shows general memory, a string shows that project. */
-  project?: string | null | undefined;
-  onProject?(value: string | null | undefined): void;
   onSelect(view: MemoryView): void;
   onCreate(): void;
   /** Opens the user-requested organize task; hidden when the Host cannot run tasks. */
@@ -1248,26 +1376,6 @@ export function MemoryPageHeader(props: MemoryPageHeaderProps): ReactNode {
           <p className="mwui-memory-description">{translate(language, 'memory.description')}</p>
         </div>
         <div className="mwui-memory-actions">
-          {props.onProject === undefined ? null : (
-            <label className="mwui-filter">
-              <span>{translate(language, 'memory.project')}</span>
-              <select
-                className="mwui-input mwui-select"
-                aria-label={translate(language, 'memory.project')}
-                value={props.project === undefined ? '' : props.project === null ? '~general' : props.project}
-                onChange={event => {
-                  const value = event.target.value;
-                  props.onProject?.(value === '' ? undefined : value === '~general' ? null : value);
-                }}
-              >
-                <option value="">{translate(language, 'memory.allProjects')}</option>
-                <option value="~general">{translate(language, 'memory.general')}</option>
-                {(props.projects ?? []).filter(entry => entry.projectId !== null).map(entry => (
-                  <option key={entry.projectId!} value={entry.projectId!}>{entry.projectId!} ({entry.count})</option>
-                ))}
-              </select>
-            </label>
-          )}
           <span className="mwui-memory-meta">{count}</span>
           {props.onOrganize === undefined ? null : (
             <button type="button" className="mwui-button" onClick={props.onOrganize} disabled={creating || saving}>
@@ -1317,8 +1425,6 @@ export interface CreateDraft {
   importance: string;
   tags: string;
   entities: string;
-  /** '' writes general knowledge; any other value is a registered project id. */
-  projectId: string;
   reason: string;
 }
 
@@ -1327,8 +1433,6 @@ export interface CreateMemoryFormProps {
   busy: boolean;
   error: string | null;
   language: Language;
-  /** Projects the Server knows, for the owner selector. */
-  projects?: Array<{ projectId: string | null; count: number }> | undefined;
   onChange(patch: Partial<CreateDraft>): void;
   onCancel(): void;
   onSubmit(): void;
@@ -1353,19 +1457,6 @@ export function CreateMemoryForm(props: CreateMemoryFormProps): ReactNode {
           onChange={event => props.onChange({ content: event.target.value })}
         />
         <div className="mwui-classify">
-          <label className="mwui-classify-field">
-            <span>{translate(language, 'create.project')}</span>
-            <select
-              className="mwui-input mwui-select"
-              value={draft.projectId}
-              onChange={event => props.onChange({ projectId: event.target.value })}
-            >
-              <option value="">{translate(language, 'create.general')}</option>
-              {(props.projects ?? []).filter(entry => entry.projectId !== null).map(entry => (
-                <option key={entry.projectId!} value={entry.projectId!}>{entry.projectId!}</option>
-              ))}
-            </select>
-          </label>
           <label className="mwui-classify-field">
             <span>{translate(language, 'detail.knowledgeType')}</span>
             <select

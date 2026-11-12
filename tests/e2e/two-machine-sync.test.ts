@@ -14,7 +14,7 @@ import { RememberInput } from '../../packages/core/contracts/src/index.ts';
 import { mnemonBinary } from './mnemon-binary.ts';
 
 /**
- * Two machines, each with its own Server and Mnemon, share one remote scope. A write
+ * Two machines, each with its own Server and Mnemon, share one remote stream. A write
  * on one side becomes visible, editable and re-synchronised on the other.
  */
 
@@ -44,10 +44,10 @@ test('a memory written on one machine is editable on the other and returns updat
     mkdirSync(path, { recursive: true });
     return resolve(path);
   }) as [string, string, string, string];
-  const scopes = [{ scope: 'project:alpha', canRead: true, canWrite: true }, { scope: 'global', canRead: true, canWrite: true }];
+  const streams = [{ stream: 'formal-memories', canRead: true, canWrite: true }, { stream: 'rules', canRead: true, canWrite: true }];
   const remote = new SyncStore({ path: join(root, 'remote.db') });
-  remote.enroll('machine-a', TOKEN_A, scopes);
-  remote.enroll('machine-b', TOKEN_B, scopes);
+  remote.enroll('machine-a', TOKEN_A, streams);
+  remote.enroll('machine-b', TOKEN_B, streams);
   const server: Server = createSyncServer({ gateway: remote });
   await new Promise<void>((done) => server.listen(0, '127.0.0.1', () => done()));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -56,7 +56,7 @@ test('a memory written on one machine is editable on the other and returns updat
   const seed = new SqliteCandidates(resolve(join(stateA, 'governance.db')));
   const seedProvider = new MnemonCliProvider({ binary: mnemonBinary(), dataDir: providerA, store: 'machine_a' });
   const request = RememberInput.parse({
-    idempotencyKey: `seed-${randomUUID()}`, content: '机器 A 写入的初始正文。', knowledgeType: 'Practice', tags: [], projectId: 'alpha',
+    idempotencyKey: `seed-${randomUUID()}`, content: '机器 A 写入的初始正文。', knowledgeType: 'Practice', tags: [],
     provenance: {
       source: 'local-user', sourceReference: 'e2e:two-machine', evidence: ['seed'], verificationStatus: 'verified',
       confidence: 1, applicability: 'alpha', limitations: '无（验收固定值）', lastVerified: '2026-11-10T08:00:00.000Z',
@@ -95,7 +95,7 @@ test('a memory written on one machine is editable on the other and returns updat
     // B edits the synced memory; the remote accepts it as version 2.
     const second = await b.client!.editMemory(memoryId, { content: '机器 B 编辑后的正文。', entryVersion: 1, reason: 'B edit' });
     assert.equal(second.entryVersion, 2);
-    const changes = remote.pull(TOKEN_B, { scope: 'project:alpha', since: 0, limit: 10 }).changes;
+    const changes = remote.pull(TOKEN_B, { stream: 'formal-memories', since: 0, limit: 10 }).changes;
     assert.deepEqual(changes.map((change) => [change.operation, change.version]), [['create', 1], ['update', 2]]);
 
     // A pulls the new version and shows it.
@@ -108,8 +108,8 @@ test('a memory written on one machine is editable on the other and returns updat
     const statusA = await a.client!.syncStatus!();
     const statusB = await b.client!.syncStatus!();
     for (const status of [statusA, statusB]) {
-      for (const scope of status.scopes) assert.equal(scope.pending, 0, JSON.stringify(scope));
-      assert.ok(status.scopes.some((scope) => scope.scope === 'project:alpha'), 'the project scope must be tracked');
+      for (const stream of status.streams) assert.equal(stream.pending, 0, JSON.stringify(stream));
+      assert.ok(status.streams.some((stream) => stream.stream === 'formal-memories'), 'the formal-memory stream must be tracked');
     }
   } finally {
     await a.close();

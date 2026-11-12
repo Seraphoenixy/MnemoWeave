@@ -1,5 +1,4 @@
-import { clientFromEnv, ensureServerForTurn, renderView } from '../../../client/src/index.ts';
-import type { RenderableView } from '../../../client/src/render.ts';
+import { clientFromEnv, ensureServerForTurn, renderRules } from '../../../client/src/index.ts';
 // Runnable hook entry for the installed ZCode hooks configuration: all wiring comes from
 // environment variables; an unconfigured or unreachable Server never blocks the session (HOST-04).
 import { DEFAULT_HOST_ID, runHookStdin } from './index.ts';
@@ -41,19 +40,12 @@ async function ready(budgetMs: number): Promise<boolean> {
 runHookStdin({
   serverUrl: serverUrl.replace(/\/$/, ''),
   token, hostId, deadlineMs,
-  ...(process.env.MNEMOWEAVE_PROJECT_ID ? { projectId: process.env.MNEMOWEAVE_PROJECT_ID } : {}),
   ensureReachable: budgetMs => ready(budgetMs),
-  recallAndAssemble: async (query, context?: InjectionContext) => {
-    const input = {
-      ...(query && query.trim().length ? { query: query.trim().slice(0, 2000) } : {}),
-      ...(context ? { sessionId: context.sessionId } : {}),
-      ...(process.env.MNEMOWEAVE_PROJECT_ID ? { projectId: process.env.MNEMOWEAVE_PROJECT_ID } : {}),
-    };
-    // Online-only: the Server assembles the View inside the deadline; hooks stay stateless.
-    const response = await client.inject(input, deadlineMs);
-    if (!response.ok) return undefined;
-    const view = response.value as RenderableView;
-    const text = renderView(view);
-    return text.length > 0 && typeof view.viewId === 'string' ? { text, viewId: view.viewId } : undefined;
+  readRules: async (context: InjectionContext) => {
+    // Online-only: the Server returns every rule whole inside the deadline; hooks stay stateless.
+    const response = await client.inject({ sessionId: context.sessionId }, deadlineMs);
+    if (!response.ok || response.value.complete === false) return undefined;
+    const text = renderRules(response.value);
+    return text.length > 0 ? text : undefined;
   },
 });

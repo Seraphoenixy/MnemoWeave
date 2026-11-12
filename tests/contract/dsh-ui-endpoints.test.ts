@@ -49,7 +49,8 @@ test('a rule list is parsed field by field', () => {
 });
 
 const archive = {
-  entryId: '33333333-3333-4333-8333-333333333333', projectId: 'alpha', title: '标题', body: '正文',
+  entryId: '33333333-3333-4333-8333-333333333333',
+  workspaceId: '11111111-1111-4111-8111-111111111111', title: '标题', body: '正文',
   source: 'tool', verification: 'open', evidence: '证据', version: 1, withdrawnAt: null,
   state: 'archived', archivedAt: '2026-11-10T08:00:00.000Z', bodyBytes: 6,
 };
@@ -64,21 +65,23 @@ test('an archive list keeps verification and refuses unknown enumerations', () =
   assert.throws(() => parseArchiveList({ items: [{ ...archive, source: 'model' }] }), (error: unknown) => (error as { code?: string }).code === 'PROVIDER_PROTOCOL');
 });
 
-test('the sync status keeps one row per scope with the exact counters', () => {
+test('the sync status keeps one row per stream with the exact counters', () => {
   const status = parseSyncStatus({
     enabled: true,
-    scopes: [{ scope: 'project:alpha', cursor: 12, lastPullAt: '2026-11-10T08:00:00.000Z', lastError: null, pending: 1, unknown: 0, unapplied: 2 }],
+    protocol: 2,
+    streams: [{ stream: 'formal-memories', cursor: 12, lastPullAt: '2026-11-10T08:00:00.000Z', lastError: null, pending: 1, unknown: 0, unapplied: 2 }],
     updatedAt: '2026-11-10T08:00:01.000Z',
   });
   assert.equal(status.enabled, true);
-  assert.deepEqual(status.scopes[0], { scope: 'project:alpha', cursor: 12, lastPullAt: '2026-11-10T08:00:00.000Z', lastError: null, pending: 1, unknown: 0, unapplied: 2 });
-  assert.throws(() => parseSyncStatus({ enabled: true, scopes: [{ ...status.scopes[0], pending: -1 }], updatedAt: '2026-11-10T08:00:01.000Z' }), (error: unknown) => (error as { code?: string }).code === 'PROVIDER_PROTOCOL');
-  assert.throws(() => parseSyncStatus({ enabled: true, scopes: [{ ...status.scopes[0], unapplied: 1.5 }], updatedAt: '2026-11-10T08:00:01.000Z' }), (error: unknown) => (error as { code?: string }).code === 'PROVIDER_PROTOCOL');
+  assert.equal(status.protocol, 2);
+  assert.deepEqual(status.streams[0], { stream: 'formal-memories', cursor: 12, lastPullAt: '2026-11-10T08:00:00.000Z', lastError: null, pending: 1, unknown: 0, unapplied: 2 });
+  assert.throws(() => parseSyncStatus({ enabled: true, protocol: 2, streams: [{ ...status.streams[0], pending: -1 }], updatedAt: '2026-11-10T08:00:01.000Z' }), (error: unknown) => (error as { code?: string }).code === 'PROVIDER_PROTOCOL');
+  assert.throws(() => parseSyncStatus({ enabled: true, protocol: 2, streams: [{ ...status.streams[0], unapplied: 1.5 }], updatedAt: '2026-11-10T08:00:01.000Z' }), (error: unknown) => (error as { code?: string }).code === 'PROVIDER_PROTOCOL');
 });
 
-test('a sync pass reports counts and per-scope errors', () => {
-  const pass = parseSyncPass({ scopes: ['global'], pulled: 2, applied: 1, errors: ['project:alpha:SYNC_UNAVAILABLE'], skipped: false });
+test('a sync pass reports counts and per-stream errors', () => {
+  const pass = parseSyncPass({ streams: ['rules'], pulled: 2, applied: 1, errors: ['formal-memories:SYNC_UNAVAILABLE'], skipped: false });
   assert.equal(pass.applied, 1);
-  assert.deepEqual(pass.errors, ['project:alpha:SYNC_UNAVAILABLE']);
-  assert.throws(() => parseSyncPass({ scopes: [], pulled: 0, applied: 0, errors: [], skipped: 'no' }), (error: unknown) => (error as { code?: string }).code === 'PROVIDER_PROTOCOL');
+  assert.deepEqual(pass.errors, ['formal-memories:SYNC_UNAVAILABLE']);
+  assert.throws(() => parseSyncPass({ streams: [], pulled: 0, applied: 0, errors: [], skipped: 'no' }), (error: unknown) => (error as { code?: string }).code === 'PROVIDER_PROTOCOL');
 });

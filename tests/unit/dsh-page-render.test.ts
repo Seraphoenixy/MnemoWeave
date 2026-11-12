@@ -52,7 +52,7 @@ test('the page renders its first frame with a refusing connection', () => {
   assert.ok(html.length > 500, 'a real frame is produced, not an empty shell');
   // The tab bar is the page's skeleton: every page-level class must exist even before any data
   // arrives. The formal-memory page's own views are tabs of that page, not entries here.
-  for (const key of ['概览', '运行时记忆', '项目档案', '正式记忆', '技能', '设置']) {
+  for (const key of ['概览', '准则', '工作区档案', '正式记忆', '技能', '设置']) {
     assert.ok(html.includes(key), `the tab bar offers "${key}"`);
   }
   assert.doesNotMatch(html, /\bundefined\b/, 'no field is printed raw');

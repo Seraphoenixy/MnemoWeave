@@ -7,6 +7,8 @@ export interface Preferences {
   pageSize: number;
   injectTimeoutMs: number;
   autoStart: boolean;
+  /** An explicit workspace binding for a host with no workspace root directory. */
+  workspaceId: string | null;
 }
 
 export interface PreferencesWithPath extends Preferences { path: string }
@@ -17,7 +19,7 @@ export interface ConfigSources {
   serverUrl: ConfigSource;
   token: ConfigSource;
   hostId: ConfigSource;
-  projectId: ConfigSource;
+  workspaceId: ConfigSource;
   injectTimeoutMs: ConfigSource;
 }
 
@@ -25,7 +27,7 @@ export interface ResolvedHostConfig {
   serverUrl: string;
   token: string | undefined;
   hostId: string;
-  projectId: string | undefined;
+  workspaceId: string | undefined;
   injectTimeoutMs: number;
   autoStart: boolean;
   preferences: { defaultTab: string; pageSize: number; path: string };
@@ -36,7 +38,7 @@ export interface ResolvedHostConfig {
 export interface HostConfigDescription {
   serverUrl: string;
   hostId: string;
-  projectId: string | null;
+  workspaceId: string | null;
   injectTimeoutMs: number;
   autoStart: boolean;
   taskName: string;

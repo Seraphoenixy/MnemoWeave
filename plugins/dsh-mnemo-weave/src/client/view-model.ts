@@ -97,25 +97,24 @@ export function statusChips(status: UiStatus | null, config: UiConfigView | null
   return chips;
 }
 
-/** The last View this host assembled, as the Server reported it. */
+/**
+ * The last rule injection this host received. The block either carries every resident rule or
+ * fails; a failure is shown as such rather than as a partial count.
+ */
 export function injectionChip(injection: UiInjection | null, language: Language): Chip {
   const label = translate(language, 'injection.label');
   if (injection === null) return { key: 'injection', label, value: translate(language, 'injection.none'), tone: 'muted' };
   const summary = translate(language, 'injection.summary', {
-    rules: injection.rulesInjected,
-    memories: injection.memoriesInjected,
-    tokens: injection.usedTokens,
+    rules: injection.ruleCount,
+    bytes: injection.usedBytes,
   });
-  return {
-    key: 'injection',
-    label,
-    value: injection.rulesOmitted === null
-      ? summary
-      : `${summary} · ${injection.rulesOmittedCount === undefined
-        ? translate(language, 'injection.omitted')
-        : translate(language, 'injection.omittedCount', { count: injection.rulesOmittedCount })}`,
-    tone: injection.rulesOmitted === null ? 'ok' : 'warn',
-  };
+  if (injection.failure === undefined) return { key: 'injection', label, value: summary, tone: 'ok' };
+  const reason = injection.failure === 'deadline'
+    ? translate(language, 'injection.deadline')
+    : injection.failure === 'output_limit'
+      ? translate(language, 'injection.outputLimit')
+      : translate(language, 'injection.requestFailed');
+  return { key: 'injection', label, value: `${summary} · ${reason}`, tone: 'warn' };
 }
 
 export function listSummary(list: UiMemoryList | null, language: Language): string {
@@ -143,7 +142,6 @@ export function detailMeta(detail: UiMemoryDetail, language: Language): Array<{ 
         ? translate(language, 'detail.viewingCurrent')
         : translate(language, 'detail.viewingHistory', { number: current === undefined ? '—' : `#${current.number}` }),
     },
-    { key: 'owner', label: translate(language, 'detail.project'), value: detail.projectId ?? translate(language, 'memory.general') },
     { key: 'applicability', label: translate(language, 'detail.applicability'), value: detail.applicability },
     { key: 'published', label: translate(language, 'detail.published'), value: formatDateTime(detail.publishedAt) },
   ];

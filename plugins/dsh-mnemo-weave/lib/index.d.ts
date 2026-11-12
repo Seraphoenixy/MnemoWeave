@@ -1,8 +1,14 @@
 /** Types for the checked-in Host bundle; the implementation lives in `index.js`. */
 export declare const name: string;
 export declare const inject: readonly string[];
-/** Renders one View into the prompt section the Host injects (rules → context → memories). */
-export declare function render(view: unknown): string;
+/** Renders the resident rule block; an incomplete delivery renders nothing. */
+export declare function render(injection: unknown): string;
+/** The command name a person types to mark the current turn as not retained. */
+export declare const NO_RETENTION_COMMAND: string;
+/** Injected services: the tool registry, and the optional command registry. */
+export declare const injectCommands: readonly string[];
+/** The shared engineering-experience guidance every `remember` description quotes. */
+export declare const ENGINEERING_EXPERIENCE_GUIDANCE: string;
 /** One model-facing tool, in the shape DSH's `ctx.tools.register` accepts. */
 export interface ToolDefinition {
   name: string;

@@ -37,7 +37,8 @@ export interface Config {
   serverUrl?: string;
   token?: string;
   hostId?: string;
-  projectId?: string;
+  /** Explicit workspace binding for a host with no workspace root directory. */
+  workspaceId?: string;
   timeoutMs?: number;
 }
 
@@ -46,7 +47,7 @@ export interface ResolvedConfig {
   token: string | undefined;
   /** Credential for actions that claim a person performed them; absent means they are refused. */
   hostId: string;
-  projectId: string | undefined;
+  workspaceId: string | undefined;
   injectTimeoutMs: number;
   autoStart: boolean;
   description: HostConfigDescription;
@@ -62,7 +63,7 @@ export function resolveConfig(config: unknown, env: NodeJS.ProcessEnv = process.
     serverUrl: resolved.serverUrl,
     token: resolved.token,
     hostId: resolved.hostId,
-    projectId: resolved.projectId,
+    workspaceId: resolved.workspaceId,
     injectTimeoutMs: resolved.injectTimeoutMs,
     autoStart: resolved.autoStart,
     description: describeHostConfig(resolved),
@@ -194,7 +195,7 @@ export function apply(ctx: HostContext, config?: unknown): void {
     void (async () => {
       try {
         for (const session of (await source.idleReviewPending()).slice(0, 3)) {
-          await runIdleReview(source, createTaskRunner(() => getAgents?.()), session.sessionId);
+          await runIdleReview(source, createTaskRunner(() => getAgents?.()), session.sessionId, undefined);
         }
       } catch {
         // A missing model route or an already running session is retried on the next tick.

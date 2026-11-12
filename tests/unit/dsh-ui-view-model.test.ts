@@ -30,7 +30,6 @@ const detail = (overrides: Partial<UiMemoryDetail> = {}): UiMemoryDetail => ({
   isCurrent: true,
   providerMemoryId: 'provider-1',
   applicability: 'release',
-  projectId: null,
   state: 'active',
   content: 'x',
   publishedAt: '2026-11-09T02:00:00.000Z',
@@ -112,12 +111,11 @@ test('the list summary counts what the Server returned', () => {
 
 test('detail metadata names the viewed revision, not the live one', () => {
   const meta = detailMeta(detail(), 'en');
-  assert.deepEqual(meta.map(item => item.key), ['state', 'revision', 'currentness', 'owner', 'applicability', 'published']);
+  // The shared collection has no owner field: the detail names the revision, its state,
+  // applicability and publication time only.
+  assert.deepEqual(meta.map(item => item.key), ['state', 'revision', 'currentness', 'applicability', 'published']);
   assert.deepEqual(meta.slice(0, 3).map(item => item.value), ['Active', '#2', 'Current revision']);
-  assert.equal(meta[5]?.value, formatDateTime('2026-11-09T02:00:00.000Z'));
-  // A general memory still shows its owner as "General", never an empty value.
-  assert.equal(meta[3]?.value, 'General');
-  assert.equal(detailMeta(detail({ projectId: 'alpha' }), 'en')[3]?.value, 'alpha');
+  assert.equal(meta[4]?.value, formatDateTime('2026-11-09T02:00:00.000Z'));
 
   assert.equal(detailMeta(detail({ state: 'superseded' }), 'zh')[0]?.value, '已被取代');
   assert.equal(detailMeta(detail({ revisions: [] }), 'en')[1]?.value, '—');
@@ -149,21 +147,22 @@ test('the edit form blocks empty, oversized and unchanged bodies before any requ
   assert.equal(utf8Bytes('中'), 3);
 });
 
-test('the injection chip names the last View and flags a budget omission', () => {
+test('the injection chip counts the resident rules and flags an incomplete delivery', () => {
   const injection: UiInjection = {
     id: '33333333-3333-4333-8333-333333333333', sessionId: 's-1',
-    rulesInjected: 2, rulesOmitted: null, memoriesInjected: 3, usedTokens: 700,
+    ruleCount: 2, usedBytes: 700,
     createdAt: '2026-11-09T02:50:00.000Z',
   };
   const ok = injectionChip(injection, 'zh');
   assert.equal(ok.key, 'injection');
   assert.equal(ok.tone, 'ok');
   assert.match(ok.value, /准则 2 条/);
-  assert.match(ok.value, /记忆 3 条/);
+  assert.match(ok.value, /700 字节/);
 
-  const omitted = injectionChip({ ...injection, rulesOmitted: 'budget_exceeded' }, 'en');
-  assert.equal(omitted.tone, 'warn');
-  assert.match(omitted.value, /budget exceeded/);
+  // A partial set is a delivery failure, not a smaller memory selection.
+  const failed = injectionChip({ ...injection, failure: 'output_limit' }, 'en');
+  assert.equal(failed.tone, 'warn');
+  assert.match(failed.value, /output limit/);
 
   const none = injectionChip(null, 'zh');
   assert.equal(none.tone, 'muted');

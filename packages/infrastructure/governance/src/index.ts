@@ -1,12 +1,13 @@
-import { SqliteRuntime } from './runtime-store.ts';
+import { SqliteTurnStore } from './turn-store.ts';
 import { SqliteSyncLedger } from './sync-ledger.ts';
 import { SqliteMemoryStore } from './memory-store.ts';
+import { SqliteDistillationStore, SqliteEvidenceStore, SqliteWorkspaceStore, SqliteWriteTaskStore } from './workspace-store.ts';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, statSync, readFileSync, writeFileSync, renameSync, readdirSync, unlinkSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import type { CandidateRepository } from '../../../core/application/src/index.ts';
-import { Candidate, CandidateRequest, MnemoWeaveError, RememberInput } from '../../../core/contracts/src/index.ts';
+import { Candidate, CandidateRequest, FORMAL_STREAM, MnemoWeaveError, RememberInput } from '../../../core/contracts/src/index.ts';
 import type { CandidateRecord, RememberRequest, RetentionSweepReport } from '../../../core/contracts/src/index.ts';
 import { CANDIDATE_BODY_RETENTION_DAYS } from './events.ts';
 
@@ -31,8 +32,8 @@ export interface PublishedFormal {
   version: number;
   content: string;
   contentHash: string;
-  scope: string;
-  projectId: string | null;
+  /** Formal memories share one stream; the field stays so a publication names where it goes. */
+  stream: string;
 }
 
 /** Incremental governance schema v1. No formal memory, Revision or replica schema. */
@@ -46,9 +47,13 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
   private transactionDepth = 0;
   readonly catalog: SqliteMemoryCatalog;
   readonly events: SessionEventStore;
-  readonly runtime: SqliteRuntime;
+  readonly turns: SqliteTurnStore;
   readonly ledger: SqliteSyncLedger;
   readonly memory: SqliteMemoryStore;
+  readonly workspaces: SqliteWorkspaceStore;
+  readonly writeTasks: SqliteWriteTaskStore;
+  readonly distillations: SqliteDistillationStore;
+  readonly evidence: SqliteEvidenceStore;
   /**
    * Called after a reviewed publication commits, so the Server can offer the published
    * memory to shared sync. The catalog's `syncHook` is an internal change stream, not a
@@ -58,9 +63,9 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
    */
   private publishListener: ((event: PublishedFormal) => void) | undefined;
   setPublishListener(listener: ((event: PublishedFormal) => void) | undefined): void { this.publishListener = listener; }
-  private announcePublished(memoryId: string, providerId: string, version: number, content: string, contentHash: string, scope: string, projectId: string | null): void {
+  private announcePublished(memoryId: string, providerId: string, version: number, content: string, contentHash: string, stream: string): void {
     if (!this.publishListener) return;
-    try { this.publishListener({ memoryId, providerId, version, content, contentHash, scope, projectId }); }
+    try { this.publishListener({ memoryId, providerId, version, content, contentHash, stream }); }
     catch { process.stderr.write(JSON.stringify({ event: 'publish_listener_failed', memoryId }) + String.fromCharCode(10)); }
   }
   /** Ordered change stream (internal audit only): catalog mutations append here in the same transaction. */
@@ -77,7 +82,7 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
     try {
       this.transaction(() => {
         const version = Number(this.db.prepare('PRAGMA user_version').get()!['user_version']);
-      if (version > 21) throw new Error('Unsupported governance schema version');
+      if (version > 22) throw new Error('Unsupported governance schema version');
         if (version === 0) {
           if (this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").get()) throw new Error('Refusing to initialize an unidentified existing database');
           this.db.exec(`
@@ -476,7 +481,7 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
             CREATE TABLE IF NOT EXISTS idle_review_runs(
               id TEXT PRIMARY KEY, host_id TEXT NOT NULL, session_id TEXT NOT NULL, state TEXT NOT NULL,
               attempt INTEGER NOT NULL, started_at TEXT NOT NULL, finished_at TEXT, error TEXT NOT NULL DEFAULT '',
-              items_json TEXT NOT NULL DEFAULT '[]'
+              items_json TEXT NOT NULL DEFAULT '[]', signal_ids_json TEXT NOT NULL DEFAULT '[]'
             );
             CREATE INDEX IF NOT EXISTS idle_review_runs_session ON idle_review_runs(host_id, session_id, started_at);
             PRAGMA user_version=20;
@@ -497,6 +502,219 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
           `);
         });
       }
+      if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) === 21) {
+        this.db.prepare('VACUUM INTO ?').run(`${path}.pre-v22.${randomUUID()}.db`);
+        this.transaction(() => {
+          if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) !== 21) return;
+          // v22: the workspace model.
+          //
+          // Formal memories become one shared collection: the catalog keeps no owner column in
+          // any new schema, and the legacy `project_id` values are preserved only as a migration
+          // backup table, never read by the product. Workspaces are stable UUIDs; every device
+          // binds its own root directory, and a session records the workspace it works in.
+          // Archives move from a project id to a workspace id. Sync streams replace scopes in the
+          // local ledgers: existing rows are re-keyed by their derived stream so a running
+          // installation can keep serving while the remote is migrated separately.
+          // Which signals a run reserved, so a partial failure retries only the unfinished ones.
+          const runColumns = this.db.prepare("PRAGMA table_info(idle_review_runs)").all().map(row => String(row['name']));
+          if (!runColumns.includes('signal_ids_json')) {
+            this.db.exec(`ALTER TABLE idle_review_runs ADD COLUMN signal_ids_json TEXT NOT NULL DEFAULT '[]';`);
+          }
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS workspaces(
+              workspace_id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            ) STRICT;
+            CREATE TABLE IF NOT EXISTS workspace_bindings(
+              workspace_id TEXT NOT NULL REFERENCES workspaces(workspace_id),
+              root_path TEXT NOT NULL UNIQUE,
+              created_at TEXT NOT NULL,
+              PRIMARY KEY(workspace_id, root_path)
+            ) STRICT;
+            CREATE TABLE IF NOT EXISTS session_workspaces(
+              host_id TEXT NOT NULL,
+              session_id TEXT NOT NULL,
+              workspace_id TEXT REFERENCES workspaces(workspace_id),
+              bound_at TEXT NOT NULL,
+              PRIMARY KEY(host_id, session_id)
+            ) STRICT;
+            CREATE TABLE IF NOT EXISTS legacy_project_owners(
+              memory_id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL
+            ) STRICT;
+            CREATE TABLE IF NOT EXISTS write_task_receipts(
+              host_id TEXT NOT NULL,
+              task_id TEXT NOT NULL,
+              action_index INTEGER NOT NULL,
+              kind TEXT NOT NULL,
+              action TEXT NOT NULL,
+              request_hash TEXT NOT NULL,
+              status TEXT NOT NULL,
+              memory_id TEXT,
+              entry_version INTEGER,
+              entry_id TEXT,
+              candidate_id TEXT,
+              error_code TEXT,
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY(host_id, task_id, action_index)
+            ) STRICT;
+            CREATE TABLE IF NOT EXISTS archive_distillations(
+              draft_id TEXT PRIMARY KEY,
+              host_id TEXT NOT NULL,
+              workspace_id TEXT NOT NULL,
+              entry_id TEXT NOT NULL,
+              entry_version INTEGER NOT NULL,
+              source_content_hash TEXT NOT NULL,
+              content TEXT NOT NULL,
+              knowledge_type TEXT NOT NULL,
+              category TEXT,
+              importance INTEGER,
+              tags_json TEXT,
+              entities_json TEXT,
+              reason TEXT NOT NULL,
+              assessment TEXT NOT NULL,
+              content_hash TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              task_id TEXT
+            ) STRICT;
+            CREATE TABLE IF NOT EXISTS host_evidence(
+              id TEXT PRIMARY KEY,
+              host_id TEXT NOT NULL,
+              session_id TEXT NOT NULL,
+              turn_id TEXT NOT NULL,
+              kind TEXT NOT NULL,
+              ref TEXT NOT NULL,
+              summary TEXT NOT NULL,
+              detail TEXT,
+              created_at TEXT NOT NULL
+            ) STRICT;
+            CREATE INDEX IF NOT EXISTS host_evidence_turn ON host_evidence(host_id, session_id, turn_id);
+            CREATE TABLE IF NOT EXISTS turn_sessions(
+              host_id TEXT NOT NULL,
+              session_id TEXT NOT NULL,
+              closed INTEGER NOT NULL,
+              updated_ms INTEGER NOT NULL,
+              PRIMARY KEY(host_id, session_id)
+            ) STRICT;
+            CREATE TABLE IF NOT EXISTS turn_event_ids(
+              host_id TEXT NOT NULL,
+              event_id TEXT NOT NULL,
+              event_hash TEXT NOT NULL,
+              created_ms INTEGER NOT NULL,
+              PRIMARY KEY(host_id, event_id)
+            ) STRICT;
+            CREATE TABLE IF NOT EXISTS turn_messages(
+              host_id TEXT NOT NULL,
+              session_id TEXT NOT NULL,
+              turn_id TEXT NOT NULL,
+              event_id TEXT NOT NULL,
+              text TEXT NOT NULL,
+              no_retention INTEGER NOT NULL,
+              created_ms INTEGER NOT NULL,
+              PRIMARY KEY(host_id, event_id)
+            ) STRICT;
+            CREATE INDEX IF NOT EXISTS turn_messages_session ON turn_messages(host_id, session_id, created_ms);
+            CREATE TABLE IF NOT EXISTS turn_no_retention(
+              host_id TEXT NOT NULL,
+              session_id TEXT NOT NULL,
+              turn_id TEXT NOT NULL,
+              created_ms INTEGER NOT NULL,
+              PRIMARY KEY(host_id, session_id, turn_id)
+            ) STRICT;
+            PRAGMA user_version=22;
+          `);
+          // Preserve the legacy attribution, then drop the column so no read path can filter by
+          // it again: a shared collection has no owner. The backup table is not read by the
+          // product; it exists so an operator can answer "which project did this come from"
+          // during the migration.
+          const hasOwner = this.db.prepare("SELECT 1 FROM pragma_table_info('catalog_memories') WHERE name='project_id'").get() !== undefined;
+          if (hasOwner) {
+            this.db.exec(`
+              INSERT OR IGNORE INTO legacy_project_owners(memory_id, project_id)
+                SELECT id, project_id FROM catalog_memories WHERE project_id IS NOT NULL;
+              UPDATE catalog_memories SET scope='global', project_id=NULL;
+              DROP INDEX IF EXISTS catalog_memories_project;
+              ALTER TABLE catalog_memories DROP COLUMN project_id;
+            `);
+          }
+          // Archives: rename the owner column and re-key the rows by workspace. An old project id
+          // is not a workspace id, so rows whose id is not a UUID cannot be migrated here; they
+          // stay under a deterministic placeholder workspace that the operator remaps, and the
+          // original value is kept in a backup table.
+          const archiveColumns = this.db.prepare("PRAGMA table_info(project_archives)").all().map(row => String(row['name']));
+          if (archiveColumns.includes('project_id') && !archiveColumns.includes('workspace_id')) {
+            this.db.exec(`
+              CREATE TABLE IF NOT EXISTS archive_project_backup(entry_id TEXT PRIMARY KEY, project_id TEXT NOT NULL) STRICT;
+              INSERT OR IGNORE INTO archive_project_backup(entry_id, project_id) SELECT entry_id, project_id FROM project_archives;
+              ALTER TABLE project_archives RENAME COLUMN project_id TO workspace_id;
+            `);
+          }
+          const revisionColumns = this.db.prepare("PRAGMA table_info(project_archive_revisions)").all().map(row => String(row['name']));
+          if (revisionColumns.includes('project_id') && !revisionColumns.includes('workspace_id')) {
+            this.db.exec(`ALTER TABLE project_archive_revisions RENAME COLUMN project_id TO workspace_id;`);
+          }
+          // Local sync ledgers: a scope becomes a stream.
+          //
+          // Legacy cursors are discarded, as the switch procedure requires: every stream is
+          // re-read from a snapshot rather than resumed at a sequence number that no longer
+          // means the same thing. Unconfirmed outbox rows for rules and formal memories are
+          // kept because their streams are derivable; workspace-archive rows depended on a
+          // project id that has no workspace mapping yet, so they stay in the backup tables
+          // for the operator to reconcile instead of being filed under a guessed workspace.
+          // The staging and backup tables are dropped first: a store that already passed through
+          // this step (a rehearsal that reverts the version counter) must not collide with the
+          // rows it left behind.
+          const legacyLedger = this.db.prepare("SELECT 1 FROM pragma_table_info('sync_outbox') WHERE name='scope'").get() !== undefined;
+          this.db.exec(`
+            DROP TABLE IF EXISTS sync_state_streams;
+            DROP TABLE IF EXISTS sync_outbox_streams;
+            DROP TABLE IF EXISTS sync_inbox_streams;
+            DROP TABLE IF EXISTS archive_project_backup;
+            CREATE TABLE sync_state_streams(stream TEXT PRIMARY KEY, cursor INTEGER NOT NULL, last_pull_at TEXT, last_error TEXT);
+            CREATE TABLE sync_outbox_streams(change_id TEXT PRIMARY KEY, stream TEXT NOT NULL, entry_id TEXT NOT NULL, base_version INTEGER NOT NULL, operation TEXT NOT NULL, entry_json TEXT NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL, last_error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS sync_outbox_streams_state ON sync_outbox_streams(state);
+            CREATE TABLE sync_inbox_streams(stream TEXT NOT NULL, seq INTEGER NOT NULL, change_id TEXT NOT NULL, entry_id TEXT NOT NULL, version INTEGER NOT NULL, operation TEXT NOT NULL, entry_json TEXT NOT NULL, state TEXT NOT NULL, error TEXT, received_at TEXT NOT NULL, PRIMARY KEY(stream, seq));
+          `);
+          if (legacyLedger) {
+            // Only a store that still carries the scope-keyed ledgers needs the backup; a store
+            // already keyed by stream keeps its rows through the copy below unchanged.
+            this.db.exec(`
+              DROP TABLE IF EXISTS legacy_sync_outbox_backup;
+              DROP TABLE IF EXISTS legacy_sync_inbox_backup;
+              CREATE TABLE legacy_sync_outbox_backup(change_id TEXT PRIMARY KEY, payload_json TEXT NOT NULL) STRICT;
+              CREATE TABLE legacy_sync_inbox_backup(scope TEXT NOT NULL, seq INTEGER NOT NULL, payload_json TEXT NOT NULL, PRIMARY KEY(scope, seq)) STRICT;
+              INSERT OR IGNORE INTO legacy_sync_outbox_backup(change_id, payload_json)
+                SELECT change_id, json_object('scope', scope, 'entry', json(entry_json), 'operation', operation, 'state', state) FROM sync_outbox;
+              INSERT OR IGNORE INTO legacy_sync_inbox_backup(scope, seq, payload_json)
+                SELECT scope, seq, json_object('changeId', change_id, 'entry', json(entry_json), 'version', version) FROM sync_inbox;
+              INSERT OR IGNORE INTO sync_outbox_streams(change_id, stream, entry_id, base_version, operation, entry_json, state, attempts, last_error, created_at, updated_at)
+                SELECT change_id,
+                  CASE json_extract(entry_json,'$.kind')
+                    WHEN 'runtime' THEN 'rules'
+                    WHEN 'formal' THEN 'formal-memories'
+                    ELSE NULL
+                  END,
+                  entry_id, base_version, operation, entry_json, state, attempts, last_error, created_at, updated_at
+                FROM sync_outbox
+                WHERE json_extract(entry_json,'$.kind') IN ('runtime','formal');
+            `);
+          } else {
+            this.db.exec(`
+              INSERT OR IGNORE INTO sync_outbox_streams(change_id, stream, entry_id, base_version, operation, entry_json, state, attempts, last_error, created_at, updated_at)
+                SELECT change_id, stream, entry_id, base_version, operation, entry_json, state, attempts, last_error, created_at, updated_at FROM sync_outbox;
+            `);
+          }
+          this.db.exec(`
+            DROP TABLE IF EXISTS sync_state;
+            DROP TABLE IF EXISTS sync_outbox;
+            DROP TABLE IF EXISTS sync_inbox;
+            ALTER TABLE sync_state_streams RENAME TO sync_state;
+            ALTER TABLE sync_outbox_streams RENAME TO sync_outbox;
+            ALTER TABLE sync_inbox_streams RENAME TO sync_inbox;
+          `);
+        });
+      }
       this.db.prepare("UPDATE idle_review_signals SET run_id=NULL WHERE run_id IN (SELECT id FROM idle_review_runs WHERE state='running')").run();
       this.db.prepare("UPDATE idle_review_runs SET state='interrupted', finished_at=? WHERE state='running'").run(new Date().toISOString());
 
@@ -504,9 +722,17 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
       this.db.prepare("UPDATE diagnostic_jobs SET state='interrupted', finished_at=? WHERE state='running'").run(new Date().toISOString());
       this.db.prepare('SELECT knowledge_type, category, importance, tags_json, entities_json FROM catalog_revisions LIMIT 0').all();
       this.db.prepare('SELECT memory_id, version, provider_id, content, content_hash, scope, state FROM share_outbox LIMIT 0').all();
+      this.db.prepare('SELECT workspace_id, name, created_at FROM workspaces LIMIT 0').all();
+      this.db.prepare('SELECT host_id, session_id, closed FROM turn_sessions LIMIT 0').all();
+      this.db.prepare('SELECT host_id, task_id, action_index, status FROM write_task_receipts LIMIT 0').all();
+      this.db.prepare('SELECT entry_id, workspace_id, version FROM project_archives LIMIT 0').all();
       this.ledger = new SqliteSyncLedger(this.db, operation => this.transaction(operation));
       this.memory = new SqliteMemoryStore(this.db, operation => this.transaction(operation), this.catalog);
-      this.runtime = new SqliteRuntime(this.db, operation => this.transaction(operation), request => this.submit(request), (hostId, event, candidateId) => { this.events.record(hostId, event, true); this.events.linkEvidence(event.eventId, hostId, candidateId); });
+      this.workspaces = new SqliteWorkspaceStore(this.db, operation => this.transaction(operation));
+      this.writeTasks = new SqliteWriteTaskStore(this.db, operation => this.transaction(operation));
+      this.distillations = new SqliteDistillationStore(this.db, operation => this.transaction(operation));
+      this.evidence = new SqliteEvidenceStore(this.db, operation => this.transaction(operation));
+      this.turns = new SqliteTurnStore(this.db, operation => this.transaction(operation));
       this.events = new SessionEventStore(this.db, operation => this.transaction(operation));
       this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;');
     } catch (error) { this.db.close(); throw error; }
@@ -689,25 +915,22 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
         : Number((this.db.prepare('SELECT revision_number FROM catalog_revisions WHERE memory_id=? ORDER BY revision_number DESC LIMIT 1').get(memoryId) as { revision_number?: number } | undefined)?.revision_number ?? 1);
       // Durable share marker, same transaction as the publication: if the process dies before
       // the listener runs, the next start still knows this memory owes a shared change.
-      const shareScope = request.projectId ? `project:${request.projectId}` : 'global';
+      const shareStream = FORMAL_STREAM;
       this.db.prepare(`
         INSERT INTO share_outbox(memory_id, version, provider_id, content, content_hash, scope, state, attempts, last_error, created_at, updated_at)
         VALUES(?, ?, ?, ?, ?, ?, 'pending', 0, NULL, ?, ?)
         ON CONFLICT(memory_id) DO UPDATE SET version=excluded.version, provider_id=excluded.provider_id,
           content=excluded.content, content_hash=excluded.content_hash, scope=excluded.scope,
           state='pending', last_error=NULL, updated_at=excluded.updated_at
-      `).run(memoryId, number, result.id, request.content, contentHash, shareScope, new Date().toISOString(), new Date().toISOString());
+      `).run(memoryId, number, result.id, request.content, contentHash, shareStream, new Date().toISOString(), new Date().toISOString());
       return { request, memoryId, contentHash, number };
     });
     // Outside the transaction: the listener may touch the network or the ledger, and a
     // publication that committed must not be rolled back because sharing it failed. The
     // durable row written inside `finish` is what makes a crash here recoverable.
-    // The owner travels with the publication: a project memory is shared into that project's
-    // scope, and a general memory into the global scope.
-    const projectId = published.request.projectId ?? null;
     this.announcePublished(
       published.memoryId, result.id, published.number, published.request.content, published.contentHash,
-      projectId ? `project:${projectId}` : 'global', projectId,
+      FORMAL_STREAM,
     );
   }
 
@@ -718,8 +941,8 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
     ).all(limit) as unknown as { memory_id: string; version: number; provider_id: string; content: string; content_hash: string; scope: string }[];
     return rows.map(row => ({
       memoryId: String(row.memory_id), version: Number(row.version), providerId: String(row.provider_id),
-      content: String(row.content), contentHash: String(row.content_hash), scope: String(row.scope),
-      projectId: String(row.scope).startsWith('project:') ? String(row.scope).slice('project:'.length) : null,
+      content: String(row.content), contentHash: String(row.content_hash),
+      stream: String(row.scope) === 'global' || String(row.scope).startsWith('project:') ? FORMAL_STREAM : String(row.scope),
     }));
   }
 
