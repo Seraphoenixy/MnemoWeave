@@ -156,6 +156,18 @@ export const WriteTaskReceipt = z.object({
 }).strict();
 export type WriteTaskReceiptRecord = z.infer<typeof WriteTaskReceipt>;
 
+/**
+ * The unsettled actions of one Host, newest first.
+ *
+ * The Host keeps its own copy of every submitted plan; this list is the Server side of the same
+ * question, so a page reopened after a crash can show what is still outstanding without trusting
+ * anything the browser remembers.
+ */
+export const WriteTaskReceiptList = z.object({
+  items: z.array(WriteTaskReceipt),
+}).strict();
+export type WriteTaskReceiptListRecord = z.infer<typeof WriteTaskReceiptList>;
+
 // ── Archive distillation ──
 
 export const ArchiveDistillationCreate = z.object({

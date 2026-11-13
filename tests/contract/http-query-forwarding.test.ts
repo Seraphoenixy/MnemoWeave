@@ -77,7 +77,7 @@ test('the graph route forwards its cap', async () => {
   } finally { await close(); }
 });
 
-test('the explore route forwards the query, the cap and the score floor', async () => {
+test('the explore route forwards the query and the cap, and refuses a removed score floor', async () => {
   const seen: Array<Record<string, unknown>> = [];
   const { base, close } = await harness({
     explore: async (_hostId, input) => { seen.push(input as unknown as Record<string, unknown>); return { query: 'x', hits: [], unregistered: 0, truncated: false } as never; },
@@ -86,10 +86,20 @@ test('the explore route forwards the query, the cap and the score floor', async 
     const response = await fetch(`${base}/v1/memories/explore`, {
       method: 'POST',
       headers: { ...auth, 'content-type': 'application/json' },
-      body: JSON.stringify({ query: '语义', limit: 12, minScore: 0.35 }),
+      body: JSON.stringify({ query: '语义', limit: 12, mode: 'keyword', category: 'fact' }),
     });
     assert.equal(response.status, 200);
-    assert.deepEqual(seen[0], { query: '语义', limit: 12, minScore: 0.35 });
+    assert.deepEqual(seen[0], { query: '语义', limit: 12, mode: 'keyword', category: 'fact' });
+
+    // The strict schema rejects the removed field rather than dropping it: a caller that sends a
+    // floor would otherwise get a wider list than it asked for and never know.
+    const removed = await fetch(`${base}/v1/memories/explore`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify({ query: '语义', limit: 12, minScore: 0.35 }),
+    });
+    assert.equal(removed.status, 400);
+    assert.equal(seen.length, 1, 'the refused request never reaches the source');
   } finally { await close(); }
 });
 

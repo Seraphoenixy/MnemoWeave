@@ -7,14 +7,18 @@
  * Configuration comes from the Cordis entry (or the matching environment variables); without a
  * usable token the plugin stays inert and says why on stderr, never aborting the DSH boot.
  */
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';import { fileURLToPath } from 'node:url';
 import { MemoryClient, ensureServer, prewarmBudgetMs } from '../../../../packages/client/src/index.ts';
 import { createRpcHandler } from './rpc.ts';
 import { createTaskRunner } from './task-runner.ts';
 import { runIdleReview } from './idle-review-task.ts';
 import { SettingsService } from './settings.ts';
 import { MemorySource } from './memory-source.ts';
+import { WriteTransactions } from './write-transactions.ts';
+import { journalFor } from './write-receipts.ts';
+import { IdleSkipJournal } from './idle-skips.ts';
+import { idleReviewReady } from '../../../../packages/core/application/src/idle-review.ts';
+import { settingsPath } from '../shared/host-config.js';
 import { BUNDLE_NAME, isHostArtifact, reloadBundle, shouldWatch, watchLib } from './hot-reload.ts';
 import type { PluginManagerLike } from './hot-reload.ts';
 import { isRecord, RPC_CHANNEL } from '../shared/contract.ts';
@@ -196,24 +200,60 @@ export function apply(ctx: HostContext, config?: unknown): void {
       if (getAgents === accessor) getAgents = undefined;
     }, 'dsh-mnemo-weave: task agents');
   });
-  // Idle review is a background improvement: one pass at a time, only when a model route exists,
-  // and every failure is contained by the next tick. The Server owns single-flight per session.
+  // Authorized-write receipts live next to the Host preferences, so a reopened page finds the
+  // same task ids and requests it submitted before.
+  const stateDir = dirname(settingsPath(process.env));
+  const writes = new WriteTransactions(source, () => {
+    const { hostId, serverUrl } = settings.snapshot;
+    return journalFor(settingsPath(process.env), JSON.stringify([serverUrl, hostId]));
+  });
+  /** Why a review did not start, per session; the page shows these beside the runs that happened. */
+  const skips = new IdleSkipJournal(stateDir);
   let reviewing = false;
-  const idleTimer = setInterval(() => {
-    if (reviewing || getAgents === undefined) return;
+  const activity = new Map<string, { turn: number; at: number }>();
+  const runner = createTaskRunner(() => getAgents?.());
+  const idleReviewTimer = setInterval(() => {
+    if (reviewing) return;
     reviewing = true;
     void (async () => {
       try {
-        for (const session of (await source.idleReviewPending()).slice(0, 3)) {
-          await runIdleReview(source, createTaskRunner(() => getAgents?.()), session.sessionId, undefined);
+        await writes.refreshIdleReceipts();
+        for (const session of await source.idleReviewPending()) {
+          try {
+            const last = session.lastStartedAt === null ? null : Date.parse(session.lastStartedAt);
+            const observed = runner.idleSession?.(session.sessionId, last ?? 0);
+            const time = Date.now();
+            let idleSince = activity.get(session.sessionId);
+            if (!idleSince || idleSince.turn !== observed?.turn || observed?.active) {
+              idleSince = { turn: observed?.turn ?? 0, at: time };
+              activity.set(session.sessionId, idleSince);
+            }
+            let pinned: ReturnType<NonNullable<typeof runner.pin>> | undefined;
+            try { pinned = runner.pin?.(session.sessionId); } catch { /* report below */ }
+            const ready = idleReviewReady({
+              idleMs: observed?.active ? 0 : time - idleSince.at, score: observed?.score ?? 0,
+              attempts: session.attempt, sinceLastAttemptMs: last === null ? null : time - last,
+              ...(observed?.paused ? { paused: 'agent-team' } : {}),
+              hasRoute: pinned !== undefined, hasEvidence: observed !== undefined && session.count > 0,
+            });
+            if (!ready.ready || !pinned || !observed) {
+              skips.record({ sessionId: session.sessionId, reason: ready.ready ? 'no-evidence' : ready.reason === 'evidence' ? 'no-evidence' : ready.reason });
+              continue;
+            }
+            skips.clear(session.sessionId);
+            const controller = new AbortController();
+            const detach = observed.abortOnTurn(controller);
+            try { await runIdleReview(source, pinned, session.sessionId, session.workspaceId, controller.signal, writes); }
+            finally { detach(); }
+          } catch (error) {
+            skips.record({ sessionId: session.sessionId, reason: 'no-evidence', detail: String(error).slice(0, 200) });
+          }
         }
-      } catch {
-        // A missing model route or an already running session is retried on the next tick.
       } finally { reviewing = false; }
-    })();
-  }, 10 * 60_000);
-  idleTimer.unref?.();
-  ctx.effect?.(() => () => clearInterval(idleTimer), 'dsh-mnemo-weave: idle review timer');
+    })().catch(() => undefined);
+  }, 5_000);
+  idleReviewTimer.unref?.();
+  ctx.effect?.(() => () => clearInterval(idleReviewTimer), 'dsh-mnemo-weave: idle review timer');
   ctx.effect(() => {
     const connection = ctx.connection;
     const webServer = ctx.get('webServer');
@@ -223,7 +263,7 @@ export function apply(ctx: HostContext, config?: unknown): void {
     const owner = ctx.extend === undefined ? ctx : ctx.extend({ webServer });
     const target = owner.connection;
     if (target === undefined) return;
-    const dispose = target.rpc.handle(RPC_CHANNEL, createRpcHandler(source, settings, createTaskRunner(() => getAgents?.())));
+    const dispose = target.rpc.handle(RPC_CHANNEL, createRpcHandler(source, settings, createTaskRunner(() => getAgents?.()), writes, skips));
     return () => { if (typeof dispose === 'function') (dispose as () => void)(); };
   }, 'dsh-mnemo-weave: memory channel');
 }

@@ -101,8 +101,8 @@ test('the built client bundle registers a page and a sidebar entry through DSH s
   const calls = { injected: [] as string[], registered: [] as Registration[], released: [] as string[], styles: 0 };
   const apply = module.exports['apply'] as (ctx: unknown) => void;
   apply(makeContext(state, calls));
-  assert.deepEqual(calls.injected, ['main', 'sidebar.panellist']);
-  assert.equal(calls.registered.length, 2);
+  assert.deepEqual(calls.injected, ['main', 'sidebar.panellist', 'conversation.chat.assistant-actions']);
+  assert.equal(calls.registered.length, 3);
   assert.equal(calls.registered[0]?.options.name, 'main');
   assert.equal(calls.registered[0]?.options.key, 'mnemoweave');
   assert.equal(typeof calls.registered[0]?.options.inject, 'function');
@@ -113,6 +113,11 @@ test('the built client bundle registers a page and a sidebar entry through DSH s
   assert.equal(entry.options.order, 40);
   assert.equal(typeof entry.options.label, 'function');
   assert.equal((entry.options.label as () => string)(), '记忆中枢');
+  // 「保存回复」 takes its own cell, so it never displaces the shipped feedback action.
+  const reply = calls.registered[2]!;
+  assert.equal(reply.options.name, 'conversation.chat.assistant-actions');
+  assert.equal(reply.options.id, 'mnemoweave');
+  assert.equal(reply.options.order, 60);
   // Styles are injected once, into the document head.
   assert.equal(state.document.head.children.length, 1);
   assert.equal((state.document.head.children[0] as { dataset: Record<string, string> }).dataset['mnemoweaveUi'], 'dsh-mnemo-weave-styles');

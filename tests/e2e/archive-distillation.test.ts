@@ -44,6 +44,21 @@ test('a distilled draft publishes its fixed text and refuses a stale source', { 
     return { status: response.status, body: (text === '' ? {} : JSON.parse(text)) as Record<string, unknown> };
   };
   try {
+    assert.equal((await call('POST', '/v1/events', {
+      protocolVersion: '1', adapterVersion: 'probe', eventId: 'reply-save-event', sessionId: 'reply-session', turnId: '7',
+      kind: 'message.user', occurredAt: new Date().toISOString(), receivedAt: new Date().toISOString(),
+      sourceRef: 'probe', payload: { text: '本轮不留存', noRetention: true },
+    })).status, 200);
+    const replyPath = `/v1/memory-write-tasks/${randomUUID()}/actions/0`;
+    const reply = {
+      kind: 'formal-memory', trigger: 'reply-save', sessionId: 'reply-session', turnId: '7', action: 'create',
+      content: 'Explicitly confirmed reply from a non-retained turn.', reason: 'Explicit confirmation',
+      assessment: 'supported', evidenceRefs: ['reply:message-42'],
+    };
+    assert.equal((await call('POST', replyPath, { ...reply, turnId: 'message-42' })).status, 400);
+    const savedReply = await call('POST', replyPath, reply);
+    assert.equal(savedReply.body['status'], 'published', JSON.stringify(savedReply));
+    assert.equal((await call('POST', replyPath, reply)).body['memoryId'], savedReply.body['memoryId']);
     // A registered workspace, then one published archive.
     assert.equal((await call('POST', '/v1/workspaces', { workspaceId: WORKSPACE, name: 'distill workspace' }, operatorHeaders)).status, 201);
     const created = await call('POST', '/v1/archives', {

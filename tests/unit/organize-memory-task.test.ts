@@ -18,7 +18,15 @@ function harness(answer: unknown) {
     withdraw: async (input: Record<string, unknown>) => { writes.push({ kind: 'withdraw', ...input }); return { memoryId: 'memory-1' }; },
   };
   const run = (async () => answer) as never;
-  return { source, writes, run };
+  const transactions = {
+    prepare: (entries: readonly unknown[]) => { prepared.push(...entries); },
+    submit: async (input: { action: string; request: Record<string, unknown> }) => {
+      writes.push({ ...input.request, kind: input.action });
+      return { status: 'published', memoryId: MEMORY_ID, taskId: MEMORY_ID };
+    },
+  } as never;
+  const prepared: unknown[] = [];
+  return { source, writes, run, transactions, prepared };
 }
 
 const MEMORY_ID = '11111111-1111-4111-8111-111111111111';
@@ -45,10 +53,11 @@ test('only the confirmed items are executed, in plan order', async () => {
   ] });
   h.source.memory = async () => ({ memoryId: MEMORY_ID, entryVersion: 4 });
   const plan = await previewOrganizeMemories(h.source as never, h.run, { instruction: `更新 ${MEMORY_ID}` });
-  const result = await applyOrganizeMemories(h.source as never, plan, [1]);
+  const result = await applyOrganizeMemories(plan, [1], h.transactions, MEMORY_ID);
   assert.deepEqual(result.items.map(item => item.state), ['skipped', 'applied']);
   assert.deepEqual(h.writes.map(write => write['kind']), ['edit']);
   assert.equal(h.writes[0]!['entryVersion'], 4);
+  assert.equal(h.prepared.length, 1);
 });
 
 test('a stale version is skipped with the re-run reason and never written', async () => {
@@ -68,12 +77,12 @@ test('a withdrawal is refused unless the instruction names that exact memory id'
   const unnamed = await previewOrganizeMemories(h.source as never, h.run, { instruction: '删掉过时的串口结论' });
   assert.equal(unnamed.items[0]!.action, 'withdraw');
   assert.equal(unnamed.items[0]!.targetId, undefined, 'the withdrawal is offered without a target');
-  await applyOrganizeMemories(h.source as never, unnamed, [0]);
+  await applyOrganizeMemories(unnamed, [0], h.transactions, MEMORY_ID);
   assert.equal(h.writes.length, 0);
 
   const named = await previewOrganizeMemories(h.source as never, h.run, { instruction: `撤回 ${MEMORY_ID}，它已过时` });
   assert.equal(named.items[0]!.targetId, MEMORY_ID);
-  const result = await applyOrganizeMemories(h.source as never, named, [0]);
+  const result = await applyOrganizeMemories(named, [0], h.transactions, MEMORY_ID);
   assert.equal(result.items[0]!.state, 'applied');
   assert.equal(h.writes[0]!['kind'], 'withdraw');
 });
@@ -99,6 +108,6 @@ test('an unsupported action or an oversized body is planned as a skip', async ()
   const plan = await previewOrganizeMemories(h.source as never, h.run, { instruction: '整理' });
   assert.deepEqual(plan.items.map(item => item.action), ['skip', 'skip', 'skip']);
   assert.equal(plan.items[1]!.content, undefined);
-  await applyOrganizeMemories(h.source as never, plan, [0, 1, 2]);
+  await applyOrganizeMemories(plan, [0, 1, 2], h.transactions, MEMORY_ID);
   assert.equal(h.writes.length, 0);
 });

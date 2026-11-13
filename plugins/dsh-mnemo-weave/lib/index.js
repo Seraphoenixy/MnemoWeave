@@ -325,7 +325,7 @@ export function createTools(config) {
     },
     {
       name: 'mnemoweave_remember',
-      description: `Propose one durable engineering conclusion or a long-term fact the user supplied. The host delegates a restricted write task; an approved new memory is published and the actual receipt is returned. ${ENGINEERING_EXPERIENCE_GUIDANCE} ${NO_RETENTION_NOTE}`,
+      description: `Propose one durable engineering conclusion or a long-term fact the user supplied. Submit it as a candidate for review and return the candidate receipt. ${ENGINEERING_EXPERIENCE_GUIDANCE} ${NO_RETENTION_NOTE}`,
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -346,9 +346,7 @@ export function createTools(config) {
         // A turn marked "do not retain" refuses the write before any task or candidate exists.
         const refusal = noRetentionRefusal(execution);
         if (refusal !== undefined) throw refusal;
-        // No delegation capability is wired in this build, so the documented fallback applies:
-        // submit a candidate and return its receipt. The receipt says `candidate`, never
-        // `published`, so the model cannot report a publication that did not happen.
+        // Model-initiated remember submits a candidate for review.
         const candidate = await callServer(config, 'POST', '/v1/remember', {
           idempotencyKey: `dsh-${randomUUID()}`.slice(0, 64),
           content: args.content,

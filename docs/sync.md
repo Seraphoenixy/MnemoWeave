@@ -1,12 +1,12 @@
 # 同步协议
 
-本文定义同步协议 2，远端同步库使用 schema v3。交付状态见 [当前状态](status.md)，术语见 [架构](architecture.md#统一术语)。
+本文定义同步协议 2，远端同步库使用 schema v4。交付状态见 [当前状态](status.md)，术语见 [架构](architecture.md#统一术语)。
 
 每台开发机的本机 Server 使用逐设备令牌连接远端同步 Server。宿主在本机完成注入和召回，已应用的本机副本在远端断开时仍可读取。
 
 ## 同步流与条目
 
-同步流是设备授权、日志、序号、游标、快照和清理的单位。协议 2 使用 `stream` 作为同步流的字段名。
+同步流是日志、序号、游标、快照和清理的单位。协议 2 使用 `stream` 作为同步流的字段名。
 
 | 条目类型 `kind` | 同步流 `stream` | 条目元数据 |
 |---|---|---|
@@ -16,7 +16,7 @@
 
 条目信封包含 `entryId`、`kind`、`content`、`payload`、`withdrawnAt`。远端响应再包含 `version`。仅工作区档案的 `payload` 必须含 `workspaceId`。写入端和远端按表从 `kind` 和工作区档案的 `payload.workspaceId` 派生同步流。POST 写入条目不接收 `scope`、`stream` 或客户端指定的 `version`。准则和正式记忆载荷不接收 `workspaceId`。未知字段、类型和同步流 ID 返回 `INVALID_INPUT`。
 
-增量拉取、快照和设备授权显式指定同步流。增量响应与快照在外层返回 `stream`，条目不重复返回。应用前校验每条记录派生的同步流等于外层 `stream`。快照的 `nextSince` 只更新该同步流的游标。条目详情和回执由远端根据已保存的条目或回执定位同步流并校验设备读权限。每个同步流可授权只读（`ro`）或读写（`rw`），缺少授权表示禁止访问。写入需要读权限，以便发起端查询回执和应用确认结果。拥有准则或工作区档案的读写权限不会获得正式记忆读写权限。
+增量拉取和快照显式指定同步流。增量响应与快照在外层返回 `stream`，条目不重复返回。应用前校验每条记录派生的同步流等于外层 `stream`。快照的 `nextSince` 只更新该同步流的游标。已认证设备可读写整个同步库。
 
 准则新增和编辑在远端确认版本前，以事务内的最新集合和正文 UTF-8 字节长度检查容量。超过上限返回 `RULE_CAPACITY_EXCEEDED`，不生成版本或同步日志。本机应用入站记录时复核容量，不自动归档或压缩准则。设备使用一致的准则容量配置。JSON 请求上限见 [容量与维护](implementation.md#容量与维护)。远端在同一提交事务内按工作区校验活跃档案正文容量，超限返回 `ARCHIVE_CAPACITY_EXCEEDED`，不生成版本。归档和恢复由远端确认条目版本及状态，归档时间取远端确认时间。设备应用已确认的状态，不因本机容量或接收顺序独立归档。参见 [容量维护](implementation.md#工作区档案容量维护)。
 
@@ -47,7 +47,7 @@
 
 ## 远端 HTTP
 
-所有端点要求有效设备令牌。除探活外，请求须携带 `x-mnemoweave-sync-protocol: 2`。协议缺失或不匹配时返回 HTTP 409 和 `SYNC_PROTOCOL_MISMATCH`。本机发现远端协议版本不匹配时停用同步并报告该错误。
+同步数据端点要求有效设备令牌。除探活外，同步数据请求须携带 `x-mnemoweave-sync-protocol: 2`。协议缺失或不匹配时返回 HTTP 409 和 `SYNC_PROTOCOL_MISMATCH`。本机发现远端协议版本不匹配时停用同步并报告该错误。
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
@@ -56,15 +56,36 @@
 | GET | `/v1/sync/receipts/{changeId}` | 查询幂等回执 |
 | GET | `/v1/sync/entries/{entryId}` | 查询完整条目及修订 |
 | GET | `/v1/sync/snapshot?stream=` | 读取同步流快照 |
-| GET | `/v1/sync/streams` | 读取设备授权的同步流 |
+| GET | `/v1/sync/streams` | 发现当前同步流 |
 | GET | `/v1/sync/health` | 探活与协议版本 |
 
-本机按调用身份决定动作权限，远端按设备校验同步流读写权限。远端保存设备令牌哈希并支持单设备撤销。设备管理使用 `apps/sync-server/src/enroll.ts` 命令入口，部署单元为 `apps/sync-server/deploy/mnemoweave-sync.service`。
+本机按调用身份决定动作权限。远端通过设备 Bearer 令牌认证，已登记且未撤销的设备可读写整个同步库。同步流各自维护序号、游标和快照。设备令牌哈希持久化，支持单设备撤销。远端 schema v3→v4 保留设备和撤销状态，移除旧同步流授权表。旧令牌升级后可访问整个同步库，升级前应清点现有设备并撤销不再信任的设备。
 
-在远端设置 `MNEMOWEAVE_SYNC_STATE_DIR` 后，从构建目录运行设备管理命令。新令牌只在签发时输出。
+首次初始化、SRP-6a 登录及一次性配对使用以下端点。路径均以 `/v1/sync` 为前缀。
 
-```text
-node dist/apps/sync-server/src/enroll.js enroll dev-a rules:rw formal-memories:rw workspace-archives:11111111-1111-4111-8111-111111111111:rw
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| GET | `/auth/config` | 读取初始化状态、SRP 与 KDF 参数 |
+| POST | `/devices/initialize` | 用部署时的引导令牌初始化 SRP 验证器并签发首个设备令牌 |
+| POST | `/auth/login/challenge` | 获取五分钟有效的一次性 SRP 挑战 |
+| POST | `/auth/login/verify` | 验证客户端证明，返回服务端证明和设备令牌 |
+| POST | `/devices/pairing-token` | 已认证设备签发五分钟有效的配对令牌 |
+| POST | `/devices/pair` | 消耗一次性配对令牌，签发设备令牌 |
+
+在远端服务环境中设置随机的 `MNEMOWEAVE_SYNC_BOOTSTRAP_TOKEN`（至少 32 字符）以启用首次初始化。成功后可以从服务环境删除该引导令牌。SRP 验证器保存在远端，主密码由本机使用。Windows 本机以计划任务运行用户执行下列命令，并设置 `MNEMOWEAVE_STATE_DIR` 为计划任务使用的状态目录。密码和配对令牌由命令交互读取。命令在验证 `/streams` 后使用 Windows DPAPI 保存设备凭据，重启本机 Server 后生效。
+
+```powershell
+node dist/apps/server/src/sync-enroll.js initialize https://sync.example.com dev-a
+node dist/apps/server/src/sync-enroll.js login https://sync.example.com dev-b
+node dist/apps/server/src/sync-enroll.js pairing-token
+node dist/apps/server/src/sync-enroll.js pair https://sync.example.com dev-c
+```
+
+登记成功后 Windows 命令显示设备 ID。远端管理命令使用 `MNEMOWEAVE_SYNC_STATE_DIR`，设备清单显示 ID、标签、登记时间与撤销时间。
+
+```bash
+node dist/apps/sync-server/src/enroll.js enroll dev-a
+node dist/apps/sync-server/src/enroll.js list
 node dist/apps/sync-server/src/enroll.js revoke dev-a
 ```
 
@@ -72,8 +93,10 @@ node dist/apps/sync-server/src/enroll.js revoke dev-a
 
 ## 配置与保留
 
-本机 `MNEMOWEAVE_SYNC_URL`、`MNEMOWEAVE_SYNC_DEVICE_ID`、`MNEMOWEAVE_SYNC_TOKEN` 必须一并提供。三者均未配置时运行本机模式，部分配置拒绝启动。地址使用 HTTPS 或 loopback。轮询间隔 `MNEMOWEAVE_SYNC_INTERVAL_MS` 默认 300000 ms，0 停止周期调度；`MNEMOWEAVE_SYNC_TIMEOUT_MS` 默认 10000 ms。
+本机 `MNEMOWEAVE_SYNC_URL`、`MNEMOWEAVE_SYNC_DEVICE_ID`、`MNEMOWEAVE_SYNC_TOKEN` 必须一并提供。三者均未配置时读取本机 DPAPI 凭据，凭据缺失时运行本机模式。部分环境配置拒绝启动。跨机地址必须使用 HTTPS；HTTP 仅允许回环 IP 地址。同步客户端拒绝重定向。轮询间隔 `MNEMOWEAVE_SYNC_INTERVAL_MS` 默认 300000 ms，0 停止周期调度；`MNEMOWEAVE_SYNC_TIMEOUT_MS` 默认 10000 ms。
 
 本机和远端使用相同的 `MNEMOWEAVE_RULE_CAPACITY_BYTES` 与 `MNEMOWEAVE_ARCHIVE_ACTIVE_CAPACITY_BYTES`。旧项目切换时两端均使用 `MNEMOWEAVE_LEGACY_WORKSPACE_MAP` 指向对照表文件。
 
 远端使用 `MNEMOWEAVE_SYNC_HOST`、`MNEMOWEAVE_SYNC_PORT`、`MNEMOWEAVE_SYNC_STATE_DIR`。默认每个同步流保留 90 天或 50000 条日志，回执独立保留 365 天，分别由 `MNEMOWEAVE_SYNC_RETENTION_DAYS`、`MNEMOWEAVE_SYNC_MAX_CHANGES` 和 `MNEMOWEAVE_SYNC_RECEIPT_DAYS` 配置。清理只移除日志前缀，过期回执返回 `CHANGE_ID_EXPIRED`，本机转人工处理。
+
+主密码登记按来源 IP 限制 SRP 挑战签发，每 30 秒最多 10 次，同时最多保留 10 个未消费挑战。经 TLS 反向代理部署时，将 `MNEMOWEAVE_SYNC_ENROLLMENT_PROXY_IP` 设为代理连接 Server 时使用的源 IP，并让代理用实际客户端 IP 覆盖 `X-Real-IP`。Server 只从该代理地址读取此请求头，其他连接使用 TCP 对端地址。

@@ -53,8 +53,8 @@ before(async () => {
   const dir = await tempDir('sync-roundtrip', 'sync-roundtrip');
   mkdirSync(dir, { recursive: true });
   remote = new SyncStore({ path: join(dir, 'remote.db'), now: () => NOW });
-  remote.enroll('device-local', DEVICE_TOKEN, [{ stream: STREAM, canRead: true, canWrite: true }]);
-  remote.enroll('device-b', B_TOKEN, [{ stream: STREAM, canRead: true, canWrite: true }]);
+  remote.enroll('device-local', DEVICE_TOKEN);
+  remote.enroll('device-b', B_TOKEN);
   server = createSyncServer({ gateway: remote, now: () => new Date(NOW) });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;

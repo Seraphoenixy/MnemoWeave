@@ -117,7 +117,7 @@ test('every endpoint the page uses answers through the Host channel', async () =
     const list = await ok('memories', { limit: 50 }) as { items: Array<{ memoryId: string; entryVersion: number; category?: string }> };
     assert.equal(list.items.length, 3, 'the three seeded memories');
     const sorted = await ok('memories', { limit: 50, sort: 'importance' }) as { items: Array<{ importance?: number }> };
-    assert.deepEqual(sorted.items.map(item => item.importance ?? -1), [5, 3, -1], 'the importance order reaches the page');
+    assert.deepEqual(sorted.items.map(item => item.importance), [5, 3, 3], 'the importance order includes the Provider default');
     const filtered = await ok('memories', { limit: 50, entity: 'dsh' }) as { items: unknown[] };
     assert.equal(filtered.items.length, 1, 'the entity filter reaches the page');
 
@@ -129,7 +129,7 @@ test('every endpoint the page uses answers through the Host channel', async () =
 
     // Entities and explore tabs.
     await ok('memories', { limit: 1 });
-    const explored = await ok('explore', { query: '页面冒烟', limit: 10, minScore: 0 }) as { hits: unknown[] };
+    const explored = await ok('explore', { query: '页面冒烟', limit: 10 }) as { hits: unknown[] };
     assert.ok(explored.hits.length >= 1, 'explore finds the seeded memories');
 
     // Graph tab.

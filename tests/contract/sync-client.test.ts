@@ -25,10 +25,7 @@ before(async () => {
   const dir = await tempDir('sync-client', 'sync-client-test');
   mkdirSync(dir, { recursive: true });
   store = new SyncStore({ path: join(dir, 'sync.db'), now: () => NOW });
-  store.enroll('device-a', TOKEN, [
-    { stream: 'rules', canRead: true, canWrite: true },
-    { stream: 'formal-memories', canRead: true, canWrite: true },
-  ]);
+  store.enroll('device-a', TOKEN);
   server = createSyncServer({ gateway: store, now: () => new Date(NOW) });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -40,6 +37,23 @@ after(() => {
   server.closeAllConnections();
   server.close();
   store.close();
+});
+
+test('remote sync requires HTTPS and rejects redirects', async () => {
+  const credentials = { deviceId: 'device-a', token: TOKEN };
+  for (const baseUrl of ['http://sync.example.com', 'https://user@sync.example.com', 'https://sync.example.com?target=other']) {
+    assert.throws(() => new SyncClient({ ...credentials, baseUrl }), { code: 'INVALID_INPUT' });
+  }
+  const httpsClient = new SyncClient({
+    ...credentials,
+    baseUrl: 'https://sync.example.com/',
+    fetchImpl: async (url, options) => {
+      assert.equal(url, 'https://sync.example.com/v1/sync/streams');
+      assert.equal(options?.redirect, 'error');
+      return new Response(JSON.stringify({ deviceId: 'device-a', streams: [] }));
+    },
+  });
+  assert.deepEqual(await httpsClient.streams(), { deviceId: 'device-a', streams: [] });
 });
 
 function draft(overrides: Partial<SyncEntryDraftValue> = {}): SyncEntryDraftValue {

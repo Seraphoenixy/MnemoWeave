@@ -1,4 +1,5 @@
 import { mkdirSync, readFileSync, statfsSync } from 'node:fs';
+import { readSyncCredential } from './sync-credential.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { isAbsolute, join, resolve } from 'node:path';
 import { z } from 'zod';
@@ -20,6 +21,7 @@ import {
 } from '../../../packages/core/contracts/src/index.ts';
 import type { PublishedFormal } from '../../../packages/infrastructure/governance/src/index.ts';
 import type { WriteTaskReceiptRecord } from '../../../packages/core/contracts/src/index.ts';
+import type { RecallResult } from '../../../packages/core/contracts/src/index.ts';
 import { SqliteCandidates } from '../../../packages/infrastructure/governance/src/index.ts';
 import { SyncClient } from '../../../packages/infrastructure/sync-client/src/index.ts';
 import { SyncService } from './sync-service.ts';
@@ -199,6 +201,14 @@ function toReceipt(row: {
 
 export function configure(env: NodeJS.ProcessEnv = process.env) {
   const config = Config.parse(env);
+  if (config.MNEMOWEAVE_STATE_DIR && !config.MNEMOWEAVE_SYNC_URL && !config.MNEMOWEAVE_SYNC_DEVICE_ID && !config.MNEMOWEAVE_SYNC_TOKEN) {
+    const credential = readSyncCredential(config.MNEMOWEAVE_STATE_DIR);
+    if (credential) {
+      config.MNEMOWEAVE_SYNC_URL = credential.baseUrl;
+      config.MNEMOWEAVE_SYNC_DEVICE_ID = credential.deviceId;
+      config.MNEMOWEAVE_SYNC_TOKEN = credential.token;
+    }
+  }
   const ruleLimits = {
     capacityBytes: config.MNEMOWEAVE_RULE_CAPACITY_BYTES,
     itemMaxBytes: Math.min(config.MNEMOWEAVE_RULE_ITEM_MAX_BYTES, config.MNEMOWEAVE_RULE_CAPACITY_BYTES),
@@ -226,6 +236,7 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
   let formalProvider: FormalProviderPort | undefined;
   const budgets = new TurnBudgetRegistry();
   const BACKFILL_KIND = 'embedding-backfill';
+  let drainPublications: (() => Promise<unknown>) | undefined;
   try {
     candidates?.bindProvider(JSON.stringify({ directory: resolve(config.MNEMON_DATA_DIR), store: config.MNEMON_STORE }));
 
@@ -235,6 +246,18 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
       workflow.start();
     }
     const app = new MemoryApplication(provider, candidates, candidates);
+
+    const adoptExternalMemory = (row: RecallResult['memories'][number], stamp: string): void => {
+      // Server-owned writes become visible through their publication or sync projection.
+      // The source survives a crash between the CLI write and the governance commit.
+      if (row.source?.startsWith('mnemoweave:')) return;
+      candidates?.catalog.adoptProviderMemory(row.id, row.content, stamp, {
+        ...(row.category === undefined ? {} : { category: row.category }),
+        ...(row.importance === undefined ? {} : { importance: row.importance }),
+        ...(row.tags === undefined ? {} : { tags: row.tags }),
+        ...(row.entities === undefined ? {} : { entities: row.entities }),
+      });
+    };
 
     /**
      * Is this exact text already a published memory? The check covers the whole shared
@@ -386,8 +409,8 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
       };
 
       /** Rule writes: plan, remote-confirm, then accept. A refused capacity leaves the draft. */
-      const writeRule = async (operation: 'create' | 'update', row: ReturnType<typeof planRuleCreate>['row'], baseVersion: number) => {
-        const state = await submitLocal({ operation, entry: ruleDraft(row), baseVersion }, () => candidates.memory.saveRule(row, now()));
+      const writeRule = async (operation: 'create' | 'update', row: ReturnType<typeof planRuleCreate>['row'], baseVersion: number, changeId?: string) => {
+        const state = await submitLocal({ operation, entry: ruleDraft(row), baseVersion, ...(changeId === undefined ? {} : { changeId }) }, () => candidates.memory.saveRule(row, now()));
         if (state === 'queued') throw new MnemoWeaveError('SYNC_QUEUED');
         if (state === 'unknown') throw new MnemoWeaveError('SYNC_OUTCOME_UNKNOWN');
         if (state === 'confirmed') {
@@ -423,6 +446,7 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
       type Publication = { memoryId: string; revisionId: string; providerId: string };
       type ShareResult = 'confirmed' | 'queued' | 'unknown' | 'failed' | NonNullable<Awaited<ReturnType<typeof findExactDuplicate>>>;
       const shares = new Map<string, Promise<ShareResult>>();
+      drainPublications = () => Promise.allSettled(shares.values());
       let formalCreates: Promise<unknown> = Promise.resolve();
       const withFormalCreateLock = <T>(operation: () => Promise<T>): Promise<T> => {
         const run = formalCreates.then(operation, operation);
@@ -562,8 +586,8 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
             const result = await provider.embedAll();
             const after = await readEmbedding();
             candidates.memory.finishDiagnosticJob(job.id, result.error === null ? 'succeeded' : 'failed', {
-              ...(before === undefined ? {} : { embeddedBefore: before.embedded }),
-              ...(after === undefined ? {} : { embeddedAfter: after.embedded, total: after.total }),
+              ...(before === undefined ? {} : { embeddedBefore: before.embedded, coverageBefore: before.total === 0 ? 0 : before.embedded / before.total }),
+              ...(after === undefined ? {} : { embeddedAfter: after.embedded, total: after.total, coverageAfter: after.total === 0 ? 0 : after.embedded / after.total }),
               ...(result.error === null ? {} : { error: result.error }),
             });
           } catch (error) {
@@ -674,12 +698,25 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
           if (!refs.every(ref => ref.includes(taskId))) throw new MnemoWeaveError('INVALID_INPUT');
           return;
         }
+        if (action.trigger === 'reply-save') {
+          // One save cites exactly one reply. The Server cannot read the Host's transcript, so it
+          // checks the shape and that the turn this reply belongs to is one it recorded.
+          if (refs.length !== 1 || !/^reply:.{1,200}$/.test(refs[0]!)) throw new MnemoWeaveError('INVALID_INPUT');
+          if (action.sessionId === undefined || action.turnId === undefined) throw new MnemoWeaveError('INVALID_INPUT');
+          const recorded = candidates.turns.messages(hostId, action.sessionId)
+            .some(item => item.turnId === action.turnId);
+          if (!recorded) throw new MnemoWeaveError('INVALID_INPUT');
+          return;
+        }
         const sessionId = action.sessionId;
         const turnId = action.turnId;
         for (const ref of refs) {
           if (sessionId === undefined) throw new MnemoWeaveError('INVALID_INPUT');
           const message = candidates.turns.messages(hostId, sessionId).find(item => item.eventId === ref);
           if (message === undefined) throw new MnemoWeaveError('INVALID_INPUT');
+          if (action.trigger === 'idle-review' && (message.noRetention || candidates.turns.isNoRetention(hostId, sessionId, message.turnId))) {
+            throw new MnemoWeaveError('TURN_NO_RETENTION');
+          }
           // A user event is usable for the turn that produced it, either as this turn's own
           // write or as the reply a save cites within the same session.
           if (turnId !== undefined && message.turnId !== turnId && action.trigger === 'conversation') throw new MnemoWeaveError('INVALID_INPUT');
@@ -687,6 +724,7 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
       };
 
       const assertWriteTaskAllowed = (hostId: string, action: ReturnType<typeof WriteTaskAction.parse>, taskId: string): void => {
+        if (action.trigger === 'conversation' && action.kind === 'formal-memory') throw new MnemoWeaveError('SCOPE_FORBIDDEN');
         assertTriggerAllows(action.trigger, action.action);
         // The per-trigger ceiling bounds how many actions of one kind a task may exist: an idle
         // review gets one rule change (index 0) and one archive create (index 1).
@@ -704,7 +742,7 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
         }
         assertEvidence(hostId, action, taskId);
         const noRetention = candidates.turns.isNoRetention(hostId, action.sessionId ?? '', action.turnId);
-        if (noRetention) throw new MnemoWeaveError('TURN_NO_RETENTION');
+        if (noRetention && action.trigger !== 'reply-save') throw new MnemoWeaveError('TURN_NO_RETENTION');
       };
 
       /** Execute one action of an authorized write task. Host code only; never a model tool. */
@@ -717,6 +755,7 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
         errorCode?: string | null;
       }> => {
         if (action.action === 'skip') return { status: 'skipped' };
+        const changeId = taskResourceChangeId(hostId, taskId, index);
 
         if (action.kind === 'rule') {
           if (action.trigger === 'conversation' && action.sessionId === undefined) throw new MnemoWeaveError('INVALID_INPUT');
@@ -725,7 +764,7 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
               const plan = planRuleCreate({
                 body: action.body!, enabled: action.enabled ?? true,
               }, candidates.memory.allRules(), ruleLimits);
-              const record = await writeRule('create', plan.row, 0);
+              const record = await writeRule('create', { ...plan.row, entryId: changeId }, 0, changeId);
               return { status: 'applied', entryId: record.entryId, entryVersion: record.version };
             }
             const current = action.entryId === undefined ? null : candidates.memory.rule(action.entryId);
@@ -733,7 +772,7 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
             if (current.version !== action.baseVersion) throw new MnemoWeaveError('VERSION_CONFLICT');
             if (action.action === 'remove') {
               const plan = planRuleEdit(current, { remove: true, baseVersion: current.version }, candidates.memory.allRules(), ruleLimits);
-              const record = await writeRule('update', plan.row, current.version);
+              const record = await writeRule('update', plan.row, current.version, changeId);
               return { status: 'applied', entryId: record.entryId, entryVersion: record.version };
             }
             const plan = planRuleEdit(current, {
@@ -741,7 +780,7 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
               ...(action.enabled === undefined ? {} : { enabled: action.enabled }),
               baseVersion: current.version,
             }, candidates.memory.allRules(), ruleLimits);
-            const record = await writeRule('update', plan.row, current.version);
+            const record = await writeRule('update', plan.row, current.version, changeId);
             return { status: 'applied', entryId: record.entryId, entryVersion: record.version };
           });
         }
@@ -758,7 +797,7 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
                 source: action.source ?? 'session', verification: action.verification ?? 'open',
                 evidence: action.evidence ?? (action.evidenceRefs ?? []).join('\n').slice(0, 2000),
               }, candidates.memory.allArchives(true), now(), archiveLimitBytes);
-              const record = await writeArchive(plan, 0);
+              const record = await writeArchive({ ...plan, entryId: changeId }, 0, changeId);
               return { status: 'applied', entryId: record.entryId, entryVersion: record.version };
             }
             const current = action.entryId === undefined ? null : candidates.memory.archive(action.entryId);
@@ -770,7 +809,7 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
               ...(action.verification === undefined ? {} : { verification: action.verification }),
               ...(action.evidence === undefined ? {} : { evidence: action.evidence }),
             }, candidates.memory.allArchives(true), now(), archiveLimitBytes);
-            const record = await writeArchive(plan, current.version);
+            const record = await writeArchive(plan, current.version, changeId);
             return { status: 'applied', entryId: record.entryId, entryVersion: record.version };
           });
         }
@@ -906,7 +945,27 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
       };
 
       const activeWriteTasks = new Map<string, Promise<WriteTaskReceiptRecord>>();
+      const taskResourceChangeId = (hostId: string, taskId: string, index: number): string => {
+        const hex = createHash('sha256').update(JSON.stringify([hostId, taskId, index])).digest('hex');
+        return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+      };
       const refreshFormalReceipt = async (hostId: string, row: NonNullable<ReturnType<typeof candidates.writeTasks.receipt>>) => {
+        if (row.kind !== 'formal-memory' && ['unknown', 'queued'].includes(row.status)) {
+          const changeId = taskResourceChangeId(hostId, row.taskId, row.index);
+          const outbox = candidates.ledger.outboxChange(changeId);
+          if (outbox?.state === 'conflict' || outbox?.state === 'needs_review') {
+            return candidates.writeTasks.settle(hostId, row.taskId, row.index, { status: 'failed', errorCode: outbox.lastError ?? 'NEEDS_REVIEW' });
+          }
+          const inbox = candidates.ledger.inboxChange(changeId);
+          if (inbox?.state === 'applied') {
+            return candidates.writeTasks.settle(hostId, row.taskId, row.index, { status: 'applied', entryId: inbox.entryId, entryVersion: inbox.version });
+          }
+          if (outbox || activeWriteTasks.has(JSON.stringify([hostId, row.taskId, row.index]))) return row;
+          if (!coordinator && row.action === 'create') {
+            const version = row.kind === 'rule' ? candidates.memory.rule(changeId)?.version : candidates.memory.archive(changeId)?.version;
+            if (version !== undefined) return candidates.writeTasks.settle(hostId, row.taskId, row.index, { status: 'applied', entryId: changeId, entryVersion: version });
+          }
+        }
         if (row.kind !== 'formal-memory' || !row.candidateId || !['queued', 'unknown', 'needs_review'].includes(row.status)) return row;
         const candidate = candidates.get(row.candidateId);
         if (candidate.status === 'rejected' || candidate.status === 'failed') {
@@ -939,6 +998,7 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
           return { ...report, ...(backfill === undefined ? {} : { backfill }) };
         },
         embeddingBackfill: async () => startBackfill(),
+        embeddingBackfillHistory: async (_hostId, limit) => ({ items: candidates.memory.diagnosticJobs(BACKFILL_KIND, limit) }),
 
         // ── Workspaces ──
         workspaces: async ({ hostId, operator }) => ({
@@ -1200,22 +1260,12 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
            * library. The catalog then supplies what only it knows — the entry version, the
            * revision history — while the Provider supplies the body and classification.
            */
-          const providerRows = typeof provider.listAll === 'function'
-            ? await provider.listAll().catch(() => null)
-            : null;
-          if (providerRows !== null) {
-            const stamp = now();
-            for (const row of providerRows) {
-              candidates.catalog.adoptProviderMemory(row.id, row.content, stamp, {
-                ...(row.category === undefined ? {} : { category: row.category }),
-                ...(row.importance === undefined ? {} : { importance: row.importance }),
-                ...(row.tags === undefined ? {} : { tags: row.tags }),
-                ...(row.entities === undefined ? {} : { entities: row.entities }),
-              });
-            }
-          }
+          const providerRows = await provider.listAll();
+          const stamp = now();
+          for (const row of providerRows) adoptExternalMemory(row, stamp);
           const scoped: Array<{
             memoryId: string; providerId: string; publishedAt: string; importance: number | null;
+            revisionId: string; entryVersion: number; contentHash: string;
             current: { category?: string; importance?: number; tags?: string[]; entities?: string[] };
           }> = [];
           /**
@@ -1228,7 +1278,7 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
            * authoritative for what it recorded, and rewriting an immutable revision to fill a gap
            * would be a silent history change.
            */
-          const providerMeta = new Map((providerRows ?? []).map(row => [row.id, row] as const));
+          const providerMeta = new Map(providerRows.map(row => [row.id, row] as const));
           for (const providerId of candidates.catalog.visibleProviderIds()) {
             for (const memoryId of candidates.catalog.currentMemoryIds(providerId)) {
               const descriptor = candidates.catalog.get(memoryId);
@@ -1242,6 +1292,7 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
               const entities = current.entities ?? fromProvider?.entities;
               scoped.push({
                 memoryId, providerId, publishedAt: current.publishedAt, importance: importance ?? null,
+                revisionId: current.id, entryVersion: candidates.memory.entryVersion(memoryId), contentHash: current.contentHash,
                 current: {
                   ...(category === undefined ? {} : { category }),
                   ...(importance === undefined ? {} : { importance }),
@@ -1339,16 +1390,21 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
               if (items.length >= limit) break;
               const entry = window[offset]!;
               const content = bodies.get(entry.providerId);
+              if (!candidates.catalog.currentMemoryIds(entry.providerId).includes(entry.memoryId)) continue;
               if (content === undefined) { readFailure = true; break; }
+              if (createHash('sha256').update(content).digest('hex') !== entry.contentHash) {
+                throw new MnemoWeaveError('PROVIDER_INTEGRITY');
+              }
               const position = index + offset;
               if (terms.length > 0 && !terms.every(term => content.toLowerCase().includes(term))) continue;
               const descriptor = candidates.catalog.get(entry.memoryId);
               const current = descriptor.revisions.find(revision => revision.id === descriptor.currentRevisionId);
-              if (!current) continue;
+              if (descriptor.state !== 'active' || current?.id !== entry.revisionId
+                || candidates.memory.entryVersion(entry.memoryId) !== entry.entryVersion) continue;
               items.push({
-                memoryId: entry.memoryId, revisionId: current.id, providerMemoryId: entry.providerId,
-                publishedAt: current.publishedAt, content,
-                entryVersion: candidates.memory.entryVersion(entry.memoryId),
+                memoryId: entry.memoryId, revisionId: entry.revisionId, providerMemoryId: entry.providerId,
+                publishedAt: entry.publishedAt, content,
+                entryVersion: entry.entryVersion,
                 ...entry.current,
               });
               lastReturned = position;
@@ -1376,28 +1432,17 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
         /**
          * Provider-ranked search over the shared collection. An optional hint is a workspace name
          * used as an extra relevance line; it never filters the result set.
+         *
+         * There is no score floor. The recall quality policy has already decided which rows are
+         * relevant and how many of the weaker tiers to admit; a floor on top of that would ask the
+         * caller to guess a number on the Provider's fused scale, which is not a similarity and
+         * differs by retrieval mode.
          */
         explore: async (_hostId, input) => {
           const query = input.hint === undefined ? input.query : `${input.query}\n${input.hint}`;
-          const recalled = await app.recallDetailed({ query, limit: input.limit });
-          const threshold = input.minScore ?? 0;
+          const recalled = await app.recallDetailed({ query, limit: input.limit, mode: input.mode, category: input.category });
           const hits: Array<Record<string, unknown>> = [];
-          /**
-           * A hit is adopted before it is mapped.
-           *
-           * A Provider can rank a memory this catalog has never seen, and dropping it here would
-           * make the search silently narrower than the store. Adoption gives it the same logical
-           * id and entry version the list already grants it, so the result can be opened.
-           */
-          const stamp = now();
           for (const memory of recalled.memories) {
-            if ((memory.score ?? 0) < threshold) continue;
-            candidates.catalog.adoptProviderMemory(memory.id, memory.content, stamp, {
-              ...(memory.category === undefined ? {} : { category: memory.category }),
-              ...(memory.importance === undefined ? {} : { importance: memory.importance }),
-              ...(memory.tags === undefined ? {} : { tags: memory.tags }),
-              ...(memory.entities === undefined ? {} : { entities: memory.entities }),
-            });
             for (const memoryId of candidates.catalog.currentMemoryIds(memory.id)) {
               const descriptor = candidates.catalog.get(memoryId);
               if (descriptor.state !== 'active') continue;
@@ -1405,7 +1450,9 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
               if (!current) continue;
               hits.push({
                 memoryId, revisionId: current.id, providerMemoryId: memory.id,
-                state: descriptor.state, content: memory.content, score: memory.score ?? 0,
+                state: descriptor.state, content: memory.content,
+                ...(memory.score === undefined ? {} : { score: memory.score }),
+                ...(memory.relevance === undefined ? {} : { relevance: memory.relevance }),
                 publishedAt: current.publishedAt,
                 ...(current.category === undefined ? {} : { category: current.category }),
                 ...(current.tags === undefined ? {} : { tags: current.tags }),
@@ -1413,9 +1460,18 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
             }
           }
           hits.sort((left, right) => {
-            const leftScore = left['score'] as number;
-            const rightScore = right['score'] as number;
-            if (leftScore !== rightScore) return rightScore - leftScore;
+            // The policy already decided which rows belong in the answer and in which tier. The
+            // re-sort only makes that decision reproducible: the Provider's own tie order was
+            // measured to change between calls for one query, so ties are broken here on facts
+            // the catalog owns.
+            const order = { high: 0, medium: 1, unknown: 2, low: 3 } as const;
+            const tier = (row: Record<string, unknown>): number => order[(row['relevance'] as keyof typeof order | undefined) ?? 'unknown'] ?? 2;
+            if (tier(left) !== tier(right)) return tier(left) - tier(right);
+            const leftScore = left['score'] as number | undefined;
+            const rightScore = right['score'] as number | undefined;
+            if (leftScore !== undefined && rightScore !== undefined && leftScore !== rightScore) return rightScore - leftScore;
+            if (leftScore === undefined && rightScore !== undefined) return 1;
+            if (leftScore !== undefined && rightScore === undefined) return -1;
             const leftAt = left['publishedAt'] as string;
             const rightAt = right['publishedAt'] as string;
             if (leftAt !== rightAt) return leftAt < rightAt ? 1 : -1;
@@ -1459,22 +1515,12 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
           const providerToLogical = new Map<string, string>();
           if (providerGraph !== null) {
             const stamp = now();
-            const providerRows = typeof provider.listAll === 'function'
-              ? await provider.listAll().catch(() => null)
-              : null;
+            const providerRows = await provider.listAll().catch(() => null);
             const bodyById = new Map((providerRows ?? []).map(row => [row.id, row] as const));
             for (const node of providerGraph.nodes) {
               const row = bodyById.get(node.id);
-              const adopted = candidates.catalog.adoptProviderMemory(
-                node.id, row?.content ?? node.label, stamp,
-                row === undefined ? undefined : {
-                  ...(row.category === undefined ? {} : { category: row.category }),
-                  ...(row.importance === undefined ? {} : { importance: row.importance }),
-                  ...(row.tags === undefined ? {} : { tags: row.tags }),
-                  ...(row.entities === undefined ? {} : { entities: row.entities }),
-                },
-              );
-              const logical = adopted ?? candidates.catalog.currentMemoryIds(node.id)[0];
+              if (row !== undefined) adoptExternalMemory(row, stamp);
+              const logical = candidates.catalog.currentMemoryIds(node.id)[0];
               if (logical !== undefined) providerToLogical.set(node.id, logical);
             }
           }
@@ -1616,14 +1662,26 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
           requireTurn(hostId, turn);
           const budget = budgets.for({ ...turn, hostId });
           const result = await app.recallDetailed({ query: request.query, limit: Math.min(request.limit, 50) });
+          // The band the quality policy assigned travels with the row: the budget admits at most
+          // one medium and one unknown entry per turn, so it has to know which tier a row is in
+          // rather than reading the Provider's own `confidence` label, which describes a fused
+          // score that may not be the score shown.
           const answer = budget.acceptRecall(request.query, result.memories.map(memory => ({
-            id: memory.id, content: memory.content, ...(memory.score === undefined ? {} : { score: memory.score }),
+            id: memory.id, content: memory.content,
+            ...(memory.score === undefined ? {} : { score: memory.score }),
+            ...(memory.relevance === undefined ? {} : { relevance: memory.relevance }),
           })));
           const byProvider = new Map(result.memories.map(memory => [memory.id, memory] as const));
           return {
             memories: attachLogical(answer.memories.flatMap(item => {
               const memory = byProvider.get(item.id);
-              return memory === undefined ? [] : [{ id: item.id, content: item.content, ...(memory.score === undefined ? {} : { score: memory.score }) }];
+              return memory === undefined
+                ? []
+                : [{
+                  id: item.id, content: item.content,
+                  ...(memory.score === undefined ? {} : { score: memory.score }),
+                  ...(item.relevance === undefined ? {} : { relevance: item.relevance }),
+                }];
             })),
             complete: !answer.truncated,
           };
@@ -1723,17 +1781,27 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
           const action = WriteTaskAction.parse(input);
           // Authorize before claiming: a refused action must not take the task key, or the action
           // that would have been allowed could never run under that key again.
-          assertWriteTaskAllowed(hostId, action, taskId);
           const requestHash = createHash('sha256').update(JSON.stringify(action)).digest('hex');
+          const existing = candidates.writeTasks.receipt(hostId, taskId, index);
+          if (!existing) assertWriteTaskAllowed(hostId, action, taskId);
           const claim = candidates.writeTasks.claim({ hostId, taskId, index, kind: action.kind, action: action.action, requestHash });
           // A replay of the same action returns the latest known receipt; it is never executed twice.
-          if (claim.existing && (claim.existing.status !== 'unknown' || claim.existing.candidateId)) {
+          if (claim.existing && (action.kind !== 'formal-memory' || claim.existing.status !== 'unknown' || claim.existing.candidateId)) {
             return toReceipt(await refreshFormalReceipt(hostId, claim.existing));
           }
+          if (existing) assertWriteTaskAllowed(hostId, action, taskId);
           const key = JSON.stringify([hostId, taskId, index]);
           const active = activeWriteTasks.get(key);
           if (active) return active;
           const execution = executeWriteTask(hostId, taskId, index, action)
+            .catch(error => {
+              if (!(error instanceof MnemoWeaveError)) throw error;
+              if (error.code === 'SYNC_QUEUED' || error.code === 'SYNC_OUTCOME_UNKNOWN') {
+                return { status: error.code === 'SYNC_QUEUED' ? 'queued' : 'unknown', errorCode: error.code } as const;
+              }
+              candidates.writeTasks.settle(hostId, taskId, index, { status: 'failed', errorCode: error.code });
+              throw error;
+            })
             .then(receipt => toReceipt(candidates.writeTasks.settle(hostId, taskId, index, receipt)))
             .finally(() => activeWriteTasks.delete(key));
           activeWriteTasks.set(key, execution);
@@ -1744,6 +1812,10 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
           if (!row) throw new MnemoWeaveError('NOT_FOUND');
           return toReceipt(await refreshFormalReceipt(hostId, row));
         },
+        writeTaskReceipts: async (hostId, limit) => ({
+          items: await Promise.all(candidates.writeTasks.unsettledReceipts(hostId, limit)
+            .map(async row => toReceipt(await refreshFormalReceipt(hostId, row)))),
+        }),
 
         // ── Archive distillation ──
         createDistillation: async (hostId, input) => {
@@ -1797,7 +1869,14 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
           const started = candidates.events.beginIdleRunWithSignals(hostId, request.sessionId, request.maxSignals);
           return IdleReviewRunStartOutput.parse(started);
         },
-        idleReviewPending: async hostId => ({ sessions: candidates.events.pendingIdleSessions(hostId) }),
+        idleReviewPending: async hostId => ({
+          sessions: candidates.events.pendingIdleSessions(hostId).map(session => {
+            const latest = candidates.events.idleRuns(hostId, session.sessionId)[0];
+            return { ...session, workspaceId: candidates.workspaces.sessionWorkspace(hostId, session.sessionId),
+              attempt: latest?.attempt ?? 0, lastStartedAt: latest?.startedAt ?? null };
+          }),
+        }),
+        idleReviewRecent: async (hostId, limit) => ({ items: candidates.events.recentIdleRuns(hostId, limit) }),
         idleReviewRuns: async (hostId, sessionId) => ({ items: candidates.events.idleRuns(hostId, sessionId) }),
         idleReviewRunItem: async (hostId, runId, input) => candidates.events.recordIdleRunItem(hostId, runId, IdleReviewRunItem.parse(input)),
         idleReviewRunFinish: async (hostId, runId, input) => {
@@ -1851,14 +1930,17 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
         const endpoints = client!;
         endpoints.syncStatus = async () => SyncStatusOutput.parse(service.status());
         endpoints.syncRefresh = async () => SyncRefreshOutput.parse(await service.refresh());
-        candidates.setPublishListener(event => { void shareMemory({ memoryId: event.memoryId, revisionId: candidates!.catalog.get(event.memoryId).currentRevisionId, providerId: event.providerId }); });
+        candidates.setPublishListener(event => {
+          void shareMemory({ memoryId: event.memoryId, revisionId: candidates!.catalog.get(event.memoryId).currentRevisionId, providerId: event.providerId })
+            .catch(error => process.stderr.write(JSON.stringify({ event: 'publication_share_failed', code: error instanceof MnemoWeaveError ? error.code : 'INTERNAL' }) + '\n'));
+        });
         service.start();
       }
     }
     if (!client) throw new Error('Memory endpoints require a state directory');
     return {
       app, port: config.MNEMOWEAVE_PORT,
-      close: async () => { await sync?.stop(); await workflow?.stop(); candidates?.close(); },
+      close: async () => { await sync?.stop(); await workflow?.stop(); await drainPublications?.(); candidates?.close(); },
       client, storage: candidates ? () => candidates.storageStatus() : undefined,
     };
   } catch (error) { candidates?.close(); throw error; }

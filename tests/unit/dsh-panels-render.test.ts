@@ -69,17 +69,17 @@ const exploreResult: UiExplore = {
   query: 'TypeScript',
   unregistered: 2,
   truncated: true,
-  minScore: 0.5,
   hits: [
     {
       memoryId: '11111111-1111-4111-8111-111111111111', revisionId: '22222222-2222-4222-8222-222222222222',
       providerMemoryId: 'p1', state: 'active', content: '第一条命中的正文',
-      score: 0.93, publishedAt: '2026-11-10T00:00:00.000Z', category: 'decision',
+      score: 0.93, relevance: 'high', publishedAt: '2026-11-10T00:00:00.000Z', category: 'decision',
     },
     {
       memoryId: '33333333-3333-4333-8333-333333333333', revisionId: '44444444-4444-4444-8444-444444444444',
       providerMemoryId: 'p2', state: 'superseded',
-      content: '第二条命中的正文', score: 0.61, publishedAt: '2026-11-09T00:00:00.000Z',
+      // A row the Provider ranked without a score: it still has a band, and no number is printed.
+      content: '第二条命中的正文', relevance: 'medium', publishedAt: '2026-11-09T00:00:00.000Z',
     },
   ],
 };
@@ -211,27 +211,37 @@ test('memory forms are modal windows instead of page layout', () => {
   assert.match(formHtml, /mwui-edit-actions/, 'its actions sit in the window body');
 });
 
-test('the explore panel renders its hits, the unpublished count and the score floor', () => {
+test('the explore panel renders its hits, their relevance bands and the unpublished count', () => {
   const html = render(panels.ExplorePanel, {
-    query: 'TypeScript', result: exploreResult, error: null, busy: false, language: 'zh', minScore: 0.5, limit: 20,
-    onChangeQuery: noop, onChangeMinScore: noop, onSearch: noop, onShowMore: noop, onOpen: noop,
+    query: 'TypeScript', mode: 'keyword', category: 'fact', result: exploreResult, error: null, busy: false, language: 'zh', limit: 20,
+    onChangeMode: noop, onChangeCategory: noop,
+    onChangeQuery: noop, onSearch: noop, onShowMore: noop, onOpen: noop,
   });
   assert.match(html, /第一条命中的正文/);
-  assert.match(html, /0\.93/, 'the score is shown so the ranking is not opaque');
+  assert.match(html, /直接搜索/);
+  assert.match(html, /检索策略/);
+  assert.match(html, /value="keyword" selected/);
+  assert.match(html, /value="fact" selected/);
+  assert.match(html, /0\.93/, 'a reported score is shown so the ranking is not opaque');
+  assert.match(html, /高度相关/, 'the policy band is stated for a scored row');
+  assert.match(html, /较相关/, 'the band is stated even when the Provider reported no score');
   assert.match(html, /另有 2 条/, 'unpublished Provider hits are counted, not silently dropped');
   assert.match(html, /显示更多/, 'a truncated result offers more');
   assert.doesNotMatch(html, /undefined|NaN/, 'no field is printed raw');
+  // The page offers no score floor: relevance is decided by the policy that knows the scale.
+  assert.doesNotMatch(html, /门槛/, 'no threshold control is rendered');
+  assert.doesNotMatch(html, /mwui-minscore/, 'the floor select is gone');
 });
 
-test('an empty explore result reads differently with and without a floor', () => {
-  const base = {
-    query: 'x', error: null, busy: false, language: 'zh', limit: 20,
-    onChangeQuery: noop, onChangeMinScore: noop, onSearch: noop, onShowMore: noop, onOpen: noop,
-  };
-  const withFloor = render(panels.ExplorePanel, { ...base, minScore: 0.5, result: { query: 'x', unregistered: 0, truncated: false, minScore: 0.5, hits: [] } });
-  const withoutFloor = render(panels.ExplorePanel, { ...base, minScore: 0, result: { query: 'x', unregistered: 0, truncated: false, minScore: 0, hits: [] } });
-  assert.match(withFloor, /门槛/, 'an empty list under a floor suggests lowering it');
-  assert.notEqual(withFloor, withoutFloor, 'the two empty states do not read the same');
+test('an empty explore result explains the query rather than a threshold', () => {
+  const html = render(panels.ExplorePanel, {
+    query: 'x', mode: 'smart', category: '', error: null, busy: false, language: 'zh', limit: 20,
+    onChangeMode: noop, onChangeCategory: noop,
+    onChangeQuery: noop, onSearch: noop, onShowMore: noop, onOpen: noop,
+    result: { query: 'x', unregistered: 0, truncated: false, hits: [] },
+  });
+  assert.match(html, /没有相关度足够的记忆/, 'the empty state names the cause');
+  assert.doesNotMatch(html, /门槛/, 'there is no threshold to lower');
 });
 
 test('the graph section draws a node per memory and a curve per drawable relation', () => {
@@ -258,20 +268,20 @@ test('the graph section renders an empty canvas without pretending it has data',
   assert.equal((html.match(/class="mwui-graph-edge"/g) ?? []).length, 0);
 });
 
-test('the formal-memory header names the page, its count and its four views', () => {
+test('the formal-memory header names the page and its four views', () => {
   const html = render(panels.MemoryPageHeader, {
-    count: '已载入 3 条', language: 'zh', active: 'content', creating: false, saving: false,
+    language: 'zh', active: 'content', creating: false, saving: false,
     onSelect: noop, onCreate: noop,
   });
   assert.doesNotMatch(html, /整理记忆/, 'the organize entry needs a Host that can run tasks');
 
   const organized = render(panels.MemoryPageHeader, {
-    count: '已载入 3 条', language: 'zh', active: 'content', creating: false, saving: false,
+    language: 'zh', active: 'content', creating: false, saving: false,
     onSelect: noop, onCreate: noop, onOrganize: noop,
   });
   assert.match(organized, /整理记忆/, 'the organize entry sits beside creation');
   assert.match(html, /正式记忆/, 'the page names itself');
-  assert.match(html, /已载入 3 条/, 'the loaded count is in the header');
+  assert.doesNotMatch(html, /已载入/);
   for (const label of ['概览', '检索', '内容', '实体']) assert.ok(html.includes(label), `the page offers the "${label}" view`);
   // The content view is the landing view of this store, not the first entry in the strip.
   assert.match(html, /data-active="true">内容</, 'the active view is marked');
@@ -280,7 +290,7 @@ test('the formal-memory header names the page, its count and its four views', ()
   // The shared collection has no workspace filter, so the header carries no selector at all —
   // passing the removed props has no effect rather than drawing a dead control.
   const withRemovedProps = render(panels.MemoryPageHeader, {
-    count: '已载入 3 条', language: 'zh', active: 'content', creating: false, saving: false,
+    language: 'zh', active: 'content', creating: false, saving: false,
     projects: [{ projectId: null, count: 2 }], project: 'alpha', onProject: noop, onSelect: noop, onCreate: noop,
   });
   assert.doesNotMatch(withRemovedProps, /查看项目/);

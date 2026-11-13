@@ -16,7 +16,7 @@ export async function organizeMemory(
   const workspaceId = input.workspaceId;
   const target = input.target ?? 'formal-memory';
   const [recall, rules, archives] = await Promise.all([
-    source.explore({ query: input.content.trim(), limit: 12, minScore: 0 }),
+    source.explore({ query: input.content.trim(), limit: 12 }),
     source.rules(),
     target === 'workspace-archive' && workspaceId !== undefined ? source.archives(workspaceId) : Promise.resolve([]),
   ]);

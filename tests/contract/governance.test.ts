@@ -253,9 +253,14 @@ test('a partially failed idle-review run keeps finished actions and releases the
     repo.events.recordIdleRunItem('host-1', started.run.id, { index: 0, action: 'create', kind: 'rule', state: 'applied', targetId: 'rule-1' });
     repo.events.recordIdleRunItem('host-1', started.run.id, { index: 1, action: 'create', kind: 'rule', state: 'failed', detail: { reason: 'RULE_CAPACITY_EXCEEDED' } });
     repo.events.finishIdleRun('host-1', started.run.id, 'failed', 'RULE_CAPACITY_EXCEEDED');
-    // Only the unfinished signal is offered to the next attempt.
+    // Only the unfinished signal is offered to the next attempt, together with the facts the
+    // Host needs to decide whether a retry is due: how many runs exist and when the last began.
     const pending = repo.events.pendingIdleSessions('host-1');
-    assert.deepEqual(pending, [{ sessionId: 's-1', count: 1 }]);
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0]?.sessionId, 's-1');
+    assert.equal(pending[0]?.count, 1);
+    assert.equal(pending[0]?.attempt, 1);
+    assert.equal(pending[0]?.lastStartedAt, started.run.startedAt);
     const retry = repo.events.beginIdleRunWithSignals('host-1', 's-1', 10);
     assert.deepEqual(retry.signals.map(signal => signal.id), ['22222222-2222-4222-8222-222222222222']);
     // A succeeded run consumes everything it reserved.

@@ -4,7 +4,7 @@ import { DiagnosticJob, EmbeddingDiagnostics } from './provider.ts';
 import { Candidate, ConflictDescriptor, ConflictResolutionInput, ExploreInput, ExploreOutput, HumanReviewInput, MemoryCreateInput, MemoryCreateOutput, MemoryEditInput, MemoryEditOutput, MemoryGraph, MemoryGraphQuery, MemoryList, MemoryWithdrawInput, MemoryWithdrawOutput, PublishedMemoryOutput, RememberInput, RetryInput, StorageStatus, CancelVersionInput, Category, MemoryReadOutput } from './catalog.ts';
 import { ArchiveCreate, ArchiveEdit, ArchiveHistory, ArchiveList, ArchiveRecord, ArchiveReleaseCandidates, ArchiveSearchInput, ArchiveSearchOutput, ArchiveSegmentInput, ArchiveSegmentOutput, ArchiveStateInput, RuleArchiveList, RuleCreate, RuleEdit, RuleList, RuleRecord, SessionWorkspaceInput, SessionWorkspaceRecord, WorkspaceCreate, WorkspaceList, WorkspaceRecord } from './workspace.ts';
 import { HostEvent, IdleReviewPendingOutput, IdleReviewRun, IdleReviewRunFinishInput, IdleReviewRunItem, IdleReviewRunStartInput, IdleReviewRunStartOutput, IdleReviewRunsOutput, IdleReviewScanInput, IdleReviewScanOutput, IdleReviewSignalsOutput, InjectRequest, InjectionOutput, InjectionReport } from './host.ts';
-import { ArchiveDistillationCreate, ArchiveDistillationRecord, FormalMemoryTaskAction, RuleTaskAction, WorkspaceArchiveTaskAction, WriteTaskAction, WriteTaskReceipt } from './write-task.ts';
+import { ArchiveDistillationCreate, ArchiveDistillationRecord, FormalMemoryTaskAction, RuleTaskAction, WorkspaceArchiveTaskAction, WriteTaskAction, WriteTaskReceipt, WriteTaskReceiptList } from './write-task.ts';
 import { SyncRefreshOutput, SyncStatusOutput } from './sync.ts';
 import { ProviderHealth, RecallInput, RecallOutput } from './provider.ts';
 
@@ -221,7 +221,7 @@ export const openapi = {
       responses: { '200': { description: 'Nodes and edges, with `truncated` when the node cap was reached', content: jsonContent(MemoryGraph) }, '400': { description: 'An out-of-range limit' }, '401': { description: 'Missing host identity' } },
     } },
     '/v1/memories/explore': { post: {
-      description: 'Provider-ranked semantic search over the shared collection, mapped to memories this machine published. An optional `hint` (a workspace display name) is appended to the query text only.',
+      description: 'Provider-ranked semantic search over the shared collection, mapped to memories this machine published. An optional `hint` (a workspace display name) is appended to the query text only. Which rows are relevant is decided by the recall quality policy, not by a caller-supplied score floor.',
       parameters: [hostHeader],
       requestBody: { required: true, content: jsonContent(ExploreInput) },
       responses: { '200': { description: 'Ranked hits and the count of unpublished Provider matches', content: jsonContent(ExploreOutput) }, '400': { description: 'Empty query or invalid limit' }, '401': { description: 'Missing host identity' }, '503': { description: 'Provider unavailable' } },
@@ -291,6 +291,11 @@ export const openapi = {
         responses: { '200': { description: 'Action receipt', content: jsonContent(WriteTaskReceipt) }, '401': { description: 'Unauthorized' }, '404': { description: 'Receipt not found for this host' } },
       },
     },
+    '/v1/memory-write-tasks': { get: {
+      description: 'Actions of this Host that have not reached a settled state, newest first, so a reopened page can resume them. Another Host sees only its own.',
+      parameters: [hostHeader, { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 100 } }],
+      responses: { '200': { description: 'Unsettled receipts', content: jsonContent(WriteTaskReceiptList) }, '400': { description: 'Invalid input' }, '401': { description: 'Unauthorized' } },
+    } },
     '/v1/archive-distillations': { post: {
       description: 'Create one immutable distillation draft from a workspace archive. The Server re-checks the source version and content hash and records the draft for this host. Nothing is published.',
       parameters: [hostHeader],
@@ -356,6 +361,11 @@ export const openapi = {
       parameters: [hostHeader],
       responses: { '200': { description: 'Pending sessions', content: jsonContent(IdleReviewPendingOutput) }, '401': { description: 'Missing host identity' } },
     } },
+    '/v1/idle-review/recent': { get: {
+      description: 'Recent idle-review runs across this Host\'s sessions, newest first, each with its per-item results. A run records what it changed and why it changed nothing.',
+      parameters: [hostHeader, { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 100 } }],
+      responses: { '200': { description: 'Runs', content: jsonContent(IdleReviewRunsOutput) }, '400': { description: 'Invalid input' }, '401': { description: 'Missing host identity' } },
+    } },
 
     '/v1/diagnostics/embeddings': { get: {
       description: 'Official embedding coverage: whether the embedding service is reachable, whether the configured model is usable, how many insights carry a vector, and the recall mode that follows. `unknown` means the Provider interface could not answer.',
@@ -366,6 +376,11 @@ export const openapi = {
       description: 'Backfill missing embedding vectors with the Provider command. One job per kind runs at a time; the job row survives restarts and a killed run is marked interrupted on the next start.',
       parameters: [hostHeader],
       responses: { '202': { description: 'Backfill job started', content: jsonContent(DiagnosticJob) }, '401': { description: 'Missing host identity' }, '409': { description: 'A backfill is already running' } },
+    } },
+    '/v1/diagnostics/embeddings/backfill/history': { get: {
+      description: 'Recent backfill runs of this instance, newest first, including failed and restart-interrupted ones. `coverageBefore` and `coverageAfter` are recorded by the job itself.',
+      parameters: [hostHeader, { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 50 } }],
+      responses: { '200': { description: 'Backfill history', content: jsonContent(z.object({ items: z.array(DiagnosticJob) }).strict()) }, '400': { description: 'Invalid input' }, '401': { description: 'Missing host identity' } },
     } },
     '/v1/sync/status': { get: {
       description: 'Local sync state with the remote sync Server, per stream: cursor, last pull, last error, pending, unknown and unapplied counts.',

@@ -141,17 +141,26 @@ export class MemoryClient {
   idleReviewRunFinish(runId: string, state: 'succeeded' | 'failed' | 'cancelled', error?: string): Promise<ClientResponse<IdleReviewRun>> {
     return this.call('POST', `/v1/idle-review/runs/${encodeURIComponent(runId)}/finish`, { state, ...(error === undefined ? {} : { error }) });
   }
-  idleReviewPending(): Promise<ClientResponse<{ sessions: Array<{ sessionId: string; count: number }> }>> {
+  idleReviewPending(): Promise<ClientResponse<{ sessions: Array<{ sessionId: string; count: number; workspaceId?: string | null; attempt?: number; lastStartedAt?: string | null }> }>> {
     return this.call('GET', '/v1/idle-review/pending');
+  }
+  /** Recent runs across this host's sessions, newest first, with per-item results. */
+  idleReviewRecent(limit = 50): Promise<ClientResponse<{ items: IdleReviewRun[] }>> {
+    return this.call('GET', '/v1/idle-review/recent', undefined, this.timeoutMs, { limit });
   }
 
   embeddingBackfill(): Promise<ClientResponse<DiagnosticJob>> {
     return this.call('POST', '/v1/diagnostics/embeddings/backfill');
   }
 
+  /** Recent backfill runs of this instance, newest first, including failed and interrupted ones. */
+  embeddingBackfillHistory(limit = 20): Promise<ClientResponse<{ items: DiagnosticJob[] }>> {
+    return this.call('GET', '/v1/diagnostics/embeddings/backfill/history', undefined, this.timeoutMs, { limit });
+  }
+
   /** Provider-ranked search over the shared collection; `hint` is a workspace name used as a cue. */
-  explore(query: string, limit = 20, minScore = 0, hint?: string): Promise<ClientResponse<{ query: string; hits: Array<Record<string, unknown>>; unregistered: number; truncated: boolean }>> {
-    return this.call('POST', '/v1/memories/explore', { query, limit, minScore, ...(hint === undefined ? {} : { hint }) });
+  explore(query: string, limit = 20, hint?: string, filters?: { mode?: 'smart' | 'keyword' | 'basic'; category?: string }): Promise<ClientResponse<{ query: string; hits: Array<Record<string, unknown>>; unregistered: number; truncated: boolean }>> {
+    return this.call('POST', '/v1/memories/explore', { query, limit, ...(hint === undefined ? {} : { hint }), ...filters });
   }
 
   graph(query: { limit?: number } = {}): Promise<ClientResponse<{ nodes: Array<Record<string, unknown>>; edges: Array<Record<string, unknown>>; truncated: boolean }>> {
@@ -253,6 +262,11 @@ export class MemoryClient {
   /** The latest known receipt for one action of this host's task. */
   writeTaskReceipt(taskId: string, index: number): Promise<ClientResponse<WriteTaskReceipt>> {
     return this.call('GET', `/v1/memory-write-tasks/${encodeURIComponent(taskId)}/actions/${index}`);
+  }
+
+  /** Actions of this host that are still queued or of unknown outcome, newest first. */
+  unsettledWriteTasks(limit = 50): Promise<ClientResponse<{ items: WriteTaskReceipt[] }>> {
+    return this.call('GET', '/v1/memory-write-tasks', undefined, this.timeoutMs, { limit });
   }
 
   createDistillation(input: Record<string, unknown>): Promise<ClientResponse<ArchiveDistillation>> {

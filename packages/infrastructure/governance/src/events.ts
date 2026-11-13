@@ -127,10 +127,25 @@ export class SessionEventStore {
     });
   }
   /** Sessions with signals no settled run has consumed, so a host can trigger review. */
-  pendingIdleSessions(hostId: string): Array<{ sessionId: string; count: number }> {
-    return this.db.prepare(`SELECT session_id, COUNT(*) n FROM idle_review_signals
-      WHERE host_id=? AND run_id IS NULL GROUP BY session_id ORDER BY MAX(turn_id) DESC LIMIT 20`)
-      .all(hostId).map(row => ({ sessionId: String(row['session_id']), count: Number(row['n']) }));
+  /**
+   * Sessions with signals no run has taken.
+   *
+   * Each row also carries what the Host needs to decide whether to start: how many runs the
+   * session already had and when the last one began, so the attempt cap and the cooldown are
+   * decided from recorded state instead of from what the Host remembers.
+   */
+  pendingIdleSessions(hostId: string): Array<{ sessionId: string; count: number; attempt: number; lastStartedAt: string | null }> {
+    return this.db.prepare(`SELECT s.session_id AS session_id, COUNT(*) AS n,
+        (SELECT COUNT(*) FROM idle_review_runs r WHERE r.host_id = s.host_id AND r.session_id = s.session_id) AS attempts,
+        (SELECT MAX(r.started_at) FROM idle_review_runs r WHERE r.host_id = s.host_id AND r.session_id = s.session_id) AS last_started
+      FROM idle_review_signals s
+      WHERE s.host_id = ? AND s.run_id IS NULL GROUP BY s.session_id ORDER BY MAX(s.turn_id) DESC LIMIT 20`)
+      .all(hostId).map(row => ({
+        sessionId: String(row['session_id']),
+        count: Number(row['n']),
+        attempt: Number(row['attempts'] ?? 0),
+        lastStartedAt: row['last_started'] === null || row['last_started'] === undefined ? null : String(row['last_started']),
+      }));
   }
   /**
    * Release the reservations a run must not keep.
@@ -154,6 +169,11 @@ export class SessionEventStore {
   idleRuns(hostId: string, sessionId: string): IdleReviewRunRecord[] {
     return this.db.prepare('SELECT id FROM idle_review_runs WHERE host_id=? AND session_id=? ORDER BY started_at DESC').all(hostId, sessionId)
       .map(row => this.idleRunRow(hostId, String(row['id'])));
+  }
+  /** Recent runs across sessions, newest first, for the management page's per-session listing. */
+  recentIdleRuns(hostId: string, limit: number): IdleReviewRunRecord[] {
+    return this.db.prepare('SELECT id FROM idle_review_runs WHERE host_id=? ORDER BY started_at DESC, rowid DESC LIMIT ?')
+      .all(hostId, limit).map(row => this.idleRunRow(hostId, String(row['id'])));
   }
   /** Start a run; a session already running is refused rather than queued. */
   beginIdleRun(hostId: string, sessionId: string): IdleReviewRunRecord {

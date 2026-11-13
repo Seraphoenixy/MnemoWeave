@@ -246,6 +246,20 @@ export class SqliteWriteTaskStore {
       memory_id, entry_version, entry_id, candidate_id, error_code, updated_at
       FROM write_task_receipts WHERE host_id=? AND task_id=? ORDER BY action_index ASC`).all(hostId, taskId).map(row => this.toRow(row));
   }
+
+  /**
+   * Actions of one Host that have not reached a settled state.
+   *
+   * `queued` and `unknown` are the two statuses a page reopened later must still be able to show:
+   * the write was accepted or may have happened, so the user is owed a way back to the same
+   * receipt. `updated_at` orders them newest first; the host only ever sees its own rows.
+   */
+  unsettledReceipts(hostId: string, limit: number): WriteTaskReceiptRow[] {
+    return this.db.prepare(`SELECT host_id, task_id, action_index, kind, action, request_hash, status,
+      memory_id, entry_version, entry_id, candidate_id, error_code, updated_at
+      FROM write_task_receipts WHERE host_id=? AND status IN ('queued','unknown')
+      ORDER BY updated_at DESC, task_id DESC, action_index ASC LIMIT ?`).all(hostId, limit).map(row => this.toRow(row));
+  }
 }
 
 /** One immutable distillation draft; the source version is fixed at creation. */

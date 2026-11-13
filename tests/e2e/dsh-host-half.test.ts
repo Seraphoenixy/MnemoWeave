@@ -113,16 +113,17 @@ test('the DSH Host half lists, reads, edits and reports injections through a rea
     assert.equal(stale.ok, false);
     if (!stale.ok) assert.equal(stale.error.code, 'VERSION_CONFLICT');
 
-    // Semantic explore ranks by the Provider's own similarity and maps each hit back to a memory
-    // this machine published, so every result can be opened. Checked while the memory is live.
-    const explored = await rpc('explore', { query: '插件编辑后的正文', limit: 10 });
+    // Explore ranks by the Provider's own relevance and maps each hit back to a memory this
+    // machine published, so every result can be opened. The query names the body the memory holds
+    // now: an earlier revision's wording is superseded and is not meant to resurface in a ranking.
+    const explored = await rpc('explore', { query: '只改正文。', limit: 10 });
     assert.equal(explored.ok, true);
     if (explored.ok) {
-      const found = explored.value as { query: string; hits: Array<{ memoryId: string; score: number; state: string }>; unregistered: number };
-      assert.equal(found.query, '插件编辑后的正文');
+      const found = explored.value as { query: string; hits: Array<{ memoryId: string; score?: number; relevance?: string; state: string }>; unregistered: number };
+      assert.equal(found.query, '只改正文。');
       assert.ok(found.hits.length >= 1, 'the live memory is found');
       assert.ok(found.hits.some(hit => hit.memoryId === memoryId), 'the hit maps back to the catalog memory');
-      assert.ok(found.hits.every(hit => Number.isFinite(hit.score)));
+      assert.ok(found.hits.every(hit => hit.relevance !== undefined), 'every hit states its relevance band');
       assert.equal(typeof found.unregistered, 'number');
     }
 
@@ -141,9 +142,9 @@ test('the DSH Host half lists, reads, edits and reports injections through a rea
     // broken pane: either "not configured" or an explicit refusal, never an empty success.
     const sync = await rpc('sync', {});
     if (sync.ok) {
-      const status = sync.value as { enabled: boolean; scopes: unknown[] };
+      const status = sync.value as { enabled: boolean; streams: unknown[] };
       assert.equal(status.enabled, false, 'a host with no remote reports sync as disabled');
-      assert.deepEqual(status.scopes, []);
+      assert.deepEqual(status.streams, []);
     } else {
       assert.equal(sync.error!.code, 'REVIEW_REQUIRED', 'or refuses explicitly rather than pretending');
     }
@@ -153,20 +154,22 @@ test('the DSH Host half lists, reads, edits and reports injections through a rea
     assert.equal(blank.ok, false);
     if (!blank.ok) assert.equal(blank.error.code, 'INVALID_INPUT');
 
-    // A score floor drops weak matches, and an impossible floor empties the list without failing.
-    const strict = await rpc('explore', { query: '插件编辑后的正文', limit: 10, minScore: 0.99 });
-    assert.equal(strict.ok, true);
-    if (strict.ok) {
-      const found = strict.value as { hits: Array<{ score: number }>; truncated: boolean; minScore: number };
-      assert.ok(found.hits.every(hit => hit.score >= 0.99), 'a floor is a floor');
-      assert.equal(found.minScore, 0.99, 'the applied floor is echoed back');
-      assert.equal(found.truncated, false, 'an emptied list is not truncated');
+    // The live body is found by its own words whether or not the caller repeats the closing
+    // punctuation, and every hit states the band the policy assigned to it.
+    for (const query of ['只改正文。', '只改正文']) {
+      const found = await rpc('explore', { query, limit: 10 });
+      assert.equal(found.ok, true);
+      if (!found.ok) continue;
+      const hits = (found.value as { hits: Array<{ memoryId: string; content: string; relevance?: string }> }).hits;
+      assert.ok(hits.some(hit => hit.memoryId === memoryId && hit.content === '只改正文。'), `${query} finds the live body`);
+      assert.ok(hits.every(hit => typeof hit.relevance === 'string'), 'every hit states its relevance band');
     }
 
-    for (const bad of [-0.1, 1.5, Number.NaN]) {
-      const rejected = await rpc('explore', { query: 'x', minScore: bad });
-      assert.equal(rejected.ok, false, `minScore ${bad} must be rejected`);
-    }
+    // A removed score floor is refused rather than silently ignored: the caller that sent one
+    // believed it was narrowing the answer.
+    const removed = await rpc('explore', { query: 'x', minScore: 0.5 });
+    assert.equal(removed.ok, false, 'minScore is no longer an accepted argument');
+    if (!removed.ok) assert.equal(removed.error.code, 'INVALID_INPUT');
 
     // Withdrawal goes through the same Host channel and needs the operator credential this client
     // carries. The memory leaves recall and keeps every earlier revision readable.

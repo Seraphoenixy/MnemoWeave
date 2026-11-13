@@ -27,14 +27,65 @@ const NativeInsightRow = z.object({
   source: z.string().optional(), confidence: z.string().optional(),
 }).passthrough();
 /**
+ * `recall --verbose` wraps the row it used to return flat: `{insight: {id, content, ...}, score,
+ * via, signals}`. `signals.similarity` is the vector similarity, which is the only calibrated
+ * relevance the Provider reports; a store with no embeddings reports it as 0.
+ */
+const NativeSemanticRow = z.object({
+  insight: z.object({
+    id: z.string().min(1), content: z.string(),
+    category: z.string().optional(), importance: z.number().int().optional(),
+    tags: z.array(z.string()).optional(), entities: z.array(z.string()).optional(),
+    source: z.string().optional(), created_at: z.string().optional(),
+  }).passthrough(),
+  score: z.number().finite().optional(), superseded: z.boolean().optional(),
+  intent: z.string().optional(), via: z.string().optional(), confidence: z.string().optional(),
+  signals: z.object({ similarity: z.number().finite().optional() }).passthrough().optional(),
+}).passthrough();
+/**
  * `recall` wraps its rows in `{results}`, while `search` returns a bare array. Both are official
  * shapes, so one decoder accepts either rather than the caller having to know which command ran.
  */
-const NativeRecallRows = z.union([
-  z.object({ results: z.array(NativeInsightRow) }),
-  z.array(NativeInsightRow).transform(rows => ({ results: rows })),
+const NativeRecall = z.union([
+  z.object({ results: z.array(z.unknown()) }),
+  z.array(z.unknown()).transform((rows): { results: unknown[] } => ({ results: rows })),
 ]);
-const NativeRecall = NativeRecallRows;
+/** One decoded recall row: the body this Server keeps, plus what the row says about relevance. */
+interface RecallRow {
+  memory: NonNullable<RecallResult['memories']>[number];
+  similarity: number | undefined;
+  superseded: boolean;
+}
+/**
+ * Decode one recall row from either official shape.
+ *
+ * A row that names no id or body is a shape this adapter does not know, so it fails the read
+ * instead of disappearing from a page that would then look complete.
+ */
+function decodeRecallRow(value: unknown): RecallRow {
+  const semantic = NativeSemanticRow.safeParse(value);
+  if (semantic.success) {
+    const row = semantic.data;
+    const { created_at: _createdAt, ...insight } = row.insight;
+    const memory: NonNullable<RecallResult['memories']>[number] = { ...insight };
+    if (row.score !== undefined) memory.score = row.score;
+    if (row.confidence !== undefined) memory.confidence = row.confidence;
+    return { memory, similarity: row.signals?.similarity, superseded: row.superseded === true };
+  }
+  const flat = NativeInsightRow.safeParse(value);
+  if (!flat.success) throw new MnemoWeaveError('PROVIDER_PROTOCOL');
+  return { memory: { ...flat.data }, similarity: undefined, superseded: flat.data.superseded === true };
+}
+/**
+ * How many candidates a semantic recall asks the Provider for.
+ *
+ * The CLI truncates by its fused score before any quality policy runs, so the pool is widened
+ * beyond the page the caller wants; without that, a page of 10 could only ever be re-ranked out of
+ * the Provider's own top 10.
+ */
+function recallCandidateLimit(limit: number): number {
+  return Math.max(limit, Math.min(50, Math.max(20, limit * 4)));
+}
 /**
  * The whole-store read returns a bare array, while a limited read wraps it in `{results}`. Both
  * shapes appear in the CLI, so the decode accepts either instead of failing on one.
@@ -248,20 +299,54 @@ export class MnemonCliProvider implements MemoryProvider {
       // Three retrieval modes answer differently, so the caller's choice is honoured rather than
       // approximated: `search` scores tokens, `recall --basic` is SQL LIKE, plain `recall` is the
       // intent-aware ranking.
+      const semantic = request.mode === undefined || request.mode === 'smart';
+      // The ranking truncates by its fused score, so a page-sized request would only ever re-rank
+      // the Provider's own top page. Ask for the wider pool the quality policy selects from.
+      const limit = semantic ? recallCandidateLimit(request.limit) : request.limit;
       const args = request.mode === 'keyword'
-        ? ['search', '--limit', String(request.limit)]
+        ? ['search', '--limit', String(limit)]
         : request.mode === 'basic'
-          ? ['recall', '--basic', '--limit', String(request.limit)]
-          : ['recall', '--limit', String(request.limit)];
+          ? ['recall', '--basic', '--limit', String(limit)]
+          : ['recall', '--limit', String(limit), '--verbose'];
       if (request.mode !== 'keyword') {
         if (request.category !== undefined) args.push('--cat', request.category);
         if (request.source !== undefined) args.push('--source', request.source);
       }
       args.push('--', request.query);
       const result = decode(NativeRecall, await this.checkedRead(args));
-      // Everything the Provider reported is carried through. Dropping classification here would
-      // force every caller to re-filter a page it did not ask for.
-      return { memories: result.results.map(row => ({ ...row })) };
+      const rows = result.results.map(decodeRecallRow).filter(({ memory }) =>
+        request.mode !== 'keyword'
+        || ((request.category === undefined || memory.category === request.category)
+          && (request.source === undefined || memory.source === request.source)));
+      // Every row the Provider reported is carried through; only the score is replaced when the
+      // Provider reported a real vector similarity. Dropping classification here would force every
+      // caller to re-filter a page it did not ask for.
+      const scored = rows.some(row => row.similarity !== undefined && row.similarity > 0);
+      if (!scored) {
+        // No embeddings, or an unreachable embedding service: the similarities are absent or all
+        // zero, so the Provider's own order and fused scores stay authoritative. Re-scoring them
+        // here would replace a ranking that has meaning with one that does not.
+        return { memories: rows.map(row => row.memory) };
+      }
+      const ranked = rows.map(row => {
+        const memory = { ...row.memory };
+        // The compact `confidence` label describes the fused score being discarded, so keeping it
+        // beside a similarity would state a relevance band that no longer matches the number.
+        delete memory.confidence;
+        if (row.similarity === undefined) {
+          // Unknown relevance must not inherit an optimistic fused score; an explicit supersession
+          // demotion stands even without a vector.
+          if (!row.superseded) delete memory.score;
+        } else {
+          const relevance = Math.min(1, Math.max(0, row.similarity));
+          // A corrected fact keeps the Provider's demotion even when its old wording is the
+          // closest vector match to the new question.
+          memory.score = row.superseded ? Math.min(relevance, memory.score ?? 0) : relevance;
+        }
+        return memory;
+      });
+      ranked.sort((left, right) => (right.score ?? -1) - (left.score ?? -1));
+      return { memories: ranked };
     });
   }
   /**

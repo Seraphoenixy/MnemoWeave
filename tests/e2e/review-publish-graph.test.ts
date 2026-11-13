@@ -122,14 +122,14 @@ test('an approved supersede publishes a new memory and draws an edge', async () 
       lastStatus = candidateNow.status;
       const response = await fetch(`${origin}/v1/memories/graph?limit=50`, { headers: service });
       const body = await response.json() as { nodes: Array<{ memoryId: string }>; edges: Array<{ kind: string; sourceMemoryId: string; targetMemoryId: string }> };
-      if (body.edges.length > 0) return body;
       if (lastStatus === 'failed') throw new Error('the worker failed to publish the approved change');
+      if (lastStatus === 'persisted' && body.edges.some(edge => edge.kind === 'Supersedes')) return body;
       return undefined;
     }).catch(error => { throw new Error(`${String(error)} (candidate status: ${lastStatus})`); });
 
     assert.equal(graph.nodes.length, 2, 'the replacement is a new memory, not a new revision of the old one');
-    const edge = graph.edges[0]!;
-    assert.equal(edge.kind, 'Supersedes');
+    const edge = graph.edges.find(edge => edge.kind === 'Supersedes');
+    assert.ok(edge);
     assert.notEqual(edge.sourceMemoryId, edge.targetMemoryId, 'a replacement links two different memories');
     assert.ok(graph.nodes.some(node => node.memoryId === edge.targetMemoryId), 'the replaced memory is still a node');
 

@@ -18,6 +18,17 @@ import { tempDir } from '../support/temp.ts';
 
 const TOKEN = 'service-token-0123456789abcdef';
 
+test('rule capacity saves only the two Server startup settings', async () => {
+  const directory = await tempDir('host-config', 'rule-limits');
+  const path = join(directory, '.env.local-server');
+  writeFileSync(path, '# keep\r\nMNEMOWEAVE_PORT=4317\r\nMNEMOWEAVE_RULE_CAPACITY_BYTES=10000\r\n');
+  const settings = new SettingsService({ entryConfig: { token: TOKEN }, env: { MNEMOWEAVE_SERVER_DIR: directory } });
+  assert.throws(() => settings.saveRuleLimits({ capacityBytes: 8000, itemMaxBytes: 9000 }), { code: 'INVALID_INPUT' });
+  assert.match(readFileSync(path, 'utf8'), /CAPACITY_BYTES=10000/);
+  settings.saveRuleLimits({ capacityBytes: 12000, itemMaxBytes: 9000 });
+  assert.equal(readFileSync(path, 'utf8'), '# keep\r\nMNEMOWEAVE_PORT=4317\r\nMNEMOWEAVE_RULE_CAPACITY_BYTES=12000\r\nMNEMOWEAVE_RULE_ITEM_MAX_BYTES=9000\r\n');
+});
+
 async function tempEnv(name: string): Promise<NodeJS.ProcessEnv> {
   // A fresh directory per run: preferences are files, so a shared path would leak between runs.
   const root = await tempDir('host-config', name);

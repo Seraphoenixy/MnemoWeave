@@ -100,8 +100,8 @@ export class SyncService {
   private async runPass(): Promise<SyncPassResult> {
     this.running = true;
     try {
-      const granted = await this.remote.streams();
-      for (const grant of granted.streams) if (grant.canRead) this.streams.add(grant.stream);
+      const discovered = await this.remote.streams();
+      for (const stream of discovered.streams) if (stream.canRead) this.streams.add(stream.stream);
       let pulled = 0;
       let applied = 0;
       const errors: string[] = [];
@@ -133,7 +133,7 @@ export class SyncService {
 
   status(): SyncStatus {
     // A stream with queued work must stay visible while the remote is unreachable, so the stream
-    // list merges the grants already seen with the streams the outbox mentions.
+    // list merges the streams already discovered with the streams the outbox mentions.
     const streams = new Set(this.streams);
     for (const row of [...this.ledger.outbox('pending'), ...this.ledger.outbox('unknown')]) streams.add(row.stream);
     return {

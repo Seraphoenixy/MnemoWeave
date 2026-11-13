@@ -13,7 +13,9 @@ test('CLI argument boundary protects flag-like content and passes explicit store
   await provider.recall({ query: '--data-dir evil & echo bad', limit: 3 });
   // The user's text stays one positional argument after `--`; `--readonly` marks this as an
   // immutable snapshot read, and still precedes the subcommand.
-  assert.deepEqual(calls[1], ['--data-dir', resolve('work/test-contract'), '--store', 'acceptance', 'recall', '--limit', '3', '--', '--data-dir evil & echo bad']);
+  // `--limit` is the widened candidate pool, and `--verbose` is what carries signal similarity;
+  // the user's text is still one positional argument after `--`.
+  assert.deepEqual(calls[1], ['--data-dir', resolve('work/test-contract'), '--store', 'acceptance', 'recall', '--limit', '20', '--verbose', '--', '--data-dir evil & echo bad']);
 });
 test('Unknown versions and malformed Provider payloads fail explicitly', async () => {
   for (const [version, body, code] of [
@@ -230,4 +232,46 @@ test('a recall mode reaches the command it names, and filters are passed through
   assert.ok(!issued[2]?.includes('search') && !issued[2]?.includes('--basic'), 'smart mode is the default ranking');
   // Provider-side filtering, so the caller does not have to discard a page it already paid for.
   assert.ok(issued[2]?.includes('--cat') && issued[2]?.includes('--source'), 'filters reach the Provider');
+  // The semantic ranking is asked for the wider candidate pool it truncates by score, and for the
+  // verbose payload that carries the vector similarity the quality policy reads.
+  assert.ok(issued[0]?.includes('--limit') && issued.slice(0, 1).length === 1);
+  const smartLimit = Number(issued[2]?.[issued[2]!.indexOf('--limit') + 1]);
+  assert.equal(smartLimit, 20, 'a page of 5 asks for a pool of 5 × 3, floored at 20');
+  assert.ok(issued[2]?.includes('--verbose'), 'similarity is only reported by --verbose');
+  assert.ok(!issued[1]?.includes('--verbose'), 'the LIKE path has no similarity to report');
+});
+
+test('a verbose semantic row is decoded and its similarity becomes the score', async () => {
+  // `--verbose` wraps the row: `{insight, score, via, signals}`. A decoder that knows only the flat
+  // shape fails every smart recall on a store that has embeddings.
+  const provider = new MnemonCliProvider({
+    binary: process.execPath, dataDir: resolve('work/test-contract'), store: 'acceptance',
+    runner: async args => args[0] === '--version' ? 'mnemon version 0.2.13' : JSON.stringify({
+      results: [
+        { insight: { id: 'a', content: '旧正文', category: 'insight' }, score: 0.3, via: 'entity', confidence: 'low', signals: { similarity: 0.82, keyword: 0 } },
+        { insight: { id: 'b', content: '更近的正文' }, score: 0.4, via: 'entity', confidence: 'low', signals: { similarity: 0.93 } },
+      ],
+    }),
+  });
+  const result = await provider.recall({ query: 'q', limit: 5 });
+  assert.deepEqual(result.memories.map(memory => memory.id), ['b', 'a'], 'rows are re-ordered by similarity');
+  assert.equal(result.memories[0]?.score, 0.93, 'the vector similarity is the score');
+  assert.equal(result.memories[0]?.confidence, undefined, 'the fused-score label is dropped with the fused score');
+});
+
+test('with no embeddings the Provider order and fused scores stand', async () => {
+  // An all-zero similarity is what a store without vectors reports. Re-scoring it would replace a
+  // ranking that has meaning with one that does not, so the rows are returned exactly as ranked.
+  const rows = [
+    { insight: { id: 'a', content: '第一' }, score: 0.52, signals: { similarity: 0 } },
+    { insight: { id: 'b', content: '第二' }, score: 0.3, signals: { similarity: 0 } },
+    { insight: { id: 'c', content: '第三' }, score: 0.3, signals: {} },
+  ];
+  const provider = new MnemonCliProvider({
+    binary: process.execPath, dataDir: resolve('work/test-contract'), store: 'acceptance',
+    runner: async args => args[0] === '--version' ? 'mnemon version 0.2.13' : JSON.stringify({ results: rows }),
+  });
+  const result = await provider.recall({ query: 'q', limit: 5 });
+  assert.deepEqual(result.memories.map(memory => memory.id), ['a', 'b', 'c'], 'the Provider order survives');
+  assert.deepEqual(result.memories.map(memory => memory.score), [0.52, 0.3, 0.3], 'the fused scores survive');
 });

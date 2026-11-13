@@ -144,8 +144,11 @@ export const IdleReviewRunStartInput = z.object({
 export const IdleReviewRunStartOutput = z.object({ run: IdleReviewRun, signals: z.array(IdleReviewSignal) }).strict();
 export const IdleReviewRunsOutput = z.object({ items: z.array(IdleReviewRun) }).strict();
 export const IdleReviewPendingOutput = z.object({
-  sessions: z.array(z.object({ sessionId: z.string().min(1), count: z.number().int().positive() }).strict()),
-}).strict();
+  sessions: z.array(z.object({
+    sessionId: z.string().min(1), count: z.number().int().positive(),
+    workspaceId: z.uuid().nullable().optional(), attempt: z.number().int().nonnegative().optional(),
+    lastStartedAt: z.string().nullable().optional(),
+  }).strict()),}).strict();
 export type IdleReviewPendingRecord = z.infer<typeof IdleReviewPendingOutput>;
 export const IdleReviewRunFinishInput = z.object({
   state: z.enum(['succeeded', 'failed', 'cancelled']),

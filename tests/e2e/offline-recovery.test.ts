@@ -73,7 +73,7 @@ test('an edit that never reaches the remote is queued, not applied, and drains a
   const root = await tempDir('offline-recovery', 'offline-never-reached');
   mkdirSync(root, { recursive: true });
   const remote = new SyncStore({ path: join(root, 'remote.db') });
-  remote.enroll('device-local', TOKEN, [{ stream: STREAM, canRead: true, canWrite: true }]);
+  remote.enroll('device-local', TOKEN);
   const memoryId = await seedPublishedMemory(root);
   const app = machine(root, `http://127.0.0.1:${port}`);
   let server: Server | undefined;
@@ -107,7 +107,7 @@ test('an edit lost after a successful write becomes pending confirmation and sti
   const root = await tempDir('offline-recovery', 'offline-lost-connection');
   mkdirSync(root, { recursive: true });
   const remote = new SyncStore({ path: join(root, 'remote.db') });
-  remote.enroll('device-local', TOKEN, [{ stream: STREAM, canRead: true, canWrite: true }]);
+  remote.enroll('device-local', TOKEN);
   const start = async (fixed?: number) => {
     const server: Server = createSyncServer({ gateway: remote });
     await new Promise<void>((done) => server.listen(fixed ?? 0, '127.0.0.1', () => done()));

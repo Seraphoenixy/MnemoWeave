@@ -165,7 +165,10 @@ export interface UiExploreHit {
   providerMemoryId: string;
   state: 'active' | 'superseded' | 'unverified';
   content: string;
-  score: number;
+  /** Present only when the Provider reported a score for this row. */
+  score?: number;
+  /** Relevance band the Server's policy assigned; the page groups on it, never on the number. */
+  relevance?: 'high' | 'medium' | 'low' | 'unknown';
   publishedAt: string;
   category?: string;
   tags?: string[];
@@ -220,8 +223,6 @@ export interface UiExplore {
   unregistered: number;
   /** True when the page filled its limit, so a larger limit may reveal more. */
   truncated: boolean;
-  /** The score floor this result was filtered with, echoed so the page can explain an empty list. */
-  minScore: number;
 }
 
 /** `POST /v1/memories`: publish a new formal memory without a review round. */
@@ -346,9 +347,7 @@ export interface UiSkillWrite { hash: string; version: UiSkillVersion }
 
 export interface UiSkillCreateResult { path: string; hash: string }
 
-export interface UiSkillsPreferences { autoAdopt: boolean }
 
-export interface UiAdoptionResult { adopted: boolean; reason: string; hash?: string }
 
 export interface UiSkillDraft {
   id: string;
@@ -385,14 +384,77 @@ export interface UiOrganizeItem {
 
 export interface UiOrganizeResult { items: UiOrganizeItem[] }
 
+/**
+ * One proposed operation of an organize plan.
+ *
+ * `before` is the text the Agent was shown for an edit or a withdrawal, and `content` is what it
+ * proposes to write; showing both is what makes individual confirmation meaningful.
+ */
+export interface UiOrganizePlanItem {
+  index: number;
+  action: 'create' | 'edit' | 'withdraw' | 'skip';
+  reason: string;
+  targetId?: string;
+  entryVersion?: number;
+  before?: string;
+  content?: string;
+}
+
+export interface UiOrganizePlan { items: UiOrganizePlanItem[] }
+
 export interface UiIdleReviewRun {  id: string; sessionId: string; state: 'running' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted';
   attempt: number; startedAt: string; finishedAt: string | null; error: string | null; items: UiIdleReviewItem[];
+}
+
+/** One condition that stopped an idle review before any run existed. */
+export interface UiIdleSkip {
+  sessionId: string;
+  reason: 'no-route' | 'no-evidence' | 'paused' | 'cooldown' | 'attempts' | 'idle' | 'score';
+  detail?: string;
+  at: string;
+}
+
+/** One write action as the Server reports it; `queued` and `unknown` still need a follow-up. */
+export interface WriteTaskOutcome {
+  taskId: string;
+  index: number;
+  kind: 'formal-memory' | 'rule' | 'workspace-archive';
+  action: 'create' | 'edit' | 'withdraw' | 'remove' | 'skip';
+  status: 'published' | 'duplicate' | 'applied' | 'skipped' | 'needs_review' | 'queued' | 'unknown' | 'failed';
+  memoryId: string | null;
+  entryId: string | null;
+  entryVersion: number | null;
+  candidateId: string | null;
+  errorCode: string | null;
+  updatedAt: string;
+}
+
+/** One outstanding action, joined with what the Host recorded when it submitted it. */
+export interface UiPendingWrite {
+  taskId: string;
+  index: number;
+  kind: 'formal-memory' | 'rule' | 'workspace-archive';
+  action: 'create' | 'edit' | 'withdraw' | 'remove' | 'skip';
+  /** `pending` means the Host never learned the outcome; asking the Server resolves it. */
+  status: WriteTaskOutcome['status'] | 'pending';
+  /** What was submitted, so the same request can be sent under the same key. */
+  request: Record<string, unknown>;
+  /** The text the user confirmed at submit time, when the trigger has one. */
+  confirmation?: { text: string; baseVersion?: number };
+  entryId?: string;
+  memoryId?: string;
+  entryVersion?: number;
+  candidateId?: string;
+  errorCode?: string;
+  updatedAt: string;
 }
 
 export interface UiDiagnosticJob {  state: 'running' | 'succeeded' | 'failed' | 'interrupted';
   startedAt: string;
   finishedAt: string | null;
   detail?: Record<string, unknown>;
+  id?: string;
+  kind?: string;
 }
 
 export interface UiRule {
@@ -693,7 +755,7 @@ export interface SkillBacktestResult {
 export type UiSaveResult = { kind: 'formal' | 'rule' | 'workspace-archive'; entryId: string }
   | { kind: 'review'; reason: string } | { kind: 'duplicate' };
 
-export type RpcEndpoint = 'status' | 'memories' | 'memory' | 'create' | 'organizeMemory' | 'skillBacktest' | 'skillConversations' | 'skillReview' | 'edit' | 'withdraw' | 'explore' | 'graph' | 'config' | 'injection' | 'rules' | 'ruleUsage' | 'createRule' | 'editRule' | 'saveArchive' | 'archives' | 'archiveCapacities' | 'archiveSearch' | 'archiveHistory' | 'setArchiveState' | 'workspaces' | 'sync' | 'syncRefresh' | 'registerTask'
+export type RpcEndpoint = 'status' | 'memories' | 'memory' | 'create' | 'organizeMemory' | 'skillBacktest' | 'skillConversations' | 'skillReview' | 'edit' | 'withdraw' | 'explore' | 'graph' | 'config' | 'injection' | 'rules' | 'ruleUsage' | 'saveRuleLimits' | 'createRule' | 'editRule' | 'saveArchive' | 'archives' | 'archiveCapacities' | 'archiveSearch' | 'archiveHistory' | 'setArchiveState' | 'workspaces' | 'sync' | 'syncRefresh' | 'registerTask'
   | 'settings' | 'saveInterface' | 'saveConnection' | 'saveInjection' | 'saveAutoStart' | 'testConnection' | 'testWake';
 
 export interface MemoriesRequest {

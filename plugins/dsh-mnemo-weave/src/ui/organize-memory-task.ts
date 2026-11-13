@@ -68,7 +68,7 @@ export async function previewOrganizeMemories(
   input: { instruction: string },
   signal?: AbortSignal,
 ): Promise<{ items: OrganizePlanItem[] }> {
-  const hits = (await source.explore({ query: input.instruction.slice(0, 500), limit: 8, minScore: 0 })).hits;
+  const hits = (await source.explore({ query: input.instruction.slice(0, 500), limit: 8 })).hits;
   const candidates: Candidate[] = [];
   for (const hit of hits.slice(0, 5)) {
     try {
@@ -128,13 +128,37 @@ export async function previewOrganizeMemories(
  * Execute exactly the confirmed items, in their original index order. An item whose target changed
  * fails with VERSION_CONFLICT while the other items still run; a replayed item returns its receipt
  * instead of writing again, because the caller keeps the original task id and index.
+ *
+ * The action index is the plan's own index, so a receipt always names the plan position the user
+ * saw even when only some positions were ticked.
  */
 export async function applyOrganizeMemories(
-  source: MemorySource,
   plan: { items: OrganizePlanItem[] },
   confirmed: readonly number[],
+  writes: import('./write-transactions.ts').WriteTransactions,
+  taskId: string,
 ): Promise<{ items: OrganizeItemResult[] }> {
   const items: OrganizeItemResult[] = [];
+  const requests = new Map<number, import('./write-transactions.ts').SubmitInput & { taskId: string; index: number }>();
+  {
+    for (const item of plan.items) {
+      if (!confirmed.includes(item.index) || item.action === 'skip'
+        || (item.action !== 'create' && (item.targetId === undefined || item.entryVersion === undefined))) continue;
+      requests.set(item.index, {
+        taskId, index: item.index, kind: 'formal-memory', action: item.action,
+        confirmation: { text: item.content ?? item.before ?? '', ...(item.entryVersion === undefined ? {} : { baseVersion: item.entryVersion }) },
+        request: {
+          kind: 'formal-memory', trigger: 'organize', action: item.action,
+          reason: item.reason || '用户请求整理记忆。',
+          evidenceRefs: [`organize:${taskId}:${item.index}`],
+          ...(item.targetId === undefined ? {} : { memoryId: item.targetId }),
+          ...(item.entryVersion === undefined ? {} : { entryVersion: item.entryVersion }),
+          ...(item.action === 'withdraw' ? {} : { content: item.content, assessment: 'supported' }),
+        },
+      });
+    }
+    writes.prepare([...requests.values()]);
+  }
   for (const original of plan.items) {
     if (!confirmed.includes(original.index)) {
       items.push({ index: original.index, action: original.action, state: 'skipped', detail: { reason: '用户未选择该项。' } });
@@ -144,28 +168,26 @@ export async function applyOrganizeMemories(
       items.push({ index: original.index, action: 'skip', state: 'skipped', ...(original.reason === '' ? {} : { detail: { reason: original.reason } }) });
       continue;
     }
-    if (original.action === 'create') {
-      try {
-        const created = await source.create({ content: original.content!, reason: original.reason });
-        items.push({ index: original.index, action: 'create', state: 'applied', targetId: created.memoryId });
-      } catch (error) { items.push({ index: original.index, action: 'create', state: 'failed', detail: { reason: failure(error) } }); }
+    if (!requests.has(original.index)) {
+      items.push({ index: original.index, action: original.action, state: 'failed', detail: { reason: original.reason } });
       continue;
     }
-    if (original.targetId === undefined || original.entryVersion === undefined) {
-      items.push({ index: original.index, action: original.action, state: 'failed', detail: { reason: '计划缺少目标版本。' } });
-      continue;
-    }
-    if (original.action === 'withdraw') {
-      try {
-        await source.withdraw({ memoryId: original.targetId, entryVersion: original.entryVersion, reason: original.reason || '用户请求整理记忆。' });
-        items.push({ index: original.index, action: 'withdraw', state: 'applied', targetId: original.targetId });
-      } catch (error) { items.push({ index: original.index, action: 'withdraw', state: 'failed', targetId: original.targetId, detail: { reason: failure(error) } }); }
-      continue;
-    }
+    // Through the shared transaction so the receipt is remembered and a retry resolves it.
     try {
-      const edited = await source.edit({ memoryId: original.targetId, content: original.content!, entryVersion: original.entryVersion, reason: original.reason || '用户请求整理记忆。' });
-      items.push({ index: original.index, action: 'edit', state: 'applied', targetId: original.targetId, detail: { revisionId: edited.revisionId, before: original.before } });
-    } catch (error) { items.push({ index: original.index, action: 'edit', state: 'failed', targetId: original.targetId, detail: { reason: failure(error) } }); }
+      const receipt = await writes.submit(requests.get(original.index)!);
+      const state: OrganizeItemResult['state'] = receipt.status === 'published' || receipt.status === 'applied' || receipt.status === 'duplicate'
+        ? 'applied' : receipt.status === 'skipped' ? 'skipped' : 'failed';
+      items.push({
+        index: original.index, action: original.action, state,
+        ...((receipt.memoryId ?? original.targetId) === undefined ? {} : { targetId: (receipt.memoryId ?? original.targetId)! }),
+        detail: {
+          status: receipt.status,
+          taskId: receipt.taskId,
+          ...(original.before === undefined ? {} : { before: original.before }),
+          ...(receipt.errorCode === undefined ? {} : { reason: receipt.errorCode }),
+        },
+      });
+    } catch (error) { items.push({ index: original.index, action: original.action, state: 'failed', ...(original.targetId === undefined ? {} : { targetId: original.targetId }), detail: { reason: failure(error), taskId } }); }
   }
   return { items };
 }

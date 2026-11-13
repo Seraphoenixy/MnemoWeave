@@ -1,8 +1,10 @@
 import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { isIP } from 'node:net';
 import { ARCHIVE_ACTIVE_CAPACITY_BYTES, LegacyWorkspaceMap, RULE_CAPACITY_BYTES } from '../../../packages/core/contracts/src/index.ts';
 import { SyncStore } from '../../../packages/infrastructure/sync-store/src/index.ts';
 import { createSyncServer, SYNC_PROTOCOL_VERSION } from '../../../packages/protocols/sync-http/src/index.ts';
+import { createEnrollment } from './enrollment.ts';
 
 /**
  * Remote sync Server. It holds versions and change receipts only: no Mnemon, no
@@ -25,6 +27,10 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) {
   process.exit(1);
 }
 const host = process.env['MNEMOWEAVE_SYNC_HOST']?.trim() || '127.0.0.1';
+const trustedEnrollmentProxy = process.env['MNEMOWEAVE_SYNC_ENROLLMENT_PROXY_IP'];
+if (trustedEnrollmentProxy !== undefined && !isIP(trustedEnrollmentProxy)) {
+  throw new Error('MNEMOWEAVE_SYNC_ENROLLMENT_PROXY_IP must be a single IP address');
+}
 const stateDir = requireEnv('MNEMOWEAVE_SYNC_STATE_DIR');
 mkdirSync(stateDir, { recursive: true });
 
@@ -35,7 +41,16 @@ const store = new SyncStore({
   archiveCapacityBytes: boundedInt('MNEMOWEAVE_ARCHIVE_ACTIVE_CAPACITY_BYTES', ARCHIVE_ACTIVE_CAPACITY_BYTES, 1),
   ...(mapPath ? { legacyWorkspaces: LegacyWorkspaceMap.parse(JSON.parse(readFileSync(mapPath, 'utf8'))) } : {}),
 });
-const server = createSyncServer({ gateway: store });
+const server = createSyncServer({
+  gateway: store,
+  enrollment: createEnrollment(store, process.env['MNEMOWEAVE_SYNC_BOOTSTRAP_TOKEN']),
+  enrollmentSource: request => {
+    const peer = request.socket.remoteAddress;
+    const forwarded = request.headers['x-real-ip'];
+    return peer === trustedEnrollmentProxy && typeof forwarded === 'string' && isIP(forwarded)
+      ? forwarded : peer ?? 'unknown';
+  },
+});
 
 // Change retention is a maintenance job, not a request path: run it at startup and
 // then on an interval. 0 disables the interval; the startup pass still runs.

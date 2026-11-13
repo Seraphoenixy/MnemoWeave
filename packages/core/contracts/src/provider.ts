@@ -40,6 +40,15 @@ export const Memory = z.object({
   entities: z.array(z.string()).optional(),
   source: z.string().optional(),
   confidence: z.string().optional(),
+  /**
+   * Relevance band assigned by the recall quality policy, not by the Provider.
+   *
+   * The Provider's own `confidence` label describes its fused score, which is discarded when a
+   * real vector similarity is available; a band that came from the ranking that produced the row
+   * would then describe a number no longer shown. The band is computed from the score the caller
+   * receives, so the two always agree.
+   */
+  relevance: z.enum(['high', 'medium', 'low', 'unknown']).optional(),
 });
 export const RecallOutput = z.object({ memories: z.array(Memory), complete: z.boolean().optional() });
 export type RecallRequest = z.infer<typeof RecallInput>;

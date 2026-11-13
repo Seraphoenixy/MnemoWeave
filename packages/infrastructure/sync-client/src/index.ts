@@ -1,3 +1,4 @@
+import { isIPv4 } from 'node:net';
 import { MnemoWeaveError, SYNC_PROTOCOL_HEADER, SYNC_PROTOCOL_VERSION, SyncAccepted, SyncChangeInput, SyncEntry, SyncPullInput, SyncPullPage, SyncSnapshot, SyncStreamsOutput } from '../../../core/contracts/src/index.ts';
 import type { ErrorCode, SyncAcceptedValue, SyncChangeRecordValue, SyncChangeRequest, SyncEntryValue, SyncPullPageValue, SyncPullRequest, SyncSnapshotValue, SyncStreamsValue } from '../../../core/contracts/src/index.ts';
 import { VersionConflictError } from '../../../core/application/src/sync.ts';
@@ -42,6 +43,14 @@ export interface SyncHealth {
   now: string;
 }
 
+export function syncBaseUrl(value: string): string {
+  const url = URL.parse(value.trim());
+  if (!url || url.username || url.password || url.search || url.hash) throw new MnemoWeaveError('INVALID_INPUT');
+  const loopback = url.hostname === '[::1]' || (isIPv4(url.hostname) && url.hostname.startsWith('127.'));
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback)) throw new MnemoWeaveError('INVALID_INPUT');
+  return url.href.replace(/\/+$/, '');
+}
+
 export class SyncClient implements SyncRemotePort {
   private readonly baseUrl: string;
   private readonly token: string;
@@ -50,10 +59,8 @@ export class SyncClient implements SyncRemotePort {
   readonly deviceId: string;
 
   constructor(options: SyncClientOptions) {
-    const url = options.baseUrl.trim().replace(/\/+$/, '');
-    if (!/^https?:\/\//.test(url)) throw new MnemoWeaveError('INVALID_INPUT');
+    this.baseUrl = syncBaseUrl(options.baseUrl);
     if (options.token.trim().length < 24) throw new MnemoWeaveError('UNAUTHORIZED');
-    this.baseUrl = url;
     this.token = options.token.trim();
     this.deviceId = options.deviceId;
     this.timeoutMs = options.timeoutMs ?? 10000;
@@ -116,6 +123,7 @@ export class SyncClient implements SyncRemotePort {
     try {
       const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
         ...init,
+        redirect: 'error',
         signal: controller.signal,
         headers: {
           authorization: `Bearer ${this.token}`,

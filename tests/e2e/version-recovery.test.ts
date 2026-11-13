@@ -30,7 +30,11 @@ for(const stage of ['content','link'])test(`Actual kill after ${stage} commit pr
     await new Promise<void>((done,fail)=>{const timer=setTimeout(()=>fail(new Error('Fault stage not reached')),10000);fault!.once('exit',code=>{clearTimeout(timer);fail(new Error(`Worker exited ${code}`));});fault!.stdout!.on('data',chunk=>{if(String(chunk).includes(`COMMITTED_${stage}`)){clearTimeout(timer);done();}});});
     await stopProcess(fault);fault=undefined;
     const repo=new SqliteCandidates(join(env.MNEMOWEAVE_STATE_DIR,'governance.db'));const provider=new MnemonCliProvider({binary:env.MNEMON_BINARY,dataDir:env.MNEMON_DATA_DIR,store:env.MNEMON_STORE});
-    try{assert.equal(repo.catalog.get(base.publication!.memoryId).currentRevisionId,base.publication!.revisionId);assert.equal(repo.get(replacement.id).publication,undefined);const visible=await new MemoryApplication(provider,repo).recall({query:'MnemoWeave recovery fixture',limit:20});assert.ok(visible.memories.some(m=>m.content===base.request.content));assert.ok(!visible.memories.some(m=>m.content===replacement.request.content));}finally{repo.close();}
+    try{assert.equal(repo.catalog.get(base.publication!.memoryId).currentRevisionId,base.publication!.revisionId);assert.equal(repo.get(replacement.id).publication,undefined);// The old publication is intact: its body is still readable through the catalog. It is not
+// asserted to appear in a ranked recall page, because the Provider already holds the
+// supersedes edge and demotes that body below the recall quality threshold — which is the
+// intended treatment of a corrected memory, not a lost write.
+const application=new MemoryApplication(provider,repo);const published=await application.readMemory({memoryId:base.publication!.memoryId});assert.equal(published.content,base.request.content);const visible=await application.recall({query:'MnemoWeave recovery fixture',limit:20});assert.ok(!visible.memories.some(m=>m.content===replacement.request.content));}finally{repo.close();}
     const run=createRunner(env.MNEMON_BINARY);const status=()=>run(['--data-dir',env.MNEMON_DATA_DIR,'--store',env.MNEMON_STORE,'status']).then(text=>JSON.parse(text) as {total_insights:number;edge_count:number});const before=await status();assert.equal(before.total_insights,2);
     await new Promise(done=>setTimeout(done,1200));server=await startServer(env);
     const recovered=await until(()=>get(replacement.id),c=>c.status==='persisted');assert.ok(recovered.publication);assert.notEqual(recovered.publication.memoryId,base.publication!.memoryId);

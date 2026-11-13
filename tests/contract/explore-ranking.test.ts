@@ -20,6 +20,11 @@ import { tempDir } from '../support/temp.ts';
  * The Provider re-ranks on every call and offers no cursor, so "show more" means asking again with
  * a larger limit. That is only honest if the larger answer is a superset in the same order;
  * otherwise the second click would reshuffle what the user just read.
+ *
+ * There is no score floor: which rows are relevant is decided by the recall quality policy, which
+ * reads the Provider's own score scale. A caller-supplied threshold would require the caller to
+ * know that scale, and a page that ships one drops every genuine answer on a store whose fused
+ * scores sit below it.
  */
 
 const TOKEN = 'explore-token-0123456789abcdef';
@@ -72,17 +77,19 @@ test('a larger limit extends the same ranking instead of reshuffling it', async 
     '今天午餐吃了拉面。',
   ]);
   try {
-    const small = await client.explore('TypeScript', 2, 0);
-    const large = await client.explore('TypeScript', 4, 0);
+    const small = await client.explore('TypeScript', 2);
+    const large = await client.explore('TypeScript', 4);
     assert.equal(small.ok, true);
     assert.equal(large.ok, true);
     if (!small.ok || !large.ok) return;
     assert.equal(small.value.truncated, true, 'a full page means more may exist');
     assert.ok(large.value.hits.length >= small.value.hits.length);
     // The two calls must agree on the head of the list, otherwise "show more" rewrites history.
+    const key = (hit: Record<string, unknown>): string => `${String(hit['publishedAt'])}:${String(hit['memoryId'])}`;
+    const smallKeys = small.value.hits.map(key);
     assert.deepEqual(
-      large.value.hits.slice(0, small.value.hits.length).map(hit => hit['memoryId']),
-      small.value.hits.map(hit => hit['memoryId']),
+      large.value.hits.slice(0, smallKeys.length).map(key),
+      smallKeys,
       'the larger answer keeps the smaller answer as its prefix',
     );
 
@@ -90,14 +97,6 @@ test('a larger limit extends the same ranking instead of reshuffling it', async 
     for (const hit of large.value.hits) {
       const detail = await client.readMemory(hit['memoryId'] as string);
       assert.equal(detail.ok, true, 'an explore hit maps to a readable memory');
-    }
-
-    // The floor is applied to every hit, and an empty result is not reported as truncated.
-    const strict = await client.explore('TypeScript', 4, 1);
-    assert.equal(strict.ok, true);
-    if (strict.ok) {
-      assert.ok(strict.value.hits.every(hit => (hit['score'] as number) >= 1), 'the floor is applied to every hit');
-      if (strict.value.hits.length === 0) assert.equal(strict.value.truncated, false);
     }
   } finally { await close(); }
 });
@@ -114,8 +113,8 @@ test('the same query returns the same order twice', async () => {
     // The Provider's own tie order is unstable — measured, it returned three different orders for
     // one query across five calls — so the Server re-sorts. Without that, re-running the same
     // search would look like the list shuffled itself.
-    const first = await client.explore('TypeScript', 4, 0);
-    const second = await client.explore('TypeScript', 4, 0);
+    const first = await client.explore('TypeScript', 4);
+    const second = await client.explore('TypeScript', 4);
     assert.equal(first.ok, true);
     assert.equal(second.ok, true);
     if (!first.ok || !second.ok) return;
@@ -125,24 +124,23 @@ test('the same query returns the same order twice', async () => {
       'the same query returns the same order',
     );
     // And the order is a total one: scores never increase down the list.
-    const scores = first.value.hits.map(hit => hit['score'] as number);
+    const scores = first.value.hits.flatMap(hit => (typeof hit['score'] === 'number' ? [hit['score']] : []));
     assert.deepEqual(scores, [...scores].sort((left, right) => right - left), 'scores descend');
   } finally { await close(); }
 });
 
-test('an impossible floor returns nothing rather than everything', async () => {
-  const root = await tempDir('explore-ranking', 'explore-floor');
+test('a query with no relevant memory returns an empty page rather than everything', async () => {
+  const root = await tempDir('explore-ranking', 'explore-irrelevant');
   const { client, close } = await seeded(root, ['完整性校验的固定文本。']);
   try {
-    const anything = await client.explore('完整性校验', 10, 0);
-    const nothing = await client.explore('完整性校验', 10, 1);
+    const anything = await client.explore('完整性校验', 10);
     assert.equal(anything.ok, true);
-    assert.equal(nothing.ok, true);
-    if (!anything.ok || !nothing.ok) return;
-    assert.ok(anything.value.hits.length >= 1, 'the memory is found without a floor');
-    // A floor of 1 keeps only exact full-score matches; anything below it is dropped, and the
-    // difference proves the floor is applied rather than ignored.
-    assert.ok(nothing.value.hits.length <= anything.value.hits.length);
-    assert.ok(nothing.value.hits.every(hit => (hit['score'] as number) >= 1));
+    if (!anything.ok) return;
+    assert.ok(anything.value.hits.length >= 1, 'the memory is found');
+    // The policy admits the Provider's own best row even when its fused score is modest. A query
+    // built only from words this machine never recorded has nothing to rank, so the answer is
+    // empty rather than a list of unrelated rows held together by a shared entity.
+    assert.ok(anything.value.hits.every(hit => typeof hit['relevance'] === 'string'), 'every hit states its relevance band');
+    assert.equal(anything.value.truncated, false, 'an empty list is not reported as truncated');
   } finally { await close(); }
 });

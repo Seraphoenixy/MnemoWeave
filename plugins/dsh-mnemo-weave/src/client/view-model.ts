@@ -1,4 +1,4 @@
-import type { AvailabilityStatus, UiConfigView, UiGraphEdge, UiInjection, UiMemoryConflict, UiMemoryDetail, UiMemoryList, UiMemoryRevision, UiStatus } from '../shared/contract.ts';
+import type { AvailabilityStatus, UiConfigView, UiGraphEdge, UiIdleReviewRun, UiInjection, UiMemoryConflict, UiMemoryDetail, UiMemoryList, UiMemoryRevision, UiStatus } from '../shared/contract.ts';
 import { translate, type Language, type MessageKey } from './i18n.ts';
 
 export type Tone = 'ok' | 'warn' | 'bad' | 'muted';
@@ -357,4 +357,29 @@ export function diffLines(before: string, after: string): DiffLine[] {
     if (afterLine !== undefined) rows.push({ kind: 'added', text: afterLine });
   }
   return rows;
+}
+
+/** One session's idle-review runs, newest run first. */
+export interface IdleReviewGroup {
+  sessionId: string;
+  runs: UiIdleReviewRun[];
+}
+
+/**
+ * Group idle-review runs by session, newest session first.
+ *
+ * A review is per session, and what a person wants to read is one session's outcomes together:
+ * which rule changed, which archive was added, and why the others did nothing.
+ */
+export function groupIdleReview(runs: UiIdleReviewRun[]): IdleReviewGroup[] {
+  const bySession = new Map<string, UiIdleReviewRun[]>();
+  for (const run of runs) {
+    const list = bySession.get(run.sessionId);
+    if (list === undefined) bySession.set(run.sessionId, [run]);
+    else list.push(run);
+  }
+  return [...bySession.entries()].map(([sessionId, list]) => ({
+    sessionId,
+    runs: [...list].sort((left, right) => right.startedAt.localeCompare(left.startedAt)),
+  })).sort((left, right) => (right.runs[0]?.startedAt ?? '').localeCompare(left.runs[0]?.startedAt ?? ''));
 }

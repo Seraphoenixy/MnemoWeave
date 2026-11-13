@@ -28,11 +28,13 @@ export const httpRoutes: ReadonlyArray<{ method: 'GET' | 'POST' | 'PATCH' | 'PUT
   { method: 'GET', path: '/v1/storage' },
   { method: 'GET', path: '/v1/diagnostics/embeddings' },
   { method: 'POST', path: '/v1/diagnostics/embeddings/backfill' },
+  { method: 'GET', path: '/v1/diagnostics/embeddings/backfill/history' },
   { method: 'POST', path: '/v1/idle-review/scan' },
   { method: 'GET', path: '/v1/idle-review/signals' },
   { method: 'POST', path: '/v1/idle-review/runs' },
   { method: 'GET', path: '/v1/idle-review/runs' },
   { method: 'GET', path: '/v1/idle-review/pending' },
+  { method: 'GET', path: '/v1/idle-review/recent' },
   { method: 'POST', path: '/v1/idle-review/runs/{runId}/items' },
   { method: 'POST', path: '/v1/idle-review/runs/{runId}/finish' },
   { method: 'GET', path: '/v1/candidates/{candidateId}' },
@@ -75,6 +77,7 @@ export const httpRoutes: ReadonlyArray<{ method: 'GET' | 'POST' | 'PATCH' | 'PUT
   { method: 'GET', path: '/v1/archives/release-candidates' },
   { method: 'POST', path: '/v1/memory-write-tasks/{taskId}/actions/{index}' },
   { method: 'GET', path: '/v1/memory-write-tasks/{taskId}/actions/{index}' },
+  { method: 'GET', path: '/v1/memory-write-tasks' },
   { method: 'POST', path: '/v1/archive-distillations' },
   { method: 'GET', path: '/v1/archive-distillations/{draftId}' },
 ];
@@ -110,6 +113,7 @@ export interface ClientHttpEndpoints {
   createMemory?(input: unknown): Promise<import('../../../core/contracts/src/index.ts').MemoryCreateRecord>;
   embeddingDiagnostics?(hostId: string): Promise<EmbeddingDiagnosticsRecord>;
   embeddingBackfill?(hostId: string): Promise<DiagnosticJobRecord>;
+  embeddingBackfillHistory?(hostId: string, limit: number): Promise<{ items: DiagnosticJobRecord[] }>;
   idleReviewScan?(hostId: string, input: unknown): Promise<IdleReviewScanRecord>;
   idleReviewSignals?(hostId: string, sessionId: string): Promise<{ items: IdleReviewSignalRecord[] }>;
   idleReviewRunStart?(hostId: string, input: unknown): Promise<{ run: IdleReviewRunRecord; signals: IdleReviewSignalRecord[] }>;
@@ -117,10 +121,11 @@ export interface ClientHttpEndpoints {
   idleReviewRunItem?(hostId: string, runId: string, input: unknown): Promise<IdleReviewRunRecord>;
   idleReviewRunFinish?(hostId: string, runId: string, input: unknown): Promise<IdleReviewRunRecord>;
   idleReviewPending?(hostId: string): Promise<IdleReviewPendingRecord>;
+  idleReviewRecent?(hostId: string, limit: number): Promise<{ items: IdleReviewRunRecord[] }>;
   graph?(hostId: string, query: { limit: number }): Promise<import('../../../core/contracts/src/index.ts').MemoryGraphRecord>;
   recall?(hostId: string, input: unknown, turn?: TurnIdentity): Promise<import('../../../core/contracts/src/index.ts').RecallResult>;
   related?(hostId: string, input: unknown, turn?: TurnIdentity): Promise<{ memories: Array<{ memoryId: string; content: string; excerpt: boolean }>; truncated: boolean }>;
-  explore?(hostId: string, input: { query: string; limit: number; minScore?: number | undefined; hint?: string | undefined }, turn?: TurnIdentity): Promise<{ query: string; hits: Array<Record<string, unknown>>; unregistered: number; truncated: boolean }>;
+  explore?(hostId: string, input: import('../../../core/contracts/src/index.ts').ExploreInputRecord, turn?: TurnIdentity): Promise<{ query: string; hits: Array<Record<string, unknown>>; unregistered: number; truncated: boolean }>;
   editMemory(memoryId: string, input: { content: string; reason?: string | undefined; entryVersion: number; category?: string | undefined; importance?: number | undefined; tags?: string[] | undefined; entities?: string[] | undefined }): Promise<import('../../../core/contracts/src/index.ts').MemoryEditRecord>;
   withdrawMemory?(memoryId: string, input: { reason: string; entryVersion: number }): Promise<{ memoryId: string; revisionId: string; entryVersion: number; withdrawnAt: string }>;
   syncStatus?(): Promise<SyncStatusValue>;
@@ -145,6 +150,7 @@ export interface ClientHttpEndpoints {
   createArchive?(input: ArchiveCreateInput): Promise<ArchiveRecordValue>;
   writeTaskAction?(hostId: string, taskId: string, index: number, input: unknown): Promise<WriteTaskReceiptRecord>;
   writeTaskReceipt?(hostId: string, taskId: string, index: number): Promise<WriteTaskReceiptRecord>;
+  writeTaskReceipts?(hostId: string, limit: number): Promise<import('../../../core/contracts/src/index.ts').WriteTaskReceiptListRecord>;
   createDistillation?(hostId: string, input: unknown): Promise<import('../../../core/contracts/src/index.ts').ArchiveDistillationRecordValue>;
   readDistillation?(hostId: string, draftId: string): Promise<import('../../../core/contracts/src/index.ts').ArchiveDistillationRecordValue>;
 }
@@ -354,6 +360,13 @@ export function createHttpServer(app: MemoryApplication, token: string, operator
       }
 
       // ── Authorized write tasks and distillations ──
+      if (req.method === 'GET' && path === '/v1/memory-write-tasks') {
+        if (!client?.writeTaskReceipts) throw new MnemoWeaveError('REVIEW_REQUIRED');
+        const rawLimit = url.searchParams.get('limit');
+        const limit = rawLimit === null ? 50 : Number(rawLimit);
+        if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new MnemoWeaveError('INVALID_INPUT');
+        return reply(200, await client.writeTaskReceipts(requireHost(), limit));
+      }
       const writeTaskMatch = /^\/v1\/memory-write-tasks\/([a-f0-9-]{36})\/actions\/(\d{1,3})$/.exec(path);
       if (writeTaskMatch) {
         const hostId = requireHost();
@@ -505,6 +518,13 @@ export function createHttpServer(app: MemoryApplication, token: string, operator
         if (!client?.idleReviewPending) throw new MnemoWeaveError('REVIEW_REQUIRED');
         return reply(200, await client.idleReviewPending(requireHost()));
       }
+      if (req.method === 'GET' && path === '/v1/idle-review/recent') {
+        if (!client?.idleReviewRecent) throw new MnemoWeaveError('REVIEW_REQUIRED');
+        const rawLimit = url.searchParams.get('limit');
+        const limit = rawLimit === null ? 50 : Number(rawLimit);
+        if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new MnemoWeaveError('INVALID_INPUT');
+        return reply(200, await client.idleReviewRecent(requireHost(), limit));
+      }
       const idleRunItem = /^\/v1\/idle-review\/runs\/([a-f0-9-]{36})\/items$/.exec(path);
       if (req.method === 'POST' && idleRunItem) {
         if (!client?.idleReviewRunItem) throw new MnemoWeaveError('REVIEW_REQUIRED');
@@ -520,6 +540,13 @@ export function createHttpServer(app: MemoryApplication, token: string, operator
       if (req.method === 'GET' && path === '/v1/diagnostics/embeddings') {
         if (!client?.embeddingDiagnostics) throw new MnemoWeaveError('REVIEW_REQUIRED');
         return reply(200, await client.embeddingDiagnostics(requireHost()));
+      }
+      if (req.method === 'GET' && path === '/v1/diagnostics/embeddings/backfill/history') {
+        if (!client?.embeddingBackfillHistory) throw new MnemoWeaveError('REVIEW_REQUIRED');
+        const rawLimit = url.searchParams.get('limit');
+        const limit = rawLimit === null ? 20 : Number(rawLimit);
+        if (!Number.isInteger(limit) || limit < 1 || limit > 50) throw new MnemoWeaveError('INVALID_INPUT');
+        return reply(200, await client.embeddingBackfillHistory(requireHost(), limit));
       }
       if (req.method === 'POST' && path === '/v1/diagnostics/embeddings/backfill') {
         if (!client?.embeddingBackfill) throw new MnemoWeaveError('REVIEW_REQUIRED');

@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto';
+import { idleActivityScore } from '../../../../packages/core/application/src/idle-review.ts';
 
 type Route = { provider?: string; model?: string; reasoningEffort?: string };
-interface SessionEvent { type: string; data: Record<string, unknown> }
+interface SessionEvent { type: string; time?: number; data: Record<string, unknown> }
 interface AgentContext {
-  tools?: { restrict(filter: { allow: string[] }): unknown };
+  tools?: { restrict(filter: { allow: string[] }): unknown; get?(name: string, agent: Agent): unknown };
+  get?(name: string): unknown;
   on(name: 'session/event', listener: (session: unknown, event: SessionEvent) => void): unknown;
 }
 interface Agent {
@@ -34,6 +36,11 @@ export type TaskRunner = RunTask & {
   pin?(sessionId?: string): RunTask;
   conversations?(): { id: string; workspace: string }[];
   reviewEvidence?(sessionId: string): { step: number; role: 'user' | 'assistant'; text: string }[];
+  completedReply?(sessionId: string, replyId: string): { text: string; turnId: string } | null;
+  idleSession?(sessionId: string, afterMs: number): {
+    turn: number; score: number; active: boolean; paused: boolean;
+    abortOnTurn(controller: AbortController): () => void;
+  } | undefined;
 };
 
 function redactEvidence(text: string): string {
@@ -123,6 +130,64 @@ export function createTaskRunner(getAgents: () => unknown): TaskRunner {
   };
   return Object.assign(async (prompt: string, signal?: AbortSignal) => pin()(prompt, signal), {
     pin,
+    completedReply: (sessionId: string, replyId: string) => {
+      const agent = roots(getAgents() as Agents | undefined).find(item => item.id === sessionId);
+      const events = agent?.session.snapshotEvents?.() ?? [];
+      let turn: number | undefined;
+      let reply: { text: string; turnId: string } | null = null;
+      for (const event of events) {
+        if (event.type === 'turn/start' && typeof event.data['turn'] === 'number') turn = event.data['turn'];
+        if (event.type === 'assistant/message' && turn !== undefined) {
+          const message = event.data['message'] as { id?: string; content?: Array<{ type?: string; text?: string }> } | undefined;
+          if (message?.id === replyId) {
+            const text = (message.content ?? []).filter(block => block.type === 'text').map(block => block.text ?? '').join('\n\n').trim();
+            if (text) reply = { text, turnId: String(turn) };
+          }
+        }
+        if (event.type === 'turn/end' && event.data['turn'] === turn) {
+          if (reply?.turnId === String(turn)) return reply;
+          turn = undefined;
+        }
+      }
+      return null;
+    },
+    idleSession: (sessionId: string, afterMs: number) => {
+      const agent = roots(getAgents() as Agents | undefined).find(item => item.id === sessionId);
+      const events = agent?.session.snapshotEvents?.();
+      if (!agent || !events) return undefined;
+      let turn = 0;
+      let active = false;
+      const excluded = new Set(events.filter(event => event.type === 'turn/no-retention' || event.type === 'turn/noRetention')
+        .map(event => event.data['turn']));
+      const userTexts: string[] = [];
+      const tools: string[] = [];
+      let completedTurns = 0;
+      let currentTurn = 0;
+      for (const event of events) {
+        const value = event.data['turn'];
+        if (event.type === 'turn/start') { active = true; if (typeof value === 'number') currentTurn = value; }
+        if (event.type === 'turn/end') { active = false; if (typeof value === 'number') turn = value; }
+        if ((event.time !== undefined && event.time <= afterMs) || excluded.has(value ?? currentTurn)) continue;
+        if (event.type === 'turn/end') completedTurns++;
+        if (event.type === 'tool/call' && typeof event.data['name'] === 'string') tools.push(event.data['name']);
+        const source = event.data['source'] as { kind?: string } | undefined;
+        if (event.type === 'user/message' && source?.kind === 'user' && Array.isArray(event.data['content'])) {
+          userTexts.push(event.data['content'].map(block => block?.type === 'text' && typeof block.text === 'string' ? block.text : '').join(''));
+        }
+      }
+      const team = agent.ctx.get?.('agentTeams') as { isEnabled?(agent: Agent): boolean } | undefined;
+      return {
+        turn, active, paused: team !== undefined && (agent.ctx.tools?.get?.('spawn_teammate', agent) !== undefined
+          || (team.isEnabled?.(agent) === true && agent.ctx.tools?.get?.('team_task_create', agent) !== undefined)),
+        score: idleActivityScore({ userTexts, completedTurns, toolCalls: tools.length, toolKinds: new Set(tools).size }),
+        abortOnTurn(controller: AbortController) {
+          const off = agent.ctx.on('session/event', (session, event) => {
+            if (session === agent.session && ['turn/start', 'turn/no-retention', 'turn/noRetention'].includes(event.type)) controller.abort();
+          });
+          return () => { if (typeof off === 'function') off(); };
+        },
+      };
+    },
     conversations: () => roots(getAgents() as Agents | undefined).map(agent => ({
       id: agent.id, workspace: agent.session.header?.cwd ?? process.cwd(),
     })),

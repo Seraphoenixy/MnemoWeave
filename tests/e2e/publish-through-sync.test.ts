@@ -28,7 +28,7 @@ test('a memory published by the reviewed worker path is shared with the remote',
   mkdirSync(join(dir, 'state'), { recursive: true });
 
   const remote = new SyncStore({ path: join(dir, 'remote.db') });
-  remote.enroll('device-local', DEVICE_TOKEN, [{ stream: STREAM, canRead: true, canWrite: true }]);
+  remote.enroll('device-local', DEVICE_TOKEN);
   const server: Server = createSyncServer({ gateway: remote });
   await new Promise<void>((done) => server.listen(0, '127.0.0.1', () => done()));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;

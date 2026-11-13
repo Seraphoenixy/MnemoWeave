@@ -84,6 +84,51 @@ async function seed(
   return { app, projects: ['alpha', 'beta'] };
 }
 
+test('list and graph leave unpublished Server writes for reconciliation', async t => {
+  const root = await tempDir('memory-browse', 'unpublished-provider-write');
+  const { app } = await seed(root, { global: 0, alpha: 0, beta: 0 });
+  t.after(() => app.close());
+  const provider = new MnemonCliProvider({ binary: mnemonBinary(), dataDir: join(root, 'provider'), store: 'browse' });
+  const pending = await provider.persistReviewed('等待治理库发布的正文', `candidate:${randomUUID()}`);
+  const external = await provider.acceptanceRemember('独立工具写入的完整正文');
+
+  const listAll = MnemonCliProvider.prototype.listAll;
+  const unavailable = t.mock.method(MnemonCliProvider.prototype, 'listAll', async () => { throw new Error('list unavailable'); });
+  const graphWithoutBodies = await app.client!.graph!('browse-test', { limit: 50 });
+  assert.equal(graphWithoutBodies.nodes.length, 0);
+  unavailable.mock.restore();
+
+  const rows = await listAll.call(provider);
+  assert.match(rows.find(row => row.id === pending.id)?.source ?? '', /^mnemoweave:/);
+  const graph = await app.client!.graph!('browse-test', { limit: 50 });
+  assert.equal(graph.nodes.length, 1);
+  const list = await app.client!.memories({ limit: 50 });
+  assert.deepEqual(list.items.map(item => item.providerMemoryId), [external.id]);
+  const [item] = list.items;
+  assert.ok(item);
+  assert.equal(item.memoryId, graph.nodes[0]?.memoryId);
+  assert.equal((await app.app.readMemory({ memoryId: item.memoryId })).content, '独立工具写入的完整正文');
+});
+
+test('a list read skips a revision replaced while its body is being read', async t => {
+  const root = await tempDir('memory-browse', 'concurrent-edit');
+  const { app } = await seed(root, { global: 1, alpha: 0, beta: 0 });
+  t.after(() => app.close());
+  const [before] = (await app.client!.memories({ limit: 1 })).items;
+  assert.ok(before);
+  const readMany = MnemonCliProvider.prototype.readMany;
+  t.mock.method(MnemonCliProvider.prototype, 'readMany', async function (this: MnemonCliProvider, ids: string[]) {
+    const rows = await readMany.call(this, ids);
+    await app.client!.editMemory(before.memoryId, { content: '并发编辑后的正文', entryVersion: before.entryVersion });
+    return rows;
+  }, { times: 1 });
+  assert.deepEqual((await app.client!.memories({ limit: 1 })).items, []);
+  const [after] = (await app.client!.memories({ limit: 1 })).items;
+  assert.ok(after);
+  assert.equal(after.content, '并发编辑后的正文');
+  assert.equal(after.entryVersion, before.entryVersion + 1);
+});
+
 test('paging covers every row exactly once, even when candidates share a timestamp', async () => {
   const root = await tempDir('memory-browse', 'browse-paging');
   const { app } = await seed(root, { global: 12, alpha: 9, beta: 6 });

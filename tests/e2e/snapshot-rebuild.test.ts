@@ -40,7 +40,7 @@ test('a snapshot rebuilds the revision history when the retention floor passed t
   mkdirSync(join(dir, 'mnemon'), { recursive: true });
   const remotePath = join(dir, 'remote.db');
   const remote = new SyncStore({ path: remotePath, now: () => NOW });
-  remote.enroll('device-local', TOKEN, [{ stream: STREAM, canRead: true, canWrite: true }]);
+  remote.enroll('device-local', TOKEN);
   remote.submit(TOKEN, buildChange({ changeId: randomUUID(), baseVersion: 0, operation: 'create', entry: draft(1, '第一版正式记忆。') }));
   remote.submit(TOKEN, buildChange({ changeId: randomUUID(), baseVersion: 1, operation: 'update', entry: draft(2, '第二版正式记忆。') }));
   assert.deepEqual(remote.changeRange(STREAM), { floor: 1, head: 2, count: 2 });
@@ -102,7 +102,7 @@ test('a device behind a fully pruned scope snapshots from the head and keeps pul
   const dir = await tempDir('snapshot-rebuild', 'snapshot-pruned');
   mkdirSync(join(dir, 'mnemon'), { recursive: true });
   const remote = new SyncStore({ path: join(dir, 'remote.db'), now: () => NOW });
-  remote.enroll('device-local', TOKEN, [{ stream: STREAM, canRead: true, canWrite: true }]);
+  remote.enroll('device-local', TOKEN);
   remote.submit(TOKEN, buildChange({ changeId: randomUUID(), baseVersion: 0, operation: 'create', entry: draft(1, '第一版正式记忆。') }));
   remote.submit(TOKEN, buildChange({ changeId: randomUUID(), baseVersion: 1, operation: 'update', entry: draft(2, '第二版正式记忆。') }));
 

@@ -28,6 +28,27 @@ function catalogStub(visible: string[]) {
   };
 }
 
+test('keyword recall keeps a low native score', async () => {
+  const result = await new MemoryApplication({
+    health: () => app.health(),
+    async recall() { return { memories: [{ id: 'match', content: 'alpha', score: 0.2 }] }; },
+  }).recall({ query: 'alpha', mode: 'keyword', limit: 1 });
+  assert.deepEqual(result.memories.map(({ id, score }) => ({ id, score })), [{ id: 'match', score: 0.2 }]);
+});
+
+test('keyword recovery reserves a result slot for a query match before the page is capped', async () => {
+  const application = new MemoryApplication({
+    health: () => app.health(),
+    async recall({ mode }) {
+      return { memories: mode === 'keyword'
+        ? [{ id: 'match', content: 'alpha bravo', score: 0.2 }]
+        : [{ id: 'unrelated', content: 'unrelated', score: 0.9 }] };
+    },
+  }, catalogStub(['match', 'unrelated']) as unknown as CandidateRepository);
+  const result = await application.recall({ query: 'alpha bravo charlie delta', limit: 1 });
+  assert.deepEqual(result.memories.map(memory => memory.id), ['match']);
+});
+
 test('Default recall filters before pagination and keeps expanding until the requested page is filled', async () => {
   const windows: number[] = [];
   const provider = {
@@ -115,10 +136,12 @@ test('recall covers the whole shared collection and takes no workspace', async (
   const provider = {
     async health(): Promise<{ ready: true; version: '0.2.13'; capabilities: ['health'] }> { return { ready: true, version: '0.2.13', capabilities: ['health'] }; },
     async recall(req: { query: string; limit: number }) {
+      // Mnemon's ranking always reports a score, so these rows carry one. Without it they would
+      // land in the policy's unscored tier, which the strict policy bounds on purpose.
       return { memories: [
-        { id: 'general-1', content: '通用经验' },
-        { id: 'alpha-1', content: '第一条共享结论' },
-        { id: 'beta-1', content: '第二条共享结论' },
+        { id: 'general-1', content: '通用经验', score: 0.8 },
+        { id: 'alpha-1', content: '第一条共享结论', score: 0.75 },
+        { id: 'beta-1', content: '第二条共享结论', score: 0.7 },
       ].slice(0, req.limit) };
     },
   };

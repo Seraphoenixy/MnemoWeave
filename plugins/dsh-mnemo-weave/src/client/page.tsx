@@ -2,12 +2,12 @@ import { SkillBacktestPanel, SkillListPanel } from './skill-backtest.tsx';
 import { diffLines, type DiffLine } from '../shared/skills-diff.ts';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { CreateDraft } from './panels.tsx';
-import type { ListSort, UiArchive, UiArchiveCapacity, UiArchiveHistory, UiConfigView, UiConnectionTest, UiEmbeddingDiagnostics, UiExplore, UiGraph, UiInjection, UiMemoryDetail, UiMemoryList, UiOrganizeItem, UiRegisterTest, UiRule, UiRuleUsage, UiSettings, UiSkillDraft, UiSkillEntry, UiSkillReport, UiSkillVersion, UiStatus, UiSyncPass, UiSyncStatus, UiTrashEntry, UiWakeTest, UiWorkspace } from '../shared/contract.ts';
+import type { ListSort, UiArchive, UiArchiveCapacity, UiArchiveHistory, UiConfigView, UiConnectionTest, UiDiagnosticJob, UiEmbeddingDiagnostics, UiExplore, UiGraph, UiIdleReviewRun, UiIdleSkip, UiInjection, UiMemoryDetail, UiMemoryList, UiOrganizeItem, UiPendingWrite, UiRegisterTest, UiRule, UiRuleUsage, UiSettings, UiSkillDraft, UiSkillEntry, UiSkillReport, UiSkillVersion, UiStatus, UiSyncPass, UiSyncStatus, UiTrashEntry, UiWakeTest, UiWorkspace } from '../shared/contract.ts';
 import { createApi, RpcFailure } from './api.ts';
 import type { ClientConnection, LocaleService } from './dsh-types.ts';
 import { normalizeLanguage, translate, type Language, type MessageKey } from './i18n.ts';
 import { ensureStyles } from './styles.ts';
-import { ArchivesPanel, CreateMemoryForm, EntitiesPanel, ExplorePanel, MemoryCard, MemoryOverviewPanel, MemoryPageHeader, OverviewPanel, RuntimePanel, SettingsPanel, TAB_KEYS, TAB_ORDER, isTab, type MemoryView, type RuleDraft, type Tab } from './panels.tsx';
+import { ArchivesPanel, CreateMemoryForm, EntitiesPanel, ExplorePanel, MemoryCard, MemoryOverviewPanel, MemoryPageHeader, OverviewPanel, RuleConflictError, RuntimePanel, SettingsPanel, TAB_KEYS, TAB_ORDER, isTab, type MemoryView, type RuleDraft, type Tab } from './panels.tsx';
 import { Modal } from './modal.tsx';
 import {
   availabilityText, classificationLists, classificationMeta, codeText, detailMeta, EDIT_LIMIT_BYTES, editBlocker, neighbourhood,
@@ -89,7 +89,7 @@ function failureText(error: unknown, language: Language): string {
 /** The budget refusal and a stale base version are the two rule errors with specific wording. */
 function ruleFailure(error: unknown, language: Language): string {
   if (error instanceof RpcFailure) {
-    if (error.code === 'RULE_BUDGET_EXCEEDED') return translate(language, 'runtime.budget');
+    if (error.code === 'RULE_CAPACITY_EXCEEDED' || error.code === 'RULE_ITEM_TOO_LARGE') return translate(language, 'runtime.budget');
     if (error.code === 'VERSION_CONFLICT') return translate(language, 'runtime.conflict');
   }
   return failureText(error, language);
@@ -592,6 +592,18 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
   const [sync, setSync] = useState<UiSyncStatus | null | undefined>(undefined);
   /** Provider embedding coverage; undefined while loading, null when the read failed. */
   const [diagnostics, setDiagnostics] = useState<UiEmbeddingDiagnostics | null | undefined>(undefined);
+  /** Backfill history and in-flight state; the settings page owns the action. */
+  const [backfillHistory, setBackfillHistory] = useState<UiDiagnosticJob[] | null | undefined>(undefined);
+  const [backfillBusy, setBackfillBusy] = useState(false);
+  const [backfillError, setBackfillError] = useState<string | null>(null);
+  /** Idle-review runs and unsettled writes, read together with the overview. */
+  const [idleRuns, setIdleRuns] = useState<UiIdleReviewRun[] | null | undefined>(undefined);
+  const [idleSkips, setIdleSkips] = useState<UiIdleSkip[] | null | undefined>(undefined);
+  // Kept so the panel can name why the read failed instead of only saying it is unavailable.
+  const [idleReviewError, setIdleReviewError] = useState<string | null>(null);
+  const [pendingWritesError, setPendingWritesError] = useState<string | null>(null);
+  const [pendingWrites, setPendingWrites] = useState<UiPendingWrite[] | null | undefined>(undefined);
+  const [busyWrite, setBusyWrite] = useState<string | null>(null);
   const [rulesError, setRulesError] = useState<string | null>(null);
   const [archivesError, setArchivesError] = useState<string | null>(null);
   /**
@@ -695,14 +707,17 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
   const [entityMemoriesError, setEntityMemoriesError] = useState<string | null>(null);
   const [entityMemoriesLoading, setEntityMemoriesLoading] = useState(false);
   const [exploreQuery, setExploreQuery] = useState('');
+  const [exploreMode, setExploreMode] = useState<'smart' | 'keyword' | 'basic'>('smart');
+  const [exploreCategory, setExploreCategory] = useState('');
+  const [exploreBusy, setExploreBusy] = useState(false);
+  const exploreRequest = useRef(0);
   const [explore, setExplore] = useState<UiExplore | null>(null);
   const [exploreError, setExploreError] = useState<string | null>(null);
   /**
-   * Score floor and page size. The Provider scores unrelated text above zero, so a floor is what
-   * makes a result an answer; and explore is a ranking with no cursor, so "more" means a larger
-   * limit rather than an offset.
+   * Page size. Explore is a ranking with no cursor, so "more" means a larger limit rather than an
+   * offset. Which rows are relevant is not the page's decision: the Server's recall quality policy
+   * decides that from the Provider's own score, whose scale differs by retrieval mode.
    */
-  const [exploreMinScore, setExploreMinScore] = useState(0.5);
   const [exploreLimit, setExploreLimit] = useState(20);
   /**
    * Inline previews of relation targets, keyed by memory id. Following an edge used to mean
@@ -811,6 +826,16 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     setRuleUsage(nextRuleUsage.value ?? null);
     setSync(nextSync.value ?? null);
     setSyncError(nextSync.error ?? null);
+    // Informational: a Host that cannot read one of these still shows the rest of the page.
+    setIdleRuns(await api.idleReviewRecent(signal).then(value => value.items, (failure: unknown) => {
+      setIdleReviewError(failureText(failure, language));
+      return null;
+    }));
+    setIdleSkips(await api.idleReviewSkips(signal).then(value => value.items).catch(() => null));
+    setPendingWrites(await api.writeTasks(signal).then(value => value.items, (failure: unknown) => {
+      setPendingWritesError(failureText(failure, language));
+      return null;
+    }));
     await loadWorkspaces(signal);
   }, [api, loadWorkspaces]);
 
@@ -916,18 +941,61 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     return () => { clearTimeout(timer); controller.abort(); };
   }, [query, categoryFilter, entityFilter, sort, loadList, language]);
 
-  // Query Provider diagnostics only while the settings card is in use.
   useEffect(() => {
     if (tab !== 'settings') return;
     const controller = new AbortController();
-    setDiagnostics(undefined);
-    void api.embeddingDiagnostics(controller.signal).then(report => {
-      if (!controller.signal.aborted) setDiagnostics(report);
-    }, () => {
-      if (!controller.signal.aborted) setDiagnostics(null);
-    });
-    return () => controller.abort();
-  }, [api, tab]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const refresh = async (): Promise<void> => {
+      const [report, history] = await Promise.all([
+        api.embeddingDiagnostics(controller.signal).catch(() => null),
+        api.embeddingBackfillHistory(controller.signal).then(value => value.items).catch(() => null),
+      ]);
+      if (controller.signal.aborted) return;
+      setDiagnostics(report);
+      setBackfillHistory(history);
+      if (backfillBusy || history?.some(job => job.state === 'running') || report?.backfill?.state === 'running'
+        || (history === null && report === null)) timer = setTimeout(() => { void refresh(); }, 2_000);
+    };
+    void refresh();
+    return () => { controller.abort(); if (timer !== undefined) clearTimeout(timer); };
+  }, [api, tab, backfillBusy]);
+
+  const startBackfill = useCallback(async (): Promise<void> => {
+    if (backfillBusy || backfillHistory?.some(job => job.state === 'running')) return;
+    setBackfillBusy(true);
+    setBackfillError(null);
+    try {
+      await api.embeddingBackfill();
+    } catch (failure) {
+      setBackfillError(failureText(failure, language));
+    } finally {
+      setBackfillBusy(false);
+    }
+  }, [api, backfillBusy, backfillHistory, language]);
+
+  /** Ask about one outstanding action without resending it. */
+  const resolveWrite = useCallback(async (taskId: string, index: number): Promise<void> => {
+    setBusyWrite(`${taskId}:${index}`);
+    try {
+      const outcome = await api.resolveWrite({ taskId, index });
+      setNotice(translate(language, `write.status.${outcome.status}` as MessageKey));
+      await loadStatus();
+    } catch (failure) {
+      setNotice(failureText(failure, language));
+    } finally { setBusyWrite(null); }
+  }, [api, language, loadStatus]);
+
+  /** Resend the recorded request under its original key. */
+  const retryWrite = useCallback(async (taskId: string, index: number): Promise<void> => {
+    setBusyWrite(`${taskId}:${index}`);
+    try {
+      const outcome = await api.retryWrite({ taskId, index });
+      setNotice(translate(language, `write.status.${outcome.status}` as MessageKey));
+      await loadStatus();
+    } catch (failure) {
+      setNotice(failureText(failure, language));
+    } finally { setBusyWrite(null); }
+  }, [api, language, loadStatus]);
 
   useEffect(() => {
     if (selectedId === null) return;
@@ -1033,6 +1101,12 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
   const [organizeBusy, setOrganizeBusy] = useState(false);
   const [organizeError, setOrganizeError] = useState<string | null>(null);
   const [organizeItems, setOrganizeItems] = useState<UiOrganizeItem[] | null>(null);
+  /** The plan the user is confirming; null until a preview returned one. */
+  const [organizePlan, setOrganizePlan] = useState<import('../shared/contract.ts').UiOrganizePlan | null>(null);
+  /** Ticked plan positions; nothing is ticked by default. */
+  const [organizeChosen, setOrganizeChosen] = useState<Set<number>>(new Set());
+  /** Minted once per plan so a retry resolves the same receipts. */
+  const [organizeTaskId, setOrganizeTaskId] = useState<string | null>(null);
   /** Skills DSH can load; read when the skills tab opens. */
   /**
    * Which skill module is showing. The modules share one page and one left column instead of
@@ -1045,7 +1119,6 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
   const [skillVersionsState, setSkillVersionsState] = useState<UiSkillVersion[]>([]);
   const [skillBusy, setSkillBusy] = useState(false);
   const [skillNotice, setSkillNotice] = useState<string | null>(null);
-  const [autoAdopt, setAutoAdopt] = useState(false);
   const [trashEntries, setTrashEntries] = useState<UiTrashEntry[]>([]);
   const [skillDiff, setSkillDiff] = useState<{ versionId: string; lines: DiffLine[] } | null>(null);
   const [skillDrafts, setSkillDrafts] = useState<UiSkillDraft[]>([]);
@@ -1108,7 +1181,6 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
   useEffect(() => {
     if (tab !== 'skills' || skillsReport !== null) return;
     void loadSkills();
-    void api.skillPreferences().then(preferences => setAutoAdopt(preferences.autoAdopt), () => undefined);
     void api.skillTrashList().then(setTrashEntries, () => undefined);
     void api.skillDrafts({}).then(setSkillDrafts, () => undefined);
   }, [tab, skillsReport, loadSkills, api]);
@@ -1236,16 +1308,46 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     if (instruction === '' || organizeBusy) return;
     setOrganizeBusy(true);
     setOrganizeError(null);
+    setOrganizeItems(null);
+    setOrganizePlan(null);
+    setOrganizeChosen(new Set());
     try {
-      const result = await api.organizeMemories({ instruction, ...(organizeWorkspace === null ? {} : { workspaceId: organizeWorkspace }) });
-      setOrganizeItems(result.items);
-      await loadList({ query, category: categoryFilter, entity: entityFilter, sort, append: false });
+      // Preview only: a plan is proposed and nothing is written. Confirmation is a separate act.
+      const plan = await api.organizeMemories({ instruction, ...(organizeWorkspace === null ? {} : { workspaceId: organizeWorkspace }) });
+      setOrganizePlan(plan);
+      setOrganizeChosen(new Set());
+      setOrganizeTaskId(crypto.randomUUID());
     } catch (failure) {
       setOrganizeError(failureText(failure, language));
     } finally {
       setOrganizeBusy(false);
     }
-  }, [api, organizeInstruction, organizeBusy, organizeWorkspace, query, categoryFilter, entityFilter, sort, loadList, language]);
+  }, [api, organizeInstruction, organizeBusy, organizeWorkspace, language]);
+
+  /** Submit exactly the ticked items. Closing or changing the plan discards the selection. */
+  const confirmOrganize = useCallback(async (): Promise<void> => {
+    if (organizePlan === null || organizeTaskId === null || organizeBusy) return;
+    const confirmed = [...organizeChosen].sort((left, right) => left - right);
+    if (confirmed.length === 0) {
+      setOrganizeError(translate(language, 'organize.noneChosen'));
+      return;
+    }
+    setOrganizeBusy(true);
+    setOrganizeError(null);
+    try {
+      const result = await api.applyOrganizeMemories({ instruction: organizeInstruction.trim(), plan: organizePlan, confirmed, taskId: organizeTaskId });
+      setOrganizeItems(result.items);
+      setOrganizePlan(null);
+      await Promise.all([
+        loadList({ query, category: categoryFilter, entity: entityFilter, sort, append: false }),
+        loadStatus(),
+      ]);
+    } catch (failure) {
+      setOrganizeError(failureText(failure, language));
+    } finally {
+      setOrganizeBusy(false);
+    }
+  }, [api, organizeInstruction, organizePlan, organizeTaskId, organizeBusy, organizeChosen, query, categoryFilter, entityFilter, sort, loadList, loadStatus, language]);
 
   /**
    * Rule writes use the same identity as memory writes: the service token plus this Host. The
@@ -1266,25 +1368,36 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     }
   }, [api, language, loadStatus]);
 
-  const saveRule = useCallback(async (target: string, input: { body: string; enabled: boolean; baseVersion: number }): Promise<void> => {
+  const saveRule = useCallback(async (target: string, input: { body: string; enabled: boolean; baseVersion: number } | { remove: true; baseVersion: number }): Promise<void> => {
     try {
       const updated = await api.editRule({
-        ruleId: target, body: input.body.trim(), enabled: input.enabled,
-        baseVersion: input.baseVersion,
+        ruleId: target, ...input,
       });
-      setNotice(translate(language, 'runtime.saved'));
+      setNotice(translate(language, 'remove' in input ? 'runtime.removed' : 'runtime.saved'));
       await loadStatus();
-      setRuleId(updated.entryId);
+      setRuleId('remove' in input ? null : updated.entryId);
     } catch (failure) {
-      // A stale base version means another writer moved the rule; reload so that reopening the
-      // editor starts from the version that actually exists.
-      if (failure instanceof RpcFailure && failure.code === 'VERSION_CONFLICT') await loadStatus();
+      // A stale base version means another writer moved the rule. The list is reloaded so the
+      // editor can show what exists now next to the draft; the draft itself is never discarded.
+      if (failure instanceof RpcFailure && (failure.code === 'VERSION_CONFLICT' || failure.code === 'NOT_FOUND')) {
+        await loadStatus();
+        throw new RuleConflictError(ruleFailure(failure, language));
+      }
       throw new Error(ruleFailure(failure, language));
     }
   }, [api, language, loadStatus]);
 
   const changeArchiveState = useCallback(async (entryId: string, state: 'active' | 'archived', baseVersion: number): Promise<void> => {
-    const updated = await api.setArchiveState({ entryId, state, baseVersion });
+    let updated: UiArchive;
+    try {
+      updated = await api.setArchiveState({ entryId, state, baseVersion });
+    } catch (failure) {
+      if (failure instanceof RpcFailure && (failure.code === 'VERSION_CONFLICT' || failure.code === 'NOT_FOUND') && selectedWorkspace) {
+        const latest = await api.archives(selectedWorkspace).catch(() => null);
+        if (latest !== null) setArchives(latest);
+      }
+      throw failure;
+    }
     setArchives(previous => previous?.map(item => item.entryId === entryId ? updated : item));
     setNotice(translate(language, state === 'archived' ? 'archives.archive' : 'archives.restore'));
     const workspaceId = updated.workspaceId;
@@ -1294,7 +1407,7 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     ]);
     if (capacities !== null) setArchiveCapacities(capacities);
     setArchiveHistory(history);
-  }, [api, language]);
+  }, [api, language, selectedWorkspace]);
 
   /**
    * 「提炼为正式记忆」 state. A preview creates a draft and writes nothing; the confirmation is the
@@ -1536,7 +1649,7 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     } finally {
       setSaving(false);
     }
-  }, [api, detail, draft, reason, saving, language, loadDetail, loadList, loadCurrentContent, query, categoryFilter, categoryChoice, importanceChoice, tagsDraft]);
+  }, [api, detail, draft, reason, saving, language, loadDetail, loadList, loadCurrentContent, query, categoryFilter, entityFilter, sort, editBase, editPending, categoryChoice, importanceChoice, tagsDraft]);
 
   const retry = useCallback((): void => {
     refresh();
@@ -1610,12 +1723,6 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     return navigator.clipboard.writeText(memoryId).then(() => true).catch(() => false);
   }, []);
 
-  /** Search the shared collection for the row's own text, which is how a related entry is found. */
-  const exploreFromCard = useCallback((content: string): void => {
-    setExploreQuery(content);
-    setMemoryView('recall');
-  }, []);
-
   /** Follow a relation; an unreadable target is reported instead of showing an empty panel. */
   const openRelated = useCallback((memoryId: string): void => {
     setSelectedId(memoryId);
@@ -1659,8 +1766,8 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
   const sizeOf = (value: unknown): number | null => Array.isArray(value) ? value.length : null;
   const counts: Record<Tab, number | null> = {
     overview: null,
-    memories: list === null ? null : list.total ?? list.items.length,
-    runtime: sizeOf(rules),
+    memories: null,
+    runtime: null,
     archives: sizeOf(archives),
     skills: null,
     settings: null,
@@ -1770,7 +1877,7 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     } finally {
       setSaving(false);
     }
-  }, [api, detail, saving, withdrawReason, language, loadDetail, loadList, query, categoryFilter]);
+  }, [api, detail, saving, withdrawReason, language, loadDetail, loadList, query, categoryFilter, entityFilter, sort]);
 
   const beginWithdraw = useCallback((): void => {
     setWithdrawing(true);
@@ -1799,26 +1906,38 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
 
 
   /**
-   * Run a semantic search. A failure keeps the previous result visible and reports the reason:   * an explore answer is not a page to blank out on one bad request.
+   * Run a search. A failure keeps the previous result visible and reports the reason: an explore
+   * answer is not a page to blank out on one bad request.
    */
-  const searchExplore = useCallback(async (options: { limit?: number } = {}): Promise<void> => {
-    const text = exploreQuery.trim();
+  const searchExplore = useCallback(async (options: { query?: string; limit?: number } = {}): Promise<void> => {
+    const text = (options.query ?? exploreQuery).trim();
     if (text === '') return;
     // A new search starts at the default page size; "show more" is the only path that grows it.
     const limit = options.limit ?? 20;
-    setBusy(true);
+    const request = ++exploreRequest.current;
+    setExploreBusy(true);
     setExploreError(null);
     try {
       setExploreLimit(limit);
       // No project or workspace narrowing exists: the exploratory search covers the shared
       // collection. Keep whatever the user typed as the query.
-      setExplore(await api.explore({ query: text, limit, minScore: exploreMinScore }));
+      const result = await api.explore({
+        query: text, limit, mode: exploreMode, ...(exploreCategory === '' ? {} : { category: exploreCategory }),
+      });
+      if (request === exploreRequest.current) setExplore(result);
     } catch (failure) {
-      setExploreError(failureText(failure, language));
+      if (request === exploreRequest.current) setExploreError(failureText(failure, language));
     } finally {
-      setBusy(false);
+      if (request === exploreRequest.current) setExploreBusy(false);
     }
-  }, [api, exploreQuery, exploreMinScore, language]);
+  }, [api, exploreQuery, exploreMode, exploreCategory, language]);
+
+  const exploreFromCard = useCallback((content: string): void => {
+    const query = content.trim().slice(0, 500).replace(/[\uD800-\uDBFF]$/u, '');
+    setExploreQuery(query);
+    setMemoryView('recall');
+    void searchExplore({ query });
+  }, [searchExplore]);
 
   const refreshSync = useCallback(async (): Promise<void> => {    setBusy(true);
     try {
@@ -1892,7 +2011,6 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
       {tab === 'memories' ? (
       <div className="mwui-memory">
         <MemoryPageHeader
-          count={listSummary(list, language)}
           language={language}
           active={memoryView}
           creating={creating}
@@ -1922,14 +2040,16 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
       ) : memoryView === 'recall' ? (
         <ExplorePanel
           query={exploreQuery}
+          mode={exploreMode}
+          category={exploreCategory}
           result={explore}
           error={exploreError}
-          busy={busy}
+          busy={exploreBusy}
           language={language}
-          minScore={exploreMinScore}
           limit={exploreLimit}
           onChangeQuery={setExploreQuery}
-          onChangeMinScore={value => { setExploreMinScore(value); setExplore(null); }}
+          onChangeMode={setExploreMode}
+          onChangeCategory={setExploreCategory}
           onSearch={() => { void searchExplore(); }}
           onShowMore={() => { void searchExplore({ limit: Math.min(50, exploreLimit * 2) }); }}
           onOpen={openMemoryFromView}
@@ -1979,54 +2099,64 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
               <button type="button" className="mwui-button" onClick={() => setQuery('')}>{translate(language, 'search.clear')}</button>
             )}
           </div>
-          {/* Only categories that exist are offered, so the picker cannot lead to an empty page. */}
-          {list?.categories === undefined || list.categories.length === 0 ? null : (
+          {/* One control row: the three pickers are direct children of the list column, so each
+              stood on its own line until they shared a row container. */}
+          <div className="mwui-filter-row">
+            {/* Only categories that exist are offered, so the picker cannot lead to an empty page. */}
+            {list?.categories === undefined || list.categories.length === 0 ? null : (
+              <div className="mwui-filter">
+                <label className="mwui-filter-label" htmlFor="mwui-category">{translate(language, 'list.category')}</label>
+                <select
+                  id="mwui-category"
+                  className="mwui-input mwui-select"
+                  value={categoryFilter}
+                  title={categoryFilter === ''
+                    ? translate(language, 'list.categoryAll')
+                    : translate(language, `category.${categoryFilter}` as MessageKey)}
+                  onChange={event => setCategoryFilter(event.target.value)}
+                >
+                  <option value="">{translate(language, 'list.categoryAll')}</option>
+                  {list.categories.map(entry => (
+                    <option key={entry.value} value={entry.value}>
+                      {translate(language, `category.${entry.value}` as MessageKey)} ({entry.count})
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+            {/* Entities are listed in their recorded spelling; matching is case-insensitive. */}
+            {list?.entities === undefined || list.entities.length === 0 ? null : (
+              <div className="mwui-filter">
+                <label className="mwui-filter-label" htmlFor="mwui-entity">{translate(language, 'list.entity')}</label>
+                <select
+                  id="mwui-entity"
+                  className="mwui-input mwui-select"
+                  value={entityFilter}
+                  title={entityFilter === '' ? translate(language, 'list.entityAll') : entityFilter}
+                  onChange={event => setEntityFilter(event.target.value)}
+                >
+                  <option value="">{translate(language, 'list.entityAll')}</option>
+                  {list.entities.map(entry => (
+                    <option key={entry.value} value={entry.value}>{entry.value} ({entry.count})</option>
+                  ))}
+                </select>
+              </div>
+            )}
             <div className="mwui-filter">
-              <label className="mwui-filter-label" htmlFor="mwui-category">{translate(language, 'list.category')}</label>
+              <label className="mwui-filter-label" htmlFor="mwui-sort">{translate(language, 'list.sort')}</label>
               <select
-                id="mwui-category"
+                id="mwui-sort"
                 className="mwui-input mwui-select"
-                value={categoryFilter}
-                onChange={event => setCategoryFilter(event.target.value)}
+                value={sort}
+                title={translate(language, sort === 'oldest' ? 'list.sortOldest'
+                  : sort === 'importance' ? 'list.sortImportance' : 'list.sortNewest')}
+                onChange={event => setSort(event.target.value as ListSort)}
               >
-                <option value="">{translate(language, 'list.categoryAll')}</option>
-                {list.categories.map(entry => (
-                  <option key={entry.value} value={entry.value}>
-                    {translate(language, `category.${entry.value}` as MessageKey)} ({entry.count})
-                  </option>
-                ))}
+                <option value="newest">{translate(language, 'list.sortNewest')}</option>
+                <option value="oldest">{translate(language, 'list.sortOldest')}</option>
+                <option value="importance">{translate(language, 'list.sortImportance')}</option>
               </select>
             </div>
-          )}
-          {/* Entities are listed in their recorded spelling; matching is case-insensitive. */}
-          {list?.entities === undefined || list.entities.length === 0 ? null : (
-            <div className="mwui-filter">
-              <label className="mwui-filter-label" htmlFor="mwui-entity">{translate(language, 'list.entity')}</label>
-              <select
-                id="mwui-entity"
-                className="mwui-input mwui-select"
-                value={entityFilter}
-                onChange={event => setEntityFilter(event.target.value)}
-              >
-                <option value="">{translate(language, 'list.entityAll')}</option>
-                {list.entities.map(entry => (
-                  <option key={entry.value} value={entry.value}>{entry.value} ({entry.count})</option>
-                ))}
-              </select>
-            </div>
-          )}
-          <div className="mwui-filter">
-            <label className="mwui-filter-label" htmlFor="mwui-sort">{translate(language, 'list.sort')}</label>
-            <select
-              id="mwui-sort"
-              className="mwui-input mwui-select"
-              value={sort}
-              onChange={event => setSort(event.target.value as ListSort)}
-            >
-              <option value="newest">{translate(language, 'list.sortNewest')}</option>
-              <option value="oldest">{translate(language, 'list.sortOldest')}</option>
-              <option value="importance">{translate(language, 'list.sortImportance')}</option>
-            </select>
           </div>
           {/* Creating publishes straight to a formal memory; the page-level action starts the
               form in the content view rather than repeating the button in every filter row. */}
@@ -2133,6 +2263,41 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
               </select>
             </label>
             {organizeError === null ? null : <div className="mwui-banner" data-tone="bad">{organizeError}</div>}
+            {organizePlan === null ? null : (
+              <div className="mwui-form">
+                <p className="mwui-edit-hint" data-tone="muted">{translate(language, 'organize.previewHint')}</p>
+                <ul className="mwui-list">
+                  {organizePlan.items.map(item => {
+                    // An item the Agent could not pin down has no button to confirm: selecting it
+                    // would ask the executor to complete work the plan admits it cannot do.
+                    const selectable = item.action !== 'skip';
+                    return (
+                      <li key={item.index} className="mwui-list-row">
+                        <label className="mwui-classify-field">
+                          <input
+                            type="checkbox"
+                            disabled={!selectable || organizeBusy}
+                            checked={organizeChosen.has(item.index)}
+                            onChange={event => setOrganizeChosen(current => {
+                              const next = new Set(current);
+                              if (event.target.checked) next.add(item.index); else next.delete(item.index);
+                              return next;
+                            })}
+                          />
+                          <span className="mwui-mono">{item.action}</span>
+                        </label>
+                        <span className="mwui-muted">{item.reason}</span>
+                        {item.targetId === undefined ? null : <span className="mwui-mono">{item.targetId}</span>}
+                        {item.entryVersion === undefined ? null : <span className="mwui-muted">{translate(language, 'common.version')} {item.entryVersion}</span>}
+                        {item.before === undefined ? null : <pre className="mwui-pre">{item.before}</pre>}
+                        {item.content === undefined ? null : <pre className="mwui-pre">{item.content}</pre>}
+                        {selectable ? null : <span className="mwui-muted">{translate(language, 'organize.notSelectable')}</span>}
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            )}
             {organizeItems === null ? null : (
               <ul className="mwui-list">
                 {organizeItems.map(item => (
@@ -2150,14 +2315,25 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
               <button type="button" className="mwui-button" onClick={() => setOrganizing(false)}>
                 {translate(language, 'organize.close')}
               </button>
+              {organizePlan === null ? null : (
+                <button
+                  type="button"
+                  className="mwui-button"
+                  data-variant="primary"
+                  disabled={organizeBusy || organizeChosen.size === 0}
+                  onClick={() => { void confirmOrganize(); }}
+                >
+                  {translate(language, organizeBusy ? 'organize.applying' : 'organize.confirm')}
+                </button>
+              )}
               <button
                 type="button"
                 className="mwui-button"
-                data-variant="primary"
+                data-variant={organizePlan === null ? 'primary' : undefined}
                 disabled={organizeBusy || organizeInstruction.trim() === ''}
                 onClick={() => { void runOrganize(); }}
               >
-                {translate(language, organizeBusy ? 'organize.running' : 'organize.run')}
+                {translate(language, organizeBusy ? 'organize.running' : organizePlan === null ? 'organize.run' : 'organize.regenerate')}
               </button>
             </div>
           </div>
@@ -2237,9 +2413,15 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
       ) : null}
       </div>
       ) : tab === 'overview' ? (
-        <OverviewPanel status={status} config={config} injection={injection} memories={list} rules={rules} archives={archives} sync={sync} language={language} now={now} onOpen={changeTab} />
+        <OverviewPanel status={status} config={config} injection={injection} memories={list} rules={rules} archives={archives} sync={sync} language={language} now={now} onOpen={changeTab} idleReview={idleRuns} idleSkips={idleSkips} idleReviewError={idleReviewError} pendingWrites={pendingWrites} pendingWritesError={pendingWritesError} onResolveWrite={(taskId, index) => { void resolveWrite(taskId, index); }} onRetryWrite={(taskId, index) => { void retryWrite(taskId, index); }} busyWrite={busyWrite} onOpenTarget={(kind, entryId) => {
+          // A review item opens what it changed: the rule page or the archive page, selected.
+          if (kind === 'rule') { changeTab('runtime'); setRuleId(entryId); return; }
+          changeTab('archives');
+          setArchiveId(entryId);
+        }} />
       ) : tab === 'runtime' ? (
-        <RuntimePanel rules={rules} usage={ruleUsage} error={rulesError} selected={ruleId} language={language} onSelect={setRuleId} onCreate={submitRule} onSave={saveRule} />
+        <RuntimePanel rules={rules} usage={ruleUsage} error={rulesError} selected={ruleId} language={language} onSelect={setRuleId} onCreate={submitRule} onSave={saveRule}
+          onSaveLimits={async limits => { await api.saveRuleLimits(limits); }} />
       ) : tab === 'archives' ? (
         <ArchivesPanel archives={archives} capacities={archiveCapacities} history={archiveHistory} error={archivesError} selected={archiveId} language={language} workspaces={workspaces} workspace={selectedWorkspace} onWorkspace={setSelectedWorkspace} onSelect={entryId => { setArchiveId(entryId); if (distillation?.draft?.source.entryId !== entryId) setDistillation(null); }} onSetState={changeArchiveState} distillation={distillation === null ? null : {
           draft: distillation.draft, skip: distillation.skip, busy: distillation.busy,
@@ -2313,7 +2495,6 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
             onCreate={input => { void createSkillFile(input); }}
             busy={skillBusy}
             notice={skillNotice}
-            autoAdopt={autoAdopt}
             trash={trashEntries}
             onTrash={path => { void trashSkillFile(path); }}
             onRestoreTrash={id => { void restoreTrashEntry(id); }}
@@ -2323,10 +2504,6 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
             onDismissDraft={id => { void dismissSkillDraftEntry(id); }}
             onAdoptDraft={draft => { void adoptStoredDraftEntry(draft); }}
             onLoadDraft={draft => setLoadedDraft(draft)}
-            onAutoAdoptChange={enabled => {
-              setAutoAdopt(enabled);
-              void api.setSkillAutoAdopt({ autoAdopt: enabled }).catch(failure => setSkillsError(failureText(failure, language)));
-            }}
           />
           ) : null}
           {skillModule === 'review' ? (
@@ -2350,15 +2527,6 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
                 scenario: draft.input.scenario, checks: draft.input.checks,
                 report: draft.report ?? null, backtestError: draft.backtestError ?? null,
               }).then(() => api.skillDrafts({})).then(setSkillDrafts, () => undefined);
-              if (selectedSkill === null || draft.report === undefined) return;
-              void api.skillAutoAdopt({
-                path: selectedSkill.path, candidate: draft.input.candidate, baselineHash: selectedSkill.hash,
-                review: { report: draft.report, checks: draft.input.checks, completedAt: new Date().toISOString() },
-              }).then(result => {
-                if (!result.adopted) return;
-                setSkillNotice(translate(language, 'skills.autoAdopted'));
-                void reloadSkills(selectedSkill.path);
-              }).catch(failure => setSkillsError(failureText(failure, language)));
             }}
           />
           ) : null}
@@ -2379,6 +2547,10 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
               syncError={syncError}
               syncPass={syncPass}
               diagnostics={diagnostics}
+              backfillHistory={backfillHistory}
+              backfillBusy={backfillBusy}
+              backfillError={backfillError}
+              onStartBackfill={() => { void startBackfill(); }}
               onSaveInterface={patch => { void saveSettings(() => api.saveInterface(patch)); }}
               onSaveConnection={input => { void saveSettings(() => api.saveConnection(input)); }}
               onSaveInjection={input => { void saveSettings(() => api.saveInjection(input)); }}

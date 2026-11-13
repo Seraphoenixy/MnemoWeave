@@ -19,7 +19,6 @@ import { tempDir } from '../support/temp.ts';
  * retries, and every machine converges on the same revision chain.
  */
 
-const streams = [{ stream: 'formal-memories', canRead: true, canWrite: true }, { stream: 'rules', canRead: true, canWrite: true }];
 
 /**
  * An explicit refresh that overlaps the startup pass is answered with `skipped`, which is
@@ -55,9 +54,9 @@ test('three machines converge on one revision chain and a stale base is rejected
   mkdirSync(root, { recursive: true });
   const tokens = { a: 'a'.repeat(32), b: 'b'.repeat(32), c: 'c'.repeat(32) };
   const remote = new SyncStore({ path: join(root, 'remote.db') });
-  remote.enroll('a', tokens.a, streams);
-  remote.enroll('b', tokens.b, streams);
-  remote.enroll('c', tokens.c, streams);
+  remote.enroll('a', tokens.a);
+  remote.enroll('b', tokens.b);
+  remote.enroll('c', tokens.c);
   const server: Server = createSyncServer({ gateway: remote });
   await new Promise<void>((done) => server.listen(0, '127.0.0.1', () => done()));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;

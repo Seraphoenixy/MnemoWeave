@@ -87,8 +87,8 @@ test('the detail, edit, withdraw, graph and explore requests forward their field
   await rpc('graph', { limit: 120 });
   assert.deepEqual(source['graph']?.[0], { limit: 120 }, 'the node cap is the graph\'s only argument');
 
-  await rpc('explore', { query: '语义检索', limit: 15, minScore: 0.4 });
-  assert.deepEqual(source['explore']?.[0], { query: '语义检索', limit: 15, minScore: 0.4 }, 'the score floor reaches the source');
+  await rpc('explore', { query: '语义检索', limit: 15, mode: 'basic', category: 'decision' });
+  assert.deepEqual(source['explore']?.[0], { query: '语义检索', limit: 15, mode: 'basic', category: 'decision' });
 });
 
 test('rule writes forward every validated field, including the base version', async () => {
@@ -101,6 +101,10 @@ test('rule writes forward every validated field, including the base version', as
 
   await rpc('editRule', { ruleId: UUID, body: '新的准则', enabled: true, baseVersion: 2 });
   assert.deepEqual(source['editRule'], [UUID, { body: '新的准则', enabled: true, baseVersion: 2 }], 'the base version reaches the source');
+  await rpc('createRule', { body: 'x'.repeat(4001) });
+  assert.equal((source['createRule']?.[0] as { body: string }).body.length, 4001);
+  await rpc('editRule', { ruleId: UUID, remove: true, baseVersion: 3 });
+  assert.deepEqual(source['editRule'], [UUID, { remove: true, baseVersion: 3 }]);
 });
 
 test('each settings request forwards only the fields it owns', async () => {
@@ -111,6 +115,8 @@ test('each settings request forwards only the fields it owns', async () => {
 
   await rpc('saveInjection', { injectTimeoutMs: 2500 });
   assert.deepEqual(settings['saveInjection']?.[0], { injectTimeoutMs: 2500 });
+  await rpc('saveRuleLimits', { capacityBytes: 12000, itemMaxBytes: 9000 });
+  assert.deepEqual(settings['saveRuleLimits']?.[0], { capacityBytes: 12000, itemMaxBytes: 9000 });
 
   await rpc('saveAutoStart', { enabled: true });
   assert.deepEqual(settings['saveAutoStart']?.[0], { enabled: true });
@@ -132,6 +138,8 @@ test('a rejected request forwards nothing at all', async () => {
     ['memories', { sort: 'sideways' }],
     ['graph', { limit: 900 }],
     ['explore', { query: '' }],
+    // A removed score floor is refused, not ignored: the caller believed it was narrowing.
+    ['explore', { query: 'x', minScore: 0.5 }],
     ['create', { content: '' }],
     ['create', { content: 'x', category: 'nope' }],
     // The removed field is still refused rather than silently ignored.
@@ -140,7 +148,6 @@ test('a rejected request forwards nothing at all', async () => {
     ['edit', { memoryId: UUID, content: '', entryVersion: 0 }],
     ['withdraw', { memoryId: UUID, reason: '   ', entryVersion: 0 }],
     ['createRule', { body: '   ' }],
-    ['createRule', { body: 'x'.repeat(4001) }],
     ['editRule', { ruleId: 'not-a-uuid', enabled: false }],
     ['editRule', { ruleId: UUID }],
     ['editRule', { ruleId: UUID, enabled: false, baseVersion: -1 }],

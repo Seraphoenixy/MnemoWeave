@@ -22,11 +22,8 @@ before(async () => {
   const dir = await tempDir('sync-http', 'sync-http-test');
   mkdirSync(dir, { recursive: true });
   store = new SyncStore({ path: join(dir, 'sync.db'), now: () => NOW });
-  store.enroll('device-a', TOKEN, [
-    { stream: 'rules', canRead: true, canWrite: true },
-    { stream: 'formal-memories', canRead: true, canWrite: true },
-  ]);
-  store.enroll('device-b', 'b'.repeat(32), [{ stream: 'rules', canRead: true, canWrite: true }]);
+  store.enroll('device-a', TOKEN);
+  store.enroll('device-b', 'b'.repeat(32));
   server = createSyncServer({ gateway: store, now: () => new Date(NOW) });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -151,7 +148,7 @@ test('pull pages expose contiguous sequences and honour since and limit', async 
   assert.equal((await fetch(`${base}/v1/sync/changes?stream=project:alpha&since=0`, { headers: headers() })).status, 400);
 });
 
-test('entry and snapshot reads are stream checked', async () => {
+test('authenticated devices can read entries and snapshots across streams', async () => {
   const entry = draft({ kind: 'formal-memory', payload: { category: 'fact', importance: 3, tags: [], entities: [], relations: [] } });
   await post(buildChange({ changeId: randomUUID(), baseVersion: 0, operation: 'create', entry }));
   const read = await fetch(`${base}/v1/sync/entries/${entry.entryId}`, { headers: headers() });
@@ -162,9 +159,8 @@ test('entry and snapshot reads are stream checked', async () => {
   const body = await snapshot.json() as { asOfSeq: number; nextSince: number; entries: unknown[] };
   assert.equal(body.asOfSeq, body.nextSince);
   assert.ok(body.entries.length >= 1);
-  // Device B holds only the rules stream, so a formal-memory snapshot is outside its grants.
   const deviceB = { authorization: `Bearer ${'b'.repeat(32)}`, ...PROTOCOL };
-  assert.equal((await fetch(`${base}/v1/sync/snapshot?stream=formal-memories`, { headers: deviceB })).status, 403);
+  assert.equal((await fetch(`${base}/v1/sync/snapshot?stream=formal-memories`, { headers: deviceB })).status, 200);
   assert.equal((await fetch(`${base}/v1/sync/snapshot`, { headers: headers() })).status, 400);
 });
 

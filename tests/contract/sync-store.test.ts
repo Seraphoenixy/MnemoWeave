@@ -16,12 +16,8 @@ const NOW = '2026-11-10T04:00:00.000Z';
 async function openStore(archiveCapacityBytes?: number): Promise<SyncStore> {
   const dir = await tempDir('sync-store', 'store');
   const store = new SyncStore({ path: join(dir, 'sync.db'), now: () => NOW, ...(archiveCapacityBytes === undefined ? {} : { archiveCapacityBytes }) });
-  store.enroll('device-a', TOKEN_A, [
-    { stream: 'rules', canRead: true, canWrite: true },
-    { stream: 'formal-memories', canRead: true, canWrite: true },
-    { stream: 'workspace-archives:11111111-1111-4111-8111-111111111111', canRead: true, canWrite: true },
-  ]);
-  store.enroll('device-b', TOKEN_B, [{ stream: 'formal-memories', canRead: true, canWrite: true }]);
+  store.enroll('device-a', TOKEN_A);
+  store.enroll('device-b', TOKEN_B);
   return store;
 }
 
@@ -60,7 +56,7 @@ function update(entry: SyncEntryDraftValue, baseVersion: number, changeId = rand
 test('devices authenticate by hashed token and lose access when revoked', async () => {
   const store = await openStore();
   try {
-    assert.deepEqual(store.streams(TOKEN_A).streams.map((item) => item.stream).sort(), ['formal-memories', 'rules', `workspace-archives:${WORKSPACE}`]);
+    assert.deepEqual(store.streams(TOKEN_A).streams.map((item) => item.stream).sort(), ['formal-memories', 'rules']);
     assert.throws(() => store.streams('c'.repeat(32)), (error: unknown) => error instanceof MnemoWeaveError && error.code === 'UNAUTHORIZED');
     store.revoke('device-a');
     assert.throws(() => store.streams(TOKEN_A), (error: unknown) => error instanceof MnemoWeaveError && error.code === 'DEVICE_REVOKED');
@@ -120,14 +116,15 @@ test('a stale base version is refused and reports the current version', async ()
   }
 });
 
-test('writing a stream the device was not granted is refused', async () => {
+test('every authenticated device can write, discover and read workspace streams', async () => {
   const store = await openStore();
   try {
-    assert.throws(() => store.submit(TOKEN_B, create(draft())), (error: unknown) => error instanceof MnemoWeaveError && error.code === 'SCOPE_FORBIDDEN');
-    assert.throws(() => store.submit(TOKEN_B, create(archiveDraft())), (error: unknown) => error instanceof MnemoWeaveError && error.code === 'SCOPE_FORBIDDEN');
-    assert.throws(() => store.pull(TOKEN_B, { stream: 'rules', since: 0, limit: 10 }), (error: unknown) => error instanceof MnemoWeaveError && error.code === 'SCOPE_FORBIDDEN');
-    // Holding one workspace stream grant does not grant a formal-memory stream.
-    assert.throws(() => store.pull(TOKEN_B, { stream: `workspace-archives:${WORKSPACE}`, since: 0, limit: 10 }), (error: unknown) => error instanceof MnemoWeaveError && error.code === 'SCOPE_FORBIDDEN');
+    const archive = archiveDraft();
+    const accepted = store.submit(TOKEN_B, create(archive));
+    assert.equal(accepted.stream, `workspace-archives:${WORKSPACE}`);
+    assert.ok(store.streams(TOKEN_A).streams.some(item => item.stream === accepted.stream));
+    assert.equal(store.pull(TOKEN_A, { stream: accepted.stream, since: 0, limit: 10 }).changes.length, 1);
+    assert.equal(store.receipt(TOKEN_A, accepted.changeId).entryId, archive.entryId);
   } finally {
     store.close();
   }
@@ -147,11 +144,9 @@ test('a change cannot name a stream, and its stream is derived from the entry', 
     assert.equal(accepted.stream, 'rules');
     const archived = store.submit(TOKEN_A, create(archiveDraft()));
     assert.equal(archived.stream, `workspace-archives:${WORKSPACE}`);
-    // A workspace archive whose payload names a different workspace is in another stream.
-    assert.throws(
-      () => store.submit(TOKEN_A, create({ ...archiveDraft(), payload: { ...archiveDraft().payload, workspaceId: randomUUID() } })),
-      (error: unknown) => error instanceof MnemoWeaveError && error.code === 'SCOPE_FORBIDDEN',
-    );
+    const workspaceId = randomUUID();
+    const other = store.submit(TOKEN_A, create({ ...archiveDraft(), payload: { ...archiveDraft().payload, workspaceId } }));
+    assert.equal(other.stream, `workspace-archives:${workspaceId}`);
   } finally {
     store.close();
   }
@@ -180,7 +175,7 @@ test('sequences stay contiguous per stream and paging never skips', async () => 
   }
 });
 
-test('entry reads carry the revision chain and refuse other streams', async () => {
+test('entry reads carry the revision chain across devices', async () => {
   const store = await openStore();
   try {
     const entry = draft({ kind: 'formal-memory', payload: { category: 'fact', importance: 3, tags: [], entities: [], relations: [] } });
@@ -189,10 +184,9 @@ test('entry reads carry the revision chain and refuse other streams', async () =
     const current = store.entry(TOKEN_A, entry.entryId);
     assert.equal(current.version, 2);
     assert.deepEqual(current.revisions?.map((item) => item.version), [1, 2]);
-    // Device B holds only the formal-memory stream, so an archive entry is outside its reach.
     const archive = archiveDraft();
     store.submit(TOKEN_A, create(archive));
-    assert.throws(() => store.entry(TOKEN_B, archive.entryId), (error: unknown) => error instanceof MnemoWeaveError && error.code === 'SCOPE_FORBIDDEN');
+    assert.equal(store.entry(TOKEN_B, archive.entryId).entryId, archive.entryId);
     assert.throws(() => store.entry(TOKEN_A, randomUUID()), (error: unknown) => error instanceof MnemoWeaveError && error.code === 'NOT_FOUND');
   } finally {
     store.close();
@@ -213,7 +207,7 @@ test('a snapshot is a consistent cut point and carries formal history', async ()
     assert.deepEqual(snapshot.entries[0]?.revisions?.map((item) => item.version), [1, 2]);
     const rules = store.snapshot(TOKEN_A, 'rules');
     assert.equal(rules.asOfSeq, 1);
-    assert.throws(() => store.snapshot(TOKEN_B, 'rules'), (error: unknown) => error instanceof MnemoWeaveError && error.code === 'SCOPE_FORBIDDEN');
+    assert.deepEqual(store.snapshot(TOKEN_B, 'rules'), rules);
   } finally {
     store.close();
   }

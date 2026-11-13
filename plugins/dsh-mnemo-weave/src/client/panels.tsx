@@ -1,9 +1,23 @@
-import type { UiArchive, UiArchiveCapacity, UiArchiveHistory, UiConfigView, UiConnectionTest, UiEmbeddingDiagnostics, UiExplore, UiGraph, UiGraphNode, UiInjection, UiMemoryList, UiMemorySummary, UiRegisterTest, UiRule, UiRuleUsage, UiSettings, UiStatus, UiSyncPass, UiSyncStatus, UiWakeTest, UiWorkspace } from '../shared/contract.ts';
+import type { UiArchive, UiArchiveCapacity, UiArchiveHistory, UiConfigView, UiConnectionTest, UiDiagnosticJob, UiEmbeddingDiagnostics, UiExplore, UiExploreHit, UiGraph, UiGraphNode, UiIdleReviewRun, UiIdleSkip, UiInjection, UiMemoryList, UiMemorySummary, UiPendingWrite, UiRegisterTest, UiRule, UiRuleUsage, UiSettings, UiStatus, UiSyncPass, UiSyncStatus, UiWakeTest, UiWorkspace } from '../shared/contract.ts';
 import { translate, type Language, type MessageKey } from './i18n.ts';
 import { Modal } from './modal.tsx';
-import { capacityPercent, filterEntities, formatBytes, formatDateTime, relativeTime, utf8Bytes } from './view-model.ts';
+import { capacityPercent, filterEntities, formatBytes, formatDateTime, groupIdleReview, relativeTime, utf8Bytes, type IdleReviewGroup } from './view-model.ts';
 import { GRAPH_HEIGHT, GRAPH_WIDTH, clampGraphPosition, linkLabel, naturalGraphPositions, nodeKey, uniformGraphPositions, type GraphLayoutMode, type GraphPositions } from './graph-layout.ts';
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
+
+/**
+ * A save refused because the entry moved since the editor opened it.
+ *
+ * It is a distinct type because the editor must not treat it as a generic failure: the draft is
+ * still the user's text, and the comparison between the opened and the current version is the
+ * whole point.
+ */
+export class RuleConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RuleConflictError';
+  }
+}
 
 /**
  * The page-level classes. dsh-mnemon gives every Source one page and shows only those pages in
@@ -127,11 +141,123 @@ export interface OverviewProps {
   language: Language;
   now: number;
   onOpen(tab: Tab): void;
+  /** Idle-review runs grouped by session; undefined while loading, null when unreadable. */
+  idleReview?: UiIdleReviewRun[] | null | undefined;
+  /** Why a review did not start, per session. */
+  idleSkips?: UiIdleSkip[] | null | undefined;
+  /** Why the review list could not be read, when it could not. */
+  idleReviewError?: string | null | undefined;
+  pendingWritesError?: string | null | undefined;
+  /** Actions this Host submitted that still need an answer. */
+  pendingWrites?: UiPendingWrite[] | null | undefined;
+  /** Ask the Server about one outstanding action without resubmitting it. */
+  onResolveWrite?: (taskId: string, index: number) => void;
+  onRetryWrite?: (taskId: string, index: number) => void;
+  busyWrite?: string | null;
+  /** Open the affected entry after an item was applied. */
+  onOpenTarget?: (kind: 'formal-memory' | 'rule' | 'workspace-archive', entryId: string) => void;
+}
+
+/** One session's review outcomes: rule changes, archive adds, and the reasons nothing happened. */
+function IdleReviewSession({ session, language, now, onOpenTarget, receipts }: {
+  session: IdleReviewGroup;
+  language: Language;
+  now: number;
+  receipts: readonly UiPendingWrite[];
+  onOpenTarget?: (kind: 'formal-memory' | 'rule' | 'workspace-archive', entryId: string) => void;
+}): ReactNode {
+  const latest = session.runs[0];
+  return (
+    <div className="mwui-idle-session">
+      <div className="mwui-kv">
+        <span className="mwui-mono">{session.sessionId}</span>
+        <span className="mwui-muted">
+          {latest === undefined ? '' : `${translate(language, `idle.state.${latest.state}` as MessageKey)} · ${relativeTime(latest.startedAt, now, language)}`}
+        </span>
+      </div>
+      {session.runs.map(originalRun => {
+        const run = { ...originalRun, items: originalRun.items.map(item => {
+          const receipt = receipts.find(row => row.taskId === originalRun.id && row.index === item.detail?.['receiptIndex']);
+          return receipt === undefined ? item : { ...item,
+            ...(receipt.entryId && receipt.action !== 'remove' ? { targetId: receipt.entryId } : {}),
+            detail: { ...item.detail, status: receipt.status, reason: receipt.errorCode },
+          };
+        }) };
+        return (
+        <div key={run.id} className="mwui-idle-run">
+          <div className="mwui-kv">
+            <span>{translate(language, 'idle.attempt')} {run.attempt}</span>
+            <span className="mwui-muted">{formatDateTime(run.startedAt)}{run.finishedAt === null ? '' : ` → ${formatDateTime(run.finishedAt)}`}</span>
+          </div>
+          {run.error === null ? null : <div className="mwui-inline-error" role="alert">{run.error}</div>}
+          <div>
+            <h4 className="mwui-section-title">{translate(language, 'idle.ruleChanges')}</h4>
+            {run.items.filter(item => item.kind === 'rule').length === 0
+              ? <div className="mwui-muted">{translate(language, 'idle.none')}</div>
+              : (
+                <ul className="mwui-list">
+                  {run.items.filter(item => item.kind === 'rule').map(item => (
+                    <li key={`rule-${item.index}`} className="mwui-list-row">
+                      <span className="mwui-mono">{item.action}</span>
+                      <span data-tone={item.state === 'failed' ? 'warn' : undefined}>{translate(language, (typeof item.detail?.['status'] === 'string' ? `write.status.${item.detail['status']}` : `organize.state.${item.state}`) as MessageKey)}</span>
+                      {typeof item.detail?.['reason'] === 'string' ? <span className="mwui-muted">{item.detail['reason']}</span> : null}
+                      {item.targetId === undefined || onOpenTarget === undefined ? null : (
+                        <button type="button" className="mwui-button mwui-mini" onClick={() => onOpenTarget('rule', item.targetId!)}>
+                          {translate(language, 'idle.open')}
+                        </button>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+          </div>
+          <div>
+            <h4 className="mwui-section-title">{translate(language, 'idle.archiveAdds')}</h4>
+            {run.items.filter(item => item.kind === 'workspace-archive').length === 0
+              ? <div className="mwui-muted">{translate(language, 'idle.none')}</div>
+              : (
+                <ul className="mwui-list">
+                  {run.items.filter(item => item.kind === 'workspace-archive').map(item => (
+                    <li key={`archive-${item.index}`} className="mwui-list-row">
+                      <span className="mwui-mono">{item.action}</span>
+                      <span data-tone={item.state === 'failed' ? 'warn' : undefined}>{translate(language, (typeof item.detail?.['status'] === 'string' ? `write.status.${item.detail['status']}` : `organize.state.${item.state}`) as MessageKey)}</span>
+                      {typeof item.detail?.['reason'] === 'string' ? <span className="mwui-muted">{item.detail['reason']}</span> : null}
+                      {item.targetId === undefined || onOpenTarget === undefined ? null : (
+                        <button type="button" className="mwui-button mwui-mini" onClick={() => onOpenTarget('workspace-archive', item.targetId!)}>
+                          {translate(language, 'idle.open')}
+                        </button>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+          </div>
+          <div>
+            <h4 className="mwui-section-title">{translate(language, 'idle.skips')}</h4>
+            {/* A skip that names a reason is what makes "nothing changed" a stated fact. */}
+            {run.items.filter(item => item.kind === 'formal-memory' && item.state !== 'applied').length === 0
+              ? <div className="mwui-muted">{translate(language, 'idle.none')}</div>
+              : (
+                <ul className="mwui-list">
+                  {run.items.filter(item => item.kind === 'formal-memory' && item.state !== 'applied').map(item => (
+                    <li key={`skip-${item.index}`} className="mwui-list-row">
+                      <span>{translate(language, `organize.state.${item.state}` as MessageKey)}</span>
+                      <span className="mwui-muted">{typeof item.detail?.['reason'] === 'string' ? item.detail['reason'] : translate(language, 'idle.reasonUnknown')}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+          </div>
+        </div>
+      ); })}
+    </div>
+  );
 }
 
 /** One screen: how much of each class exists, what the last injection carried, whether sync runs. */
 export function OverviewPanel(props: OverviewProps): ReactNode {
-  const { status, config, injection, memories, rules, archives, sync, language, now } = props;
+  const { status, config, injection, memories, rules, archives, sync, language, now, idleReview, idleSkips, idleReviewError, pendingWrites, pendingWritesError, onResolveWrite, onRetryWrite, busyWrite, onOpenTarget } = props;
+  const idleReviewSessions = groupIdleReview(idleReview ?? []);
 
   return (
     <div className="mwui-page">
@@ -156,6 +282,80 @@ export function OverviewPanel(props: OverviewProps): ReactNode {
                 {injection.failure === undefined ? null : <div className="mwui-kv" data-tone="warn"><span>{translate(language, 'injection.failure')}</span><span>{translate(language, `injection.failure.${injection.failure}` as MessageKey)}</span></div>}
               </>
             )}
+        </div>
+      </section>
+
+      <section className="mwui-pane">
+        <div className="mwui-pane-header"><span className="mwui-pane-title">{translate(language, 'overview.idleReview')}</span></div>
+        <div className="mwui-pane-body">
+          {idleReview === undefined
+            ? <span className="mwui-muted">{translate(language, 'list.loading')}</span>
+            : idleReview === null
+              // A read that failed says so: an empty list here would claim nothing happened.
+              ? <span className="mwui-muted">{translate(language, 'panel.unavailable')}{idleReviewError === null || idleReviewError === undefined ? '' : ` · ${idleReviewError}`}</span>
+              : idleReview.length === 0
+                // With declines recorded, the list below already explains the quiet; the "no review
+                // yet" line would then contradict it.
+                ? ((idleSkips ?? []).length === 0 ? <span className="mwui-muted">{translate(language, 'overview.idleEmpty')}</span> : null)
+                : idleReviewSessions.map(session => <IdleReviewSession key={session.sessionId} session={session} language={language} now={now} receipts={pendingWrites ?? []} {...(onOpenTarget === undefined ? {} : { onOpenTarget })} />)}
+          {/* A review that never started leaves no run, so its reason is listed on its own. */}
+          {(idleSkips ?? []).length === 0 ? null : (
+            <ul className="mwui-list">
+              {[...(idleSkips ?? [])].sort((left, right) => right.at.localeCompare(left.at)).map(skip => (
+                <li key={`${skip.sessionId}:${skip.reason}`} className="mwui-list-row">
+                  <span className="mwui-mono">{skip.sessionId}</span>
+                  <span className="mwui-muted">{translate(language, `idle.skip.${skip.reason}` as MessageKey)}</span>
+                  {skip.detail === undefined ? null : <span className="mwui-muted">{skip.detail}</span>}
+                  <span className="mwui-muted">{formatDateTime(skip.at)}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </section>
+
+      <section className="mwui-pane">
+        <div className="mwui-pane-header"><span className="mwui-pane-title">{translate(language, 'overview.pendingWrites')}</span></div>
+        <div className="mwui-pane-body">
+          {pendingWrites === undefined
+            ? <span className="mwui-muted">{translate(language, 'list.loading')}</span>
+            : pendingWrites === null || pendingWrites.length === 0
+              ? <span className="mwui-muted">{pendingWrites === null && pendingWritesError !== null && pendingWritesError !== undefined
+                ? `${translate(language, 'panel.unavailable')} · ${pendingWritesError}`
+                : translate(language, 'overview.pendingEmpty')}</span>
+              : (
+                <ul className="mwui-list">
+                  {pendingWrites.map(row => (
+                    <li key={`${row.taskId}:${row.index}`} className="mwui-list-row">
+                      <span className="mwui-mono">{row.kind}</span>
+                      <span className="mwui-mono">{row.action}</span>
+                      <span data-tone={row.status === 'failed' ? 'warn' : undefined}>{translate(language, `write.status.${row.status}` as MessageKey)}</span>
+                      {row.errorCode === undefined ? null : <span className="mwui-muted">{row.errorCode}</span>}
+                      <span className="mwui-muted">{formatDateTime(row.updatedAt)}</span>
+                      <span className="mwui-actions">
+                        {(row.memoryId ?? (row.action === 'remove' ? undefined : row.entryId)) && onOpenTarget
+                          ? <button type="button" className="mwui-button mwui-mini" onClick={() => onOpenTarget(row.kind, (row.memoryId ?? row.entryId)!)}>{translate(language, 'idle.open')}</button> : null}
+                        <button
+                          type="button"
+                          className="mwui-button mwui-mini"
+                          disabled={busyWrite === `${row.taskId}:${row.index}`}
+                          onClick={() => onResolveWrite?.(row.taskId, row.index)}
+                        >
+                          {translate(language, 'overview.writeCheck')}
+                        </button>
+                        {row.status !== 'pending' || Object.keys(row.request).length === 0 ? null : <button
+                          type="button"
+                          className="mwui-button mwui-mini"
+                          disabled={busyWrite === `${row.taskId}:${row.index}`}
+                          onClick={() => onRetryWrite?.(row.taskId, row.index)}
+                        >
+                          {translate(language, 'overview.writeRetry')}
+                        </button>}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
         </div>
       </section>
 
@@ -205,7 +405,42 @@ export interface RuntimeProps {
   /** Publishes a new rule; the page refreshes the list and selects it before resolving. */
   onCreate(draft: RuleDraft): Promise<void>;
   /** Saves body and enabled state; `baseVersion` is the version the form opened at. */
-  onSave(ruleId: string, input: { body: string; enabled: boolean; baseVersion: number }): Promise<void>;
+  onSave(ruleId: string, input: { body: string; enabled: boolean; baseVersion: number } | { remove: true; baseVersion: number }): Promise<void>;
+  onSaveLimits?(input: { capacityBytes: number; itemMaxBytes: number }): Promise<void>;
+}
+
+function RuleLimitsForm({ usage, language, onSave }: {
+  usage: UiRuleUsage;
+  language: Language;
+  onSave: NonNullable<RuntimeProps['onSaveLimits']>;
+}): ReactNode {
+  const [capacity, setCapacity] = useState(String(usage.limitBytes));
+  const [item, setItem] = useState(String(usage.itemMaxBytes));
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
+  return <details className="mwui-detail">
+    <summary>{translate(language, 'runtime.limits')}</summary>
+    <form className="mwui-edit" onSubmit={event => {
+      event.preventDefault();
+      if (busy) return;
+      setBusy(true);
+      setMessage(null);
+      void onSave({ capacityBytes: Number(capacity), itemMaxBytes: Number(item) })
+        .then(() => setMessage({ text: translate(language, 'runtime.limitsSaved'), error: false }))
+        .catch(error => setMessage({ text: error instanceof Error ? error.message : String(error), error: true }))
+        .finally(() => setBusy(false));
+    }}>
+      <label>{translate(language, 'runtime.capacityBytes')}
+        <input className="mwui-input" type="number" min="1" max="1048576" required value={capacity} onChange={event => setCapacity(event.target.value)} />
+      </label>
+      <label>{translate(language, 'runtime.itemMaxBytes')}
+        <input className="mwui-input" type="number" min="1" max={capacity} required value={item} onChange={event => setItem(event.target.value)} />
+      </label>
+      <div className="mwui-edit-hint">{translate(language, 'runtime.limitsHint')}</div>
+      {message ? <div role={message.error ? 'alert' : 'status'}>{message.text}</div> : null}
+      <button className="mwui-button" type="submit" disabled={busy}>{translate(language, 'runtime.save')}</button>
+    </form>
+  </details>;
 }
 
 /**
@@ -220,10 +455,15 @@ export function RuntimePanel(props: RuntimeProps): ReactNode {
   const [creating, setCreating] = useState(false);
   const [draft, setDraft] = useState<RuleDraft>({ body: '', enabled: true });
   const [createError, setCreateError] = useState<string | null>(null);
-  const [edit, setEdit] = useState<{ ruleId: string; body: string; enabled: boolean; version: number } | null>(null);
+  const [edit, setEdit] = useState<{ ruleId: string; body: string; enabled: boolean; version: number; baseBody: string; baseEnabled: boolean } | null>(null);
   const [editError, setEditError] = useState<string | null>(null);
+  /** Set when a save was refused for a stale base: the draft stays, both versions are shown. */
+  const [conflict, setConflict] = useState(false);
+  const [confirmRemove, setConfirmRemove] = useState(false);
   const [busy, setBusy] = useState(false);
   const editing = edit !== null && (rules ?? []).some(rule => rule.entryId === edit.ruleId);
+  /** The open draft's target is gone: the text is kept and offered back, never silently dropped. */
+  const targetRemoved = edit !== null && !editing && Array.isArray(rules);
   const edited = edit === null ? null : (rules ?? []).find(rule => rule.entryId === edit.ruleId) ?? null;
   const dirty = edit !== null && edited !== null && (edit.body !== edited.body || edit.enabled !== edited.enabled);
 
@@ -237,6 +477,7 @@ export function RuntimePanel(props: RuntimeProps): ReactNode {
   const closeEdit = (): void => {
     setEdit(null);
     setEditError(null);
+    setConfirmRemove(false);
   };
 
   const closeCreate = (): void => {
@@ -251,8 +492,10 @@ export function RuntimePanel(props: RuntimeProps): ReactNode {
     const rule = (rules ?? []).find(item => item.entryId === ruleId);
     if (rule === undefined) return;
     if (ruleId !== selected) props.onSelect(ruleId);
-    setEdit({ ruleId: rule.entryId, body: rule.body, enabled: rule.enabled, version: rule.version });
+    setEdit({ ruleId: rule.entryId, body: rule.body, enabled: rule.enabled, version: rule.version, baseBody: rule.body, baseEnabled: rule.enabled });
     setEditError(null);
+    setConflict(false);
+    setConfirmRemove(false);
   };
 
   const submitCreate = async (): Promise<void> => {
@@ -270,22 +513,39 @@ export function RuntimePanel(props: RuntimeProps): ReactNode {
     }
   };
 
-  const submitEdit = async (): Promise<void> => {
+  const submitEdit = async (remove = false): Promise<void> => {
     if (edit === null) return;
-    if (edit.body.trim() === '') { setEditError(translate(language, 'runtime.bodyRequired')); return; }
+    if (!remove && edit.body.trim() === '') { setEditError(translate(language, 'runtime.bodyRequired')); return; }
     setBusy(true);
     setEditError(null);
     try {
-      await props.onSave(edit.ruleId, {
+      await props.onSave(edit.ruleId, remove ? { remove: true, baseVersion: edit.version } : {
         body: edit.body, enabled: edit.enabled, baseVersion: edit.version,
       });
-      setEdit(null);
+      closeEdit();
     } catch (failure) {
+      // A stale base means another writer moved the rule. The draft and the version it was based
+      // on both stay, so the comparison below is between what the user opened and what exists now.
+      if (failure instanceof RuleConflictError) setConflict(true);
       setEditError(failure instanceof Error ? failure.message : String(failure));
     } finally {
       setBusy(false);
     }
   };
+
+  /** Adopt the version that exists now as the new base, keeping the draft text. */
+  const rebase = (): void => {
+    if (edit === null || edited === null) return;
+    setEdit({ ...edit, version: edited.version, baseBody: edited.body, baseEnabled: edited.enabled });
+    setConflict(false);
+    setConfirmRemove(false);
+    setEditError(null);
+  };
+
+  const bytes = (body: string): string => translate(language, 'runtime.draftBytes', {
+    used: new TextEncoder().encode(body.trim()).length,
+    limit: usage?.itemMaxBytes ?? '—',
+  });
 
   return (
     <div className="mwui-single">
@@ -307,6 +567,7 @@ export function RuntimePanel(props: RuntimeProps): ReactNode {
               aria-label={translate(language, 'runtime.bodyPlaceholder')}
               onChange={event => setDraft(currentDraft => ({ ...currentDraft, body: event.target.value }))}
             />
+            <div className="mwui-edit-hint">{bytes(draft.body)}</div>
             <div className="mwui-classify">
               <label className="mwui-classify-field">
                 <input
@@ -333,7 +594,6 @@ export function RuntimePanel(props: RuntimeProps): ReactNode {
       <section className="mwui-pane" aria-label={translate(language, 'runtime.title')}>
         <div className="mwui-pane-header">
           <span className="mwui-pane-title">{translate(language, 'runtime.title')}</span>
-          <span className="mwui-pane-count">{countOf(rules)}</span>
           {usage === null || usage === undefined
             ? null
             : <CapacityMeter used={usage.usedBytes} limit={usage.limitBytes} exceeded={usage.exceeded} language={language} />}
@@ -341,6 +601,7 @@ export function RuntimePanel(props: RuntimeProps): ReactNode {
             {translate(language, 'runtime.new')}
           </button>
         </div>
+        {usage && props.onSaveLimits ? <RuleLimitsForm usage={usage} language={language} onSave={props.onSaveLimits} /> : null}
         <ul className="mwui-list">
           {rules === undefined
             ? <li className="mwui-empty">{translate(language, 'list.loading')}</li>
@@ -373,6 +634,25 @@ export function RuntimePanel(props: RuntimeProps): ReactNode {
         </ul>
       </section>
 
+      {targetRemoved && edit !== null ? (
+        <Modal
+          title={translate(language, 'runtime.removedTitle')}
+          language={language}
+          onClose={closeEdit}
+        >
+          <div className="mwui-edit">
+            <div className="mwui-edit-hint" data-tone="warn">{translate(language, 'runtime.removedHint')}</div>
+            {/* Selectable, so the text survives the removal of the entry it was written for. */}
+            <pre className="mwui-pre mwui-selectable">{edit.body}</pre>
+            <div className="mwui-edit-actions">
+              <button type="button" className="mwui-button" data-variant="primary" onClick={closeEdit}>
+                {translate(language, 'detail.cancel')}
+              </button>
+            </div>
+          </div>
+        </Modal>
+      ) : null}
+
       {edit !== null && editing ? (
         <Modal
           title={translate(language, 'runtime.editTitle')}
@@ -390,6 +670,7 @@ export function RuntimePanel(props: RuntimeProps): ReactNode {
               aria-label={translate(language, 'runtime.body')}
               onChange={event => setEdit(currentEdit => currentEdit === null ? currentEdit : { ...currentEdit, body: event.target.value })}
             />
+            <div className="mwui-edit-hint">{bytes(edit.body)}</div>
             <div className="mwui-classify">
               <label className="mwui-classify-field">
                 <input
@@ -403,8 +684,29 @@ export function RuntimePanel(props: RuntimeProps): ReactNode {
             <div className="mwui-edit-hint" data-tone="muted">{translate(language, 'runtime.editHint')}</div>
             {dirty ? null : <div className="mwui-edit-hint" data-tone="muted">{translate(language, 'runtime.unchanged')}</div>}
             {editError === null ? null : <div className="mwui-inline-error" role="alert">{editError}</div>}
+            {conflict && edited !== null ? (
+              <div className="mwui-conflict" role="status">
+                <div className="mwui-conflict-head">
+                  <span className="mwui-chip-slim" data-tone="warn">{translate(language, 'runtime.conflictTitle')}</span>
+                  <span className="mwui-muted">{translate(language, 'runtime.conflictKeep')}</span>
+                </div>
+                <div className="mwui-kv"><span>{translate(language, 'conflict.openedVersion')}</span><span className="mwui-mono">v{edit.version}</span></div>
+                <div className="mwui-kv"><span>{translate(language, 'conflict.latestVersion')}</span><span className="mwui-mono">v{edited.version}</span></div>
+                <div className="mwui-kv-stack"><span>{translate(language, 'conflict.openedBody')}</span><pre className="mwui-pre">{edit.baseBody}</pre></div>
+                <div className="mwui-kv-stack"><span>{translate(language, 'conflict.latestBody')}</span><pre className="mwui-pre">{edited.body}</pre></div>
+                <div className="mwui-kv-stack"><span>{translate(language, 'conflict.draft')}</span><pre className="mwui-pre">{edit.body}</pre></div>
+                <div className="mwui-actions">
+                  <button type="button" className="mwui-button" onClick={rebase} disabled={busy}>
+                    {translate(language, 'conflict.useLatest')}
+                  </button>
+                </div>
+              </div>
+            ) : null}
+            {confirmRemove ? <div className="mwui-edit-hint">{translate(language, 'runtime.removeHint')}</div> : null}
             <div className="mwui-edit-actions">
-              <button type="button" className="mwui-button" data-variant="primary" onClick={() => { void submitEdit(); }} disabled={busy || edit.body.trim() === '' || !dirty}>
+              {confirmRemove ? <button type="button" className="mwui-button" onClick={() => { void submitEdit(true); }} disabled={busy || conflict}>{translate(language, 'runtime.confirmRemove')}</button>
+                : <button type="button" className="mwui-button" onClick={() => setConfirmRemove(true)} disabled={busy || conflict}>{translate(language, 'runtime.remove')}</button>}
+              <button type="button" className="mwui-button" data-variant="primary" onClick={() => { void submitEdit(); }} disabled={busy || conflict || confirmRemove || edit.body.trim() === '' || !dirty}>
                 {translate(language, busy ? 'runtime.saving' : 'runtime.save')}
               </button>
               <button type="button" className="mwui-button" onClick={closeEdit} disabled={busy}>
@@ -490,16 +792,22 @@ export function ArchivesPanel({ archives, capacities, history, error, selected, 
   const [saving, setSaving] = useState(false);
   const [stateBusy, setStateBusy] = useState(false);
   const [stateError, setStateError] = useState<string>();
+  /** Set when an archive/restore was refused because the entry moved: reconfirm against now. */
+  const [stateConflict, setStateConflict] = useState(false);
   const [saveError, setSaveError] = useState<string>();
+  /** The form values the refused save carried, so a rebase can resend the same text. */
+  const [refused, setRefused] = useState<{ title: string; body: string; evidence: string; verification: UiArchive['verification'] } | null>(null);
   /** The archive form is uncontrolled, so any input in it marks the window as dirty. */
   const [dirty, setDirty] = useState(false);
   const open = (value: UiArchive | null): void => {
     setSaveError(undefined);
+    setRefused(null);
     setDirty(false);
     setDraft(value);
   };
   const close = (): void => {
     setDraft(undefined);
+    setRefused(null);
     setDirty(false);
   };
   const visible = (archives ?? []).filter(item =>
@@ -640,13 +948,18 @@ export function ArchivesPanel({ archives, capacities, history, error, selected, 
                     ? <button
                         type="button"
                         className="mwui-button"
-                        disabled={stateBusy}
+                        disabled={stateBusy || stateConflict}
                         onClick={() => {
                           const next = current.state === 'archived' ? 'active' : 'archived';
                           setStateBusy(true);
                           setStateError(undefined);
                           void onSetState(current.entryId, next, current.version)
-                            .catch((failure: unknown) => { setStateError(failure instanceof Error ? failure.message : String(failure)); })
+                            .catch((failure: unknown) => {
+                              // A conflict means the state moved: the page reloaded the entry, so
+                              // what the pane shows below is the current state and version.
+                              if (failure instanceof Error && /VERSION_CONFLICT/.test(failure.message)) setStateConflict(true);
+                              setStateError(failure instanceof Error ? failure.message : String(failure));
+                            })
                             .finally(() => { setStateBusy(false); });
                         }}
                       >
@@ -656,6 +969,22 @@ export function ArchivesPanel({ archives, capacities, history, error, selected, 
                 </div>
               ) : null}
               {stateError === undefined ? null : <div className="mwui-inline-error" role="alert">{stateError}</div>}
+              {stateConflict ? (
+                <div className="mwui-conflict" role="status">
+                  <div className="mwui-conflict-head">
+                    <span className="mwui-chip-slim" data-tone="warn">{translate(language, 'archives.stateConflictTitle')}</span>
+                    <span className="mwui-muted">{translate(language, 'archives.stateConflictHint')}</span>
+                  </div>
+                  <div className="mwui-kv"><span>{translate(language, 'conflict.latestVersion')}</span><span className="mwui-mono">v{current.version}</span></div>
+                  <div className="mwui-kv"><span>{translate(language, 'archives.state')}</span><span>{translate(language, current.state === 'archived' ? 'archives.archived' : 'archives.active')}</span></div>
+                  <div className="mwui-actions">
+                    {/* Reconfirming against the state that exists now is what re-enables the action. */}
+                    <button type="button" className="mwui-button" disabled={stateBusy} onClick={() => { setStateConflict(false); setStateError(undefined); }}>
+                      {translate(language, 'archives.stateConflictAck')}
+                    </button>
+                  </div>
+                </div>
+              ) : null}
               <div className="mwui-chips">
                 <span className="mwui-chip"><span className="mwui-chip-label">{translate(language, 'archives.workspace')}</span><span className="mwui-chip-value">{current.workspaceId}</span></span>
                 <span className="mwui-chip"><span className="mwui-chip-label">{translate(language, 'archives.source')}</span><span className="mwui-chip-value">{current.source}</span></span>
@@ -760,18 +1089,25 @@ export function ArchivesPanel({ archives, capacities, history, error, selected, 
           <form className="mwui-edit" onInput={() => setDirty(true)} onChange={() => setDirty(true)} onSubmit={async event => {
             event.preventDefault();
             const data = new FormData(event.currentTarget);
+            const values = {
+              title: String(data.get('title') ?? ''),
+              body: String(data.get('body') ?? ''),
+              evidence: String(data.get('evidence') ?? ''),
+              verification: data.get('verification') as UiArchive['verification'],
+            };
             setSaving(true);
             setSaveError(undefined);
+            setRefused(null);
             try {
               await onSave({
                 workspaceId: draft?.workspaceId ?? String(data.get('workspaceId') ?? ''),
-                title: String(data.get('title') ?? ''),
-                body: String(data.get('body') ?? ''),
-                evidence: String(data.get('evidence') ?? ''),
-                verification: data.get('verification') as UiArchive['verification'],
+                ...values,
               }, draft);
               close();
             } catch (cause) {
+              // The draft stays in the form, and the values it carried are kept so a rebase can
+              // resend exactly them against the version that exists now.
+              setRefused(values);
               setSaveError(cause instanceof Error ? cause.message : String(cause));
             } finally {
               setSaving(false);
@@ -804,6 +1140,40 @@ export function ArchivesPanel({ archives, capacities, history, error, selected, 
               <button type="button" className="mwui-button" onClick={close} disabled={saving}>{translate(language, 'archives.cancel')}</button>
             </div>
             {saveError === undefined ? null : <div className="mwui-inline-error" role="alert">{saveError}</div>}
+            {refused === null || draft === null || current === null ? null : (
+              <div className="mwui-conflict" role="status">
+                <div className="mwui-conflict-head">
+                  <span className="mwui-chip-slim" data-tone="warn">{translate(language, 'archives.conflictTitle')}</span>
+                  <span className="mwui-muted">{translate(language, 'archives.conflictKeep')}</span>
+                </div>
+                <div className="mwui-kv"><span>{translate(language, 'conflict.openedVersion')}</span><span className="mwui-mono">v{draft.version}</span></div>
+                <div className="mwui-kv"><span>{translate(language, 'conflict.latestVersion')}</span><span className="mwui-mono">v{current.version}</span></div>
+                <div className="mwui-kv-stack"><span>{translate(language, 'conflict.openedBody')}</span><pre className="mwui-pre">{draft.body}</pre></div>
+                <div className="mwui-kv-stack"><span>{translate(language, 'conflict.latestBody')}</span><pre className="mwui-pre">{current.body}</pre></div>
+                <div className="mwui-kv-stack"><span>{translate(language, 'conflict.draft')}</span><pre className="mwui-pre">{refused.body}</pre></div>
+                <div className="mwui-actions">
+                  {/* Explicit acceptance of the newest version: only this rebases the submission. */}
+                  <button
+                    type="button"
+                    className="mwui-button"
+                    disabled={saving}
+                    onClick={async () => {
+                      setSaving(true);
+                      setSaveError(undefined);
+                      try {
+                        await onSave({ workspaceId: current.workspaceId, ...refused }, current);
+                        close();
+                      } catch (cause) {
+                        setRefused(refused);
+                        setSaveError(cause instanceof Error ? cause.message : String(cause));
+                      } finally { setSaving(false); }
+                    }}
+                  >
+                    {translate(language, 'conflict.useLatest')}
+                  </button>
+                </div>
+              </div>
+            )}
           </form>
         </Modal>
       ) : null}
@@ -920,6 +1290,12 @@ export interface SettingsProps {
   syncPass: UiSyncPass | null;
   /** Provider embedding coverage; null means the read failed, undefined means it is loading. */
   diagnostics?: UiEmbeddingDiagnostics | null | undefined;
+  /** Recent backfill runs, newest first; undefined while loading. */
+  backfillHistory?: UiDiagnosticJob[] | null | undefined;
+  backfillBusy?: boolean;
+  backfillError?: string | null;
+  /** Start one backfill. Disabled while a run is in flight. */
+  onStartBackfill?: () => void;
   onSaveInterface(patch: { defaultTab?: string; pageSize?: number }): void;
   onSaveConnection(input: { serverUrl: string; hostId: string }): void;
   onSaveInjection(input: { injectTimeoutMs: number }): void;
@@ -1018,6 +1394,48 @@ export function SettingsPanel(props: SettingsProps): ReactNode {
                       </div>
                     )}
                     {props.diagnostics.lastError === null ? null : <div className="mwui-edit-hint" data-tone="warn">{props.diagnostics.lastError}</div>}
+                    {/* Backfill: an explicit action, disabled while a run is in flight. */}
+                    <div className="mwui-settings-row">
+                      <span>{translate(language, 'settings.backfillStart')}</span>
+                      <button
+                        type="button"
+                        className="mwui-button mwui-mini"
+                        disabled={props.backfillBusy === true || props.diagnostics.backfill?.state === 'running'}
+                        onClick={() => props.onStartBackfill?.()}
+                      >
+                        {translate(language, props.backfillBusy === true ? 'settings.backfillRunning' : 'settings.backfillStartAction')}
+                      </button>
+                    </div>
+                    {props.diagnostics.backfill === undefined || props.diagnostics.backfill === null ? null : (
+                      <div className="mwui-edit-hint" data-tone={props.diagnostics.backfill.state === 'failed' ? 'warn' : 'muted'}>
+                        {translate(language, `settings.backfill.${props.diagnostics.backfill.state}` as MessageKey)}
+                        {typeof props.diagnostics.backfill.detail?.['embeddedBefore'] === 'number'
+                          ? ` · ${String(props.diagnostics.backfill.detail['embeddedBefore'])} → ${String(props.diagnostics.backfill.detail['embeddedAfter'] ?? '—')}`
+                          : ''}
+                      </div>
+                    )}
+                    {props.backfillError === undefined || props.backfillError === null ? null : <div className="mwui-inline-error" role="alert">{props.backfillError}</div>}
+                    <h4 className="mwui-section-title">{translate(language, 'settings.backfillHistory')}</h4>
+                    {props.backfillHistory === undefined
+                      ? <div className="mwui-muted">{translate(language, 'list.loading')}</div>
+                      : props.backfillHistory === null || props.backfillHistory.length === 0
+                        ? <div className="mwui-muted">{translate(language, 'settings.backfillHistoryEmpty')}</div>
+                        : (
+                          <ul className="mwui-list">
+                            {props.backfillHistory.map((job, index) => (
+                              <li key={job.id ?? `${job.startedAt}-${index}`} className="mwui-list-row">
+                                <span data-tone={job.state === 'failed' || job.state === 'interrupted' ? 'warn' : undefined}>
+                                  {translate(language, `settings.backfill.${job.state}` as MessageKey)}
+                                </span>
+                                <span className="mwui-muted">{formatDateTime(job.startedAt)}{job.finishedAt === null ? '' : ` → ${formatDateTime(job.finishedAt)}`}</span>
+                                {typeof job.detail?.['error'] === 'string' ? <span className="mwui-muted">{job.detail['error']}</span> : null}
+                                {typeof job.detail?.['embeddedBefore'] === 'number'
+                                  ? <span className="mwui-mono">{String(job.detail['embeddedBefore'])} → {String(job.detail['embeddedAfter'] ?? '—')}</span>
+                                  : null}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
                   </>
                 )}
           </div>
@@ -1873,8 +2291,6 @@ export function MemoryOverviewPanel(props: MemoryOverviewProps): ReactNode {
 }
 
 export interface MemoryPageHeaderProps {
-  /** The loaded-count line, already formatted, so the header does not re-read the list. */
-  count: string;
   language: Language;
   active: MemoryView;
   creating: boolean;
@@ -1886,12 +2302,12 @@ export interface MemoryPageHeaderProps {
 }
 
 /**
- * The formal-memory page's compound header: title, description, count, the page-level action, and
+ * The formal-memory page's compound header: title, description, page-level actions, and
  * the page's own view tabs. dsh-mnemon frames a memory Source the same way, and its secondary
  * tabs are the underline strip a settings page uses rather than the page-level pill bar.
  */
 export function MemoryPageHeader(props: MemoryPageHeaderProps): ReactNode {
-  const { count, language, active, creating, saving } = props;
+  const { language, active, creating, saving } = props;
   return (
     <section className="mwui-memory-workspace" aria-label={translate(language, 'memory.workspace')}>
       <div className="mwui-memory-head">
@@ -1900,7 +2316,6 @@ export function MemoryPageHeader(props: MemoryPageHeaderProps): ReactNode {
           <p className="mwui-memory-description">{translate(language, 'memory.description')}</p>
         </div>
         <div className="mwui-memory-actions">
-          <span className="mwui-memory-meta">{count}</span>
           {props.onOrganize === undefined ? null : (
             <button type="button" className="mwui-button" onClick={props.onOrganize} disabled={creating || saving}>
               {translate(language, 'organize.title')}
@@ -2056,10 +2471,11 @@ export function CreateMemoryForm(props: CreateMemoryFormProps): ReactNode {
  * A card summarizing one memory.
  *
  * The layout follows the upstream card: a badge row of the facts that identify the entry, the
- * body as the primary text, then tags and entities as their own rows, then the actions. The body
- * is shown whole rather than clamped: a memory is one statement, and an excerpt that hides the
- * end of it is the part a reader most often needs. The card is a button because selecting is the
- * primary action; the action row sits outside it so a click cannot do both.
+ * body as the primary text, then tags and entities as their own rows, then the actions. In the
+ * two-column memory list the body is clamped to four lines so every card is the same height and
+ * the list reads as a grid; the full body stays one click away in the detail window. A card shown
+ * on its own, in entity results or exploration, keeps the whole body. The card is a button because
+ * selecting is the primary action; the action row sits outside it so a click cannot do both.
  */
 export function MemoryCard({ item, active, language, now, onSelect, onCopyId, onRelated, onWithdraw, extraBadges, onClone }: {
   /**
@@ -2150,16 +2566,17 @@ export function MemoryCard({ item, active, language, now, onSelect, onCopyId, on
 
 export interface ExploreProps {
   query: string;
+  mode: 'smart' | 'keyword' | 'basic';
+  category: string;
   result: UiExplore | null;
   error: string | null;
   busy: boolean;
   language: Language;
-  /** Score floor, as the select's value; `0` means every match. */
-  minScore: number;
   /** Current page size; "show more" raises it, because explore has no cursor. */
   limit: number;
   onChangeQuery(value: string): void;
-  onChangeMinScore(value: number): void;
+  onChangeMode(value: ExploreProps['mode']): void;
+  onChangeCategory(value: string): void;
   onSearch(): void;
   onShowMore(): void;
   onOpen(memoryId: string): void;
@@ -2169,14 +2586,17 @@ export interface ExploreProps {
 }
 
 export function ExplorePanel(props: ExploreProps): ReactNode {
-  const { query, result, error, busy, language, minScore, limit } = props;
+  const { query, result, error, busy, language, limit } = props;
   return (
     <div className="mwui-page">
       <section className="mwui-pane">
         <div className="mwui-pane-header"><span className="mwui-pane-title">{translate(language, 'explore.title')}</span></div>
         <div className="mwui-detail">
           <div className="mwui-edit-hint" data-tone="muted">{translate(language, 'explore.hint')}</div>
-          <div className="mwui-search">
+          <form className="mwui-search" onSubmit={event => {
+            event.preventDefault();
+            if (!busy && query.trim() !== '') props.onSearch();
+          }}>
             <input
               className="mwui-input"
               type="search"
@@ -2184,28 +2604,21 @@ export function ExplorePanel(props: ExploreProps): ReactNode {
               placeholder={translate(language, 'explore.query')}
               aria-label={translate(language, 'explore.query')}
               onChange={event => props.onChangeQuery(event.target.value)}
-              onKeyDown={event => { if (event.key === 'Enter') props.onSearch(); }}
+              maxLength={500}
             />
-            <button type="button" className="mwui-button" data-variant="primary" onClick={props.onSearch} disabled={busy || query.trim() === ''}>
+            <select className="mwui-input mwui-select" aria-label={translate(language, 'list.category')} value={props.category} onChange={event => props.onChangeCategory(event.target.value)}>
+              <option value="">{translate(language, 'list.categoryAll')}</option>
+              {(['preference', 'decision', 'fact', 'insight', 'context', 'general'] as const).map(category =>
+                <option key={category} value={category}>{translate(language, `category.${category}`)}</option>)}
+            </select>
+            <select className="mwui-input mwui-select" aria-label={translate(language, 'explore.mode')} value={props.mode} onChange={event => props.onChangeMode(event.target.value as ExploreProps['mode'])}>
+              {(['smart', 'keyword', 'basic'] as const).map(mode =>
+                <option key={mode} value={mode}>{translate(language, `explore.mode.${mode}`)}</option>)}
+            </select>
+            <button type="submit" className="mwui-button" disabled={busy || query.trim() === ''}>
               {busy ? translate(language, 'toolbar.loading') : translate(language, 'explore.search')}
             </button>
-          </div>
-          {/* The Provider scores even unrelated text above zero, so the floor is what separates an
-              answer from a ranked list of everything. */}
-          <div className="mwui-filter">
-            <label className="mwui-filter-label" htmlFor="mwui-minscore">{translate(language, 'explore.threshold')}</label>
-            <select
-              id="mwui-minscore"
-              className="mwui-input mwui-select"
-              value={String(minScore)}
-              onChange={event => props.onChangeMinScore(Number(event.target.value))}
-            >
-              <option value="0">{translate(language, 'explore.thresholdAll')}</option>
-              <option value="0.3">{translate(language, 'explore.thresholdLoose')}</option>
-              <option value="0.5">{translate(language, 'explore.thresholdMedium')}</option>
-              <option value="0.8">{translate(language, 'explore.thresholdStrict')}</option>
-            </select>
-          </div>
+          </form>
           {error === null ? null : <div className="mwui-inline-error" role="alert">{error}</div>}
           {/* Before the first search the page is one input; saying what a search does is what
               turns the blank area below it into an answer rather than an empty page. */}
@@ -2219,11 +2632,7 @@ export function ExplorePanel(props: ExploreProps): ReactNode {
                 </div>
               )}
               {result.hits.length === 0
-                ? (
-                  <div className="mwui-empty">
-                    {translate(language, minScore > 0 ? 'explore.emptyThreshold' : 'explore.empty', { score: String(minScore) })}
-                  </div>
-                )
+                ? <div className="mwui-empty">{translate(language, 'explore.empty')}</div>
                 : (
                   <ul className="mwui-list mwui-explore-list">
                     {result.hits.map(hit => (
@@ -2241,7 +2650,7 @@ export function ExplorePanel(props: ExploreProps): ReactNode {
                         onSelect={props.onOpen}
                         onCopyId={props.onCopyId}
                         {...(props.onClone === undefined ? {} : { onClone: props.onClone })}
-                        extraBadges={[`${translate(language, 'explore.score')} ${hit.score.toFixed(2)}`]}
+                        extraBadges={exploreBadges(hit, language)}
                       />
                     ))}
                   </ul>
@@ -2260,4 +2669,19 @@ export function ExplorePanel(props: ExploreProps): ReactNode {
       </section>
     </div>
   );
+}
+
+/**
+ * The facts a hit carries about its own relevance.
+ *
+ * The band is what the Server's policy decided, and it is present for every hit. The number is
+ * shown only when the Provider reported one, and it is not called a similarity: on a store with no
+ * embeddings the Provider reports a fused score, and labelling that as similarity would state a
+ * meaning the number does not have.
+ */
+function exploreBadges(hit: UiExploreHit, language: Language): string[] {
+  const badges: string[] = [];
+  if (hit.relevance !== undefined) badges.push(translate(language, `relevance.${hit.relevance}` as MessageKey));
+  if (hit.score !== undefined) badges.push(translate(language, 'explore.score', { value: hit.score.toFixed(2) }));
+  return badges;
 }

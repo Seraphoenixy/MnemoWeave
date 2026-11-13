@@ -116,10 +116,9 @@ test('a duplicate archive title in the workspace is skipped instead of added aga
   assert.equal(h.items[0]!['state'], 'skipped');
 });
 
-test('a cancelled run finishes as cancelled and does not continue', async () => {
-  const h = harness(() => ({ action: 'skip', reason: 'nothing durable' }));
+test('a run cancelled before admission never starts', async () => {
+  const h = harness(() => { assert.fail('model task must not start'); });
   const controller = new AbortController();
   controller.abort();
-  const result = await runIdleReview(h.source as never, h.run, 's-1', 'ws-1', controller.signal);
-  assert.equal(result.state, 'cancelled');
+  await assert.rejects(runIdleReview(h.source as never, h.run, 's-1', 'ws-1', controller.signal), { name: 'AbortError' });
 });

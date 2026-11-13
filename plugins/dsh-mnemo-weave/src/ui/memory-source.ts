@@ -11,7 +11,7 @@ import { isRecord } from '../shared/contract.ts';
 import type { ServerPhaseReason } from '../shared/contract.ts';
 import type {
   UiArchive, UiArchiveCapacity, UiArchiveHistory, UiArchiveReleaseCandidates, UiArchiveSearch, UiConfigView, UiDistillationDraft, UiDistillationResult, UiEditInput, UiEditResult, UiEmbeddingDiagnostics, UiIdleReviewItem, UiIdleReviewRun, UiIdleReviewSignal, UiInjection, UiMemoryDetail, UiMemoryList,
-  ListSort, UiCreateInput, UiCreateResult, UiExplore, UiExploreHit, UiGraph, UiGraphEdge, UiGraphNode, UiMemoryConflict, UiMemoryRelation, UiMemoryRevision, UiMemorySummary, UiWithdrawInput, UiWithdrawResult, UiRule, UiRuleCreateInput, UiRuleEditInput, UiRuleUsage, UiStatus, UiSyncPass, UiSyncStream, UiSyncStatus, UiWorkspace,
+  ListSort, UiCreateInput, UiCreateResult, UiExplore, UiExploreHit, UiGraph, UiGraphEdge, UiGraphNode, UiMemoryConflict, UiMemoryRelation, UiMemoryRevision, UiMemorySummary, UiWithdrawInput, UiWithdrawResult, UiRule, UiRuleCreateInput, UiRuleEditInput, UiRuleUsage, UiStatus, UiSyncPass, UiSyncStream, UiSyncStatus, UiWorkspace, WriteTaskOutcome, UiDiagnosticJob,
 } from '../shared/contract.ts';
 
 const PROTOCOL = 'PROVIDER_PROTOCOL';
@@ -75,6 +75,31 @@ function asCount(value: unknown, what: string): number {
 function asBoolean(value: unknown, what: string): boolean {
   if (typeof value !== 'boolean') throw malformed(what);
   return value;
+}
+
+/** One write-task receipt, checked field by field like every other Server answer. */
+export function parseWriteTaskReceipt(value: unknown, where?: number): WriteTaskOutcome {
+  const what = where === undefined ? 'writeTask' : `writeTasks.items[${where}]`;
+  const root = asRecord(value, what);
+  const status = asString(root['status'], `${what}.status`);
+  if (!['published', 'duplicate', 'applied', 'skipped', 'needs_review', 'queued', 'unknown', 'failed'].includes(status)) throw malformed(`${what}.status`);
+  const kind = asString(root['kind'], `${what}.kind`);
+  if (kind !== 'formal-memory' && kind !== 'rule' && kind !== 'workspace-archive') throw malformed(`${what}.kind`);
+  const action = asString(root['action'], `${what}.action`);
+  if (!['create', 'edit', 'withdraw', 'remove', 'skip'].includes(action)) throw malformed(`${what}.action`);
+  return {
+    taskId: asString(root['taskId'], `${what}.taskId`),
+    index: asInteger(root['index'], `${what}.index`),
+    kind: kind as WriteTaskOutcome['kind'],
+    action: action as WriteTaskOutcome['action'],
+    status: status as WriteTaskOutcome['status'],
+    memoryId: nullableString(root['memoryId'], `${what}.memoryId`),
+    entryId: nullableString(root['entryId'], `${what}.entryId`),
+    entryVersion: root['entryVersion'] === null ? null : asInteger(root['entryVersion'], `${what}.entryVersion`),
+    candidateId: nullableString(root['candidateId'], `${what}.candidateId`),
+    errorCode: nullableString(root['errorCode'], `${what}.errorCode`),
+    updatedAt: asString(root['updatedAt'], `${what}.updatedAt`),
+  };
 }
 
 function nullableString(value: unknown, what: string): string | null {
@@ -304,6 +329,28 @@ export function parseIdleReviewRun(value: unknown): UiIdleReviewRun {
   };
 }
 
+/**
+ * One durable maintenance job.
+ *
+ * The Provider work runs inside the Server, so the row is the only trace a reopened page has of
+ * a run that failed or was cut short by a restart.
+ */
+export function parseDiagnosticJob(value: unknown, what = 'job'): UiDiagnosticJob {
+  const root = asRecord(value, what);
+  const state = asString(root['state'], `${what}.state`);
+  if (state !== 'running' && state !== 'succeeded' && state !== 'failed' && state !== 'interrupted') throw malformed(`${what}.state`);
+  const finishedAt = root['finishedAt'];
+  const detail = root['detail'];
+  return {
+    ...(typeof root['id'] === 'string' ? { id: root['id'] } : {}),
+    kind: typeof root['kind'] === 'string' ? root['kind'] : 'embedding-backfill',
+    state,
+    startedAt: asString(root['startedAt'], `${what}.startedAt`),
+    finishedAt: finishedAt === null ? null : asString(finishedAt, `${what}.finishedAt`),
+    ...(detail === undefined ? {} : { detail: asRecord(detail, `${what}.detail`) }),
+  };
+}
+
 /** `GET /v1/diagnostics/embeddings`: the Provider's official coverage, already interpreted. */
 export function parseEmbeddingDiagnostics(value: unknown): UiEmbeddingDiagnostics {
   const root = asRecord(value, 'diagnostics');
@@ -326,20 +373,7 @@ export function parseEmbeddingDiagnostics(value: unknown): UiEmbeddingDiagnostic
     degraded: asBoolean(root['degraded'], 'diagnostics.degraded'),
     lastError: lastError === null ? null : asString(lastError, 'diagnostics.lastError'),
     checkedAt: asString(root['checkedAt'], 'diagnostics.checkedAt'),
-    ...(backfill === undefined || backfill === null ? {} : {
-      backfill: (() => {
-        const job = asRecord(backfill, 'diagnostics.backfill');
-        const state = asString(job['state'], 'diagnostics.backfill.state');
-        if (state !== 'running' && state !== 'succeeded' && state !== 'failed' && state !== 'interrupted') throw malformed('diagnostics.backfill.state');
-        const finishedAt = job['finishedAt'];
-        return {
-          state,
-          startedAt: asString(job['startedAt'], 'diagnostics.backfill.startedAt'),
-          finishedAt: finishedAt === null ? null : asString(finishedAt, 'diagnostics.backfill.finishedAt'),
-          ...(job['detail'] === undefined ? {} : { detail: asRecord(job['detail'], 'diagnostics.backfill.detail') }),
-        };
-      })(),
-    }),
+    ...(backfill === undefined || backfill === null ? {} : { backfill: parseDiagnosticJob(backfill, 'diagnostics.backfill') }),
   };
 }
 
@@ -651,6 +685,17 @@ export class MemorySource {
     return parseEmbeddingDiagnostics(unwrap(await this.client.embeddingDiagnostics()));
   }
 
+  /** Start one vector backfill. The Server refuses a second one while a job is running. */
+  async embeddingBackfill(): Promise<UiDiagnosticJob> {
+    return parseDiagnosticJob(unwrap(await this.client.embeddingBackfill()), 'backfill');
+  }
+
+  /** Recent backfill runs, newest first, including failed and restart-interrupted ones. */
+  async embeddingBackfillHistory(limit = 20): Promise<UiDiagnosticJob[]> {
+    const value = asRecord(unwrap(await this.client.embeddingBackfillHistory(limit)), 'backfillHistory');
+    return asArray(value['items'], 'backfillHistory.items').map((entry, index) => parseDiagnosticJob(entry, `backfillHistory.items[${index}]`));
+  }
+
   async startIdleReviewRun(sessionId: string, maxSignals = 10): Promise<{ run: UiIdleReviewRun; signals: UiIdleReviewSignal[] }> {
     const value = unwrap(await this.client.idleReviewRunStart({ sessionId, maxSignals }));
     return {
@@ -693,12 +738,22 @@ export class MemorySource {
     return parseIdleReviewRun(unwrap(await this.client.idleReviewRunFinish(runId, state, error)));
   }
 
-  async idleReviewPending(): Promise<Array<{ sessionId: string; count: number }>> {
+  async idleReviewPending(): Promise<Array<{ sessionId: string; count: number; workspaceId?: string; attempt: number; lastStartedAt: string | null }>> {
     const value = unwrap(await this.client.idleReviewPending());
     return asArray(value['sessions'], 'pending.sessions').map((entry, index) => {
       const row = asRecord(entry, `pending.sessions[${index}]`);
-      return { sessionId: asString(row['sessionId'], 'pending.sessionId'), count: asCount(row['count'], 'pending.count') };
+      return { sessionId: asString(row['sessionId'], 'pending.sessionId'), count: asCount(row['count'], 'pending.count'),
+        attempt: asCount(row['attempt'] ?? 0, 'pending.attempt'),
+        lastStartedAt: typeof row['lastStartedAt'] === 'string' ? row['lastStartedAt'] : null,
+        ...(typeof row['workspaceId'] === 'string' ? { workspaceId: row['workspaceId'] } : {}),
+      };
     });
+  }
+
+  /** Recent runs across this Host's sessions, newest first, each with its per-item results. */
+  async idleReviewRecent(limit = 50): Promise<UiIdleReviewRun[]> {
+    const value = asRecord(unwrap(await this.client.idleReviewRecent(limit)), 'idleRecent');
+    return asArray(value['items'], 'idleRecent.items').map(entry => parseIdleReviewRun(entry));
   }
 
   async memories(input: { query?: string; limit: number; cursor?: string; category?: string; entity?: string; sort?: ListSort }): Promise<UiMemoryList> {
@@ -769,32 +824,39 @@ export class MemorySource {
 
   /**
    * Provider-ranked search. This is not the list with a different query: the Provider ranks by
-   * similarity, and the Server maps each hit to a memory this machine can open.
+   * relevance, and the Server maps each hit to a memory this machine can open. The relevance band
+   * comes from the Server's quality policy, which is the only thing that knows the Provider's
+   * score scale; the page does not filter on a score of its own.
    */
-  async explore(input: { query: string; limit: number; minScore: number; hint?: string }): Promise<UiExplore> {
-    const response = await this.client.explore(input.query, input.limit, input.minScore, input.hint);
+  async explore(input: { query: string; limit: number; hint?: string; mode?: 'smart' | 'keyword' | 'basic'; category?: string }): Promise<UiExplore> {
+    const { query, limit, hint, ...filters } = input;
+    const response = await this.client.explore(query, limit, hint, filters);
     const value = unwrap(response);
     return {
       query: asString(value['query'], 'explore.query'),
       unregistered: asCount(value['unregistered'], 'explore.unregistered'),
       truncated: value['truncated'] === true,
-      minScore: input.minScore,
       hits: asArray(value['hits'], 'explore.hits').map((item, index): UiExploreHit => {
         const row = asRecord(item, `explore.hits[${index}]`);
         const where = `explore.hits[${index}]`;
         const category = row['category'];
         const tags = row['tags'];
         const score = row['score'];
-        if (typeof score !== 'number' || !Number.isFinite(score)) throw malformed(`${where}.score`);
+        // A row the Provider ranked without a number is still an answer; only a present score is
+        // checked, because demanding one would reject the Provider's own ordering evidence.
+        if (score !== undefined && (typeof score !== 'number' || !Number.isFinite(score))) throw malformed(`${where}.score`);
         const state = asString(row['state'], `${where}.state`);
         if (state !== 'active' && state !== 'superseded' && state !== 'unverified') throw malformed(`${where}.state`);
+        const relevance = row['relevance'];
+        if (relevance !== undefined && relevance !== 'high' && relevance !== 'medium' && relevance !== 'low' && relevance !== 'unknown') throw malformed(`${where}.relevance`);
         return {
           memoryId: asString(row['memoryId'], `${where}.memoryId`),
           revisionId: asString(row['revisionId'], `${where}.revisionId`),
           providerMemoryId: asString(row['providerMemoryId'], `${where}.providerMemoryId`),
           state,
           content: asString(row['content'], `${where}.content`),
-          score,
+          ...(score === undefined ? {} : { score }),
+          ...(relevance === undefined ? {} : { relevance }),
           publishedAt: asString(row['publishedAt'], `${where}.publishedAt`),
           ...(category === undefined || category === null ? {} : { category: asString(category, `${where}.category`) }),
           ...(tags === undefined ? {} : { tags: asArray(tags, `${where}.tags`).map((tag, at) => asString(tag, `${where}.tags[${at}]`)) }),
@@ -888,8 +950,7 @@ export class MemorySource {
     return parseRule(unwrap(response), 'editRule');
   }
 
-  async saveArchive(input: import('../shared/contract.ts').UiArchiveDraft, target?: { entryId: string; baseVersion: number }): Promise<UiArchive> {
-    const { workspaceId, ...fields } = input;
+  async saveArchive(input: import('../shared/contract.ts').UiArchiveDraft, target?: { entryId: string; baseVersion: number }): Promise<UiArchive> {    const { workspaceId, ...fields } = input;
     const response = target
       ? await this.client.editArchive(target.entryId, { ...fields, baseVersion: target.baseVersion })
       : await this.client.createArchive({ workspaceId, ...fields, source: 'user' });
@@ -899,6 +960,27 @@ export class MemorySource {
   /** One workspace's archives. A settings-level listing without a workspace is not offered. */
   async archives(workspaceId: string): Promise<UiArchive[]> {
     return parseArchiveList(unwrap(await this.client.archives({ workspaceId })));
+  }
+
+  /**
+   * Send one action of an authorized write task, or read back its latest receipt.
+   *
+   * The key `(host, task, index)` is what makes a retry safe: the Server answers a replay with the
+   * receipt it already has instead of writing again. `read` asks about the same key without
+   * executing anything, which is how a reopened page resolves an unknown outcome.
+   */
+  async writeTaskAction(taskId: string, index: number, action: Record<string, unknown>): Promise<WriteTaskOutcome> {
+    return parseWriteTaskReceipt(unwrap(await this.client.writeTaskAction(taskId, index, action)));
+  }
+
+  async writeTaskReceipt(taskId: string, index: number): Promise<WriteTaskOutcome> {
+    return parseWriteTaskReceipt(unwrap(await this.client.writeTaskReceipt(taskId, index)));
+  }
+
+  /** Actions of this Host that are still queued or of unknown outcome. */
+  async unsettledWriteTasks(limit = 50): Promise<WriteTaskOutcome[]> {
+    const value = asRecord(unwrap(await this.client.unsettledWriteTasks(limit)), 'writeTasks');
+    return asArray(value['items'], 'writeTasks.items').map((entry, index) => parseWriteTaskReceipt(entry, index));
   }
 
   async archiveCapacities(workspaceId: string): Promise<UiArchiveCapacity[]> {

@@ -142,6 +142,20 @@ export class SqliteMemoryStore implements MemoryApplyStore {
   }
 
   /**
+   * The most recent jobs of one kind, newest first.
+   *
+   * A failed or interrupted run is history the page must be able to show: it explains why a
+   * coverage number did not move and whether a restart cut the work short.
+   */
+  diagnosticJobs(kind: string, limit: number): DiagnosticJobRecord[] {
+    return this.db.prepare('SELECT * FROM diagnostic_jobs WHERE kind=? ORDER BY started_at DESC, rowid DESC LIMIT ?')
+      .all(kind, limit).map(row => DiagnosticJob.parse({
+        id: row['id'], kind: row['kind'], state: row['state'], startedAt: row['started_at'],
+        finishedAt: row['finished_at'] ?? null, detail: JSON.parse(String(row['detail_json'] ?? '{}')),
+      }));
+  }
+
+  /**
    * A synced formal revision becomes a local catalog revision, so the memory is visible and
    * editable on this machine. Provenance records that it arrived by sync.
    */

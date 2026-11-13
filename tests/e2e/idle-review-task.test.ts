@@ -56,10 +56,20 @@ test('an idle-review action is bounded by the run that authorized it', { timeout
     assert.ok(scan.status >= 200 && scan.status < 300, JSON.stringify(scan.body));
     const signals = (scan.body as { signals: Array<{ id: string; eventId: string }> }).signals;
     assert.equal(signals.length, 1);
+    const pending = await call('GET', '/v1/idle-review/pending');
+    assert.deepEqual(pending.body['sessions'], [{ sessionId: 's-1', count: 1, workspaceId: WORKSPACE, attempt: 0, lastStartedAt: null }]);
 
     const started = await call('POST', '/v1/idle-review/runs', { sessionId: 's-1', maxSignals: 10 });
     assert.ok(started.status >= 200 && started.status < 300, JSON.stringify(started.body));
     const run = (started.body as { run: { id: string } }).run;
+
+    const proactive = await call('POST', `/v1/memory-write-tasks/${randomUUID()}/actions/0`, {
+      kind: 'formal-memory', trigger: 'conversation', sessionId: 's-1', turnId: '1',
+      action: 'create', content: '主会话只能提交候选', reason: '主动记录',
+      evidenceRefs: [signals[0]!.eventId], assessment: 'supported',
+    });
+    assert.equal(proactive.status, 403);
+    assert.equal((proactive.body as { code: string }).code, 'SCOPE_FORBIDDEN');
 
     // A review may not write a formal memory, whatever it claims.
     const formal = await call('POST', `/v1/memory-write-tasks/${run.id}/actions/0`, {

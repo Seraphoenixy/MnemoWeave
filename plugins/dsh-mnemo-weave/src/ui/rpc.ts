@@ -7,11 +7,13 @@ import { backtestSkill } from './skill-backtest.ts';
 import { organizeMemory } from './organize-memory.ts';
 import { confirmDistillation, previewDistillation } from './archive-distillation.ts';
 import type { createTaskRunner } from './task-runner.ts';
+import type { WriteTransactions } from './write-transactions.ts';
+import type { IdleSkipJournal } from './idle-skips.ts';
 import { runIdleReview } from './idle-review-task.ts';
+import { replyTaskId } from '../client/reply-save-model.ts';
 import { applyOrganizeMemories, previewOrganizeMemories } from './organize-memory-task.ts';
 import { listSkills } from './skills.ts';
 import { adoptSkill, createSkill, readSkillText, readVersionText, restoreSkill, skillVersions } from './skills-write.ts';
-import { autoAdoptSkill, parseAdoptionReview, readSkillPreferences, saveSkillPreferences } from './skills-adopt.ts';
 import { listTrash, restoreTrash, trashSkill } from './skills-trash.ts';
 import { adoptStoredDraft, dismissSkillDraft, listSkillDrafts, saveSkillDraft } from './skill-drafts.ts';
 import type { UiSkillDraft } from '../shared/contract.ts';
@@ -27,6 +29,7 @@ export interface SettingsLike {
   saveInterface(patch: unknown): UiSettings;
   saveConnection(input: { serverUrl?: string; hostId?: string }): Promise<UiSettings>;
   saveInjection(input: { injectTimeoutMs?: number }): UiSettings;
+  saveRuleLimits?(input: { capacityBytes: number; itemMaxBytes: number }): void;
   saveAutoStart(input: { enabled?: boolean }): UiSettings;
   /** Register the scheduled task; only the settings page's own button calls this. */
   registerTask(): Promise<UiRegisterTest>;
@@ -68,7 +71,6 @@ const DEFAULT_LIMIT = 50;
 const MAX_CONTENT_BYTES = 8_000;
 const MAX_REASON = 4_000;
 /** The Server's rule body limit, in characters rather than UTF-8 bytes. */
-const MAX_RULE_BODY = 4_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // The page may only point at this machine; a remote address would leak the service token.
 const SERVER_URL = /^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d{1,5})?\/?$/i;
@@ -158,7 +160,7 @@ function graphRequest(payload: unknown): { limit?: number } {
 }
 
 /** Explore is a read: a query is required, and the page size stays small by design. */
-function exploreRequest(payload: unknown): { query: string; limit: number; minScore: number; hint?: string } {
+function exploreRequest(payload: unknown): { query: string; limit: number; hint?: string; mode?: 'smart' | 'keyword' | 'basic'; category?: string } {
   if (!isRecord(payload)) invalid('explore payload must be an object');
   const query = payload['query'];
   if (typeof query !== 'string' || query.trim() === '') invalid('query must be a non-empty string');
@@ -167,17 +169,24 @@ function exploreRequest(payload: unknown): { query: string; limit: number; minSc
   if (limit !== undefined && (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1 || limit > 50)) {
     invalid('limit must be an integer between 1 and 50');
   }
-  const minScore = payload['minScore'];
-  if (minScore !== undefined && (typeof minScore !== 'number' || !Number.isFinite(minScore) || minScore < 0 || minScore > 1)) {
-    invalid('minScore must be a number between 0 and 1');
-  }
+  // A removed score floor is refused rather than ignored: a caller that still sends one believes
+  // it is narrowing the result, and silently returning a wider list would contradict it.
+  if (payload['minScore'] !== undefined) invalid('minScore was removed: the recall quality policy decides relevance');
   // An optional workspace name: a recall cue appended to the query, never a filter.
   const hint = payload['hint'];
+  const mode = payload['mode'];
+  if (mode !== undefined && mode !== 'smart' && mode !== 'keyword' && mode !== 'basic') invalid('invalid recall mode');
+  const category = payload['category'];
+  if (category !== undefined && (typeof category !== 'string' || !(CATEGORIES as readonly string[]).includes(category))) {
+    invalid(`category must be one of: ${CATEGORIES.join(', ')}`);
+  }
   if (hint !== undefined && (typeof hint !== 'string' || hint.trim() === '' || hint.trim().length > 200)) {
     invalid('hint must be a non-empty string of at most 200 characters');
   }
   return {
-    query: query.trim(), limit: limit ?? 20, minScore: minScore ?? 0,
+    query: query.trim(), limit: limit ?? 20,
+    ...(mode === undefined ? {} : { mode }),
+    ...(category === undefined ? {} : { category }),
     ...(hint === undefined ? {} : { hint: (hint as string).trim() }),
   };
 }
@@ -305,11 +314,22 @@ function editRequest(payload: unknown): UiEditInput {
 }
 
 /** A rule needs a scope before it can be budgeted: a project rule competes with global ones. */
+function parseSkillBacktestReport(value: unknown): UiSkillDraft['report'] {
+  if (!isRecord(value)) return null;
+  const { baseline, candidate, regressions } = value;
+  const validSide = (side: unknown): side is NonNullable<UiSkillDraft['report']>['baseline'] =>
+    isRecord(side) && typeof side['answer'] === 'string' && typeof side['steps'] === 'string'
+    && Array.isArray(side['checks']) && side['checks'].every(check =>
+      isRecord(check) && typeof check['passed'] === 'boolean' && typeof check['reason'] === 'string');
+  if (!validSide(baseline) || !validSide(candidate) || !Array.isArray(regressions)
+    || !regressions.every(item => typeof item === 'string')) return null;
+  return { baseline, candidate, regressions };
+}
+
 function ruleCreateRequest(payload: unknown): UiRuleCreateInput {
   if (!isRecord(payload)) invalid('createRule payload must be an object');
   const body = payload['body'];
   if (typeof body !== 'string' || body.trim() === '') invalid('body must be a non-empty string');
-  if (body.trim().length > MAX_RULE_BODY) invalid(`body must contain at most ${MAX_RULE_BODY} characters`);
   const enabled = payload['enabled'];
   if (enabled !== undefined && typeof enabled !== 'boolean') invalid('enabled must be a boolean');
   return {
@@ -329,7 +349,6 @@ function ruleEditRequest(payload: unknown): { ruleId: string } & UiRuleEditInput
   const body = payload['body'];
   if (body !== undefined) {
     if (typeof body !== 'string' || body.trim() === '') invalid('body must be a non-empty string');
-    if (body.trim().length > MAX_RULE_BODY) invalid(`body must contain at most ${MAX_RULE_BODY} characters`);
   }
   const enabled = payload['enabled'];
   if (enabled !== undefined && typeof enabled !== 'boolean') invalid('enabled must be a boolean');
@@ -375,7 +394,7 @@ function failureOf(error: unknown): { message: string; code: string } {
  * Settings endpoints go to the Host's own configuration, not to the Server: they change what this
  * plugin and the injection hook read, and the token never travels back to the browser.
  */
-export function createRpcHandler(source: MemorySource, settings?: SettingsLike, task?: ReturnType<typeof createTaskRunner>): RpcHandler {
+export function createRpcHandler(source: MemorySource, settings?: SettingsLike, task?: ReturnType<typeof createTaskRunner>, writes?: WriteTransactions, skips?: IdleSkipJournal): RpcHandler {
   return async (endpoint, payload, signal) => {
     try {
       switch (endpoint) {
@@ -468,7 +487,7 @@ export function createRpcHandler(source: MemorySource, settings?: SettingsLike, 
           const checks = Array.isArray(input['checks']) ? input['checks'].filter((item): item is string => typeof item === 'string') : undefined;
           const evidence = Array.isArray(input['evidence']) ? input['evidence'] : [];
           if (workspace === '' || skillPath === undefined || reason === '' || candidate === '' || scenario === '' || checks === undefined) invalid('Invalid skill draft');
-          const report = input['report'] === null || input['report'] === undefined ? null : parseAdoptionReview({ report: input['report'], checks, completedAt: new Date().toISOString() })?.report ?? null;
+          const report = parseSkillBacktestReport(input['report']);
           return ok(await saveSkillDraft({
             workspace, skillPath, reason, baseline, candidate, scenario, checks,
             evidence: evidence.filter((item): item is UiSkillDraft['evidence'][number] => isRecord(item) && typeof item['step'] === 'number'
@@ -510,22 +529,6 @@ export function createRpcHandler(source: MemorySource, settings?: SettingsLike, 
           const id = typeof input['id'] === 'string' ? input['id'] : '';
           if (id === '') invalid('Invalid trash entry');
           return ok(await restoreTrash({ id, workspace }));
-        }
-        case 'skillPreferences': return ok(await readSkillPreferences());
-        case 'setSkillAutoAdopt': {
-          const input = isRecord(payload) ? payload : {};
-          if (typeof input['autoAdopt'] !== 'boolean') invalid('Invalid preference');
-          return ok(await saveSkillPreferences({ autoAdopt: input['autoAdopt'] }));
-        }
-        case 'skillAutoAdopt': {
-          const input = isRecord(payload) ? payload : {};
-          const workspace = typeof input['workspace'] === 'string' && input['workspace'].trim() !== '' ? input['workspace'].trim() : process.cwd();
-          const path = typeof input['path'] === 'string' ? input['path'] : '';
-          const candidate = typeof input['candidate'] === 'string' ? input['candidate'] : '';
-          const baselineHash = typeof input['baselineHash'] === 'string' ? input['baselineHash'] : '';
-          const review = parseAdoptionReview(input['review']);
-          if (path === '' || candidate === '' || !/^[a-f0-9]{64}$/.test(baselineHash) || review === null) invalid('Invalid adoption review');
-          return ok(await autoAdoptSkill({ workspace, path, candidate, baselineHash, review }));
         }
         case 'skillCreate': {
           const input = isRecord(payload) ? payload : {};
@@ -592,6 +595,56 @@ export function createRpcHandler(source: MemorySource, settings?: SettingsLike, 
         case 'withdraw': return ok(await source.withdraw(withdrawRequest(payload)));
         case 'graph': return ok(await source.graph(graphRequest(payload)));
         case 'embeddingDiagnostics': return ok(await source.embeddingDiagnostics());
+        case 'embeddingBackfill': return ok(await source.embeddingBackfill());
+        case 'embeddingBackfillHistory': return ok({ items: await source.embeddingBackfillHistory() });
+        case 'idleReviewRecent': return ok({ items: await source.idleReviewRecent() });
+        case 'idleReviewSkips': return ok({ items: skips === undefined ? [] : skips.list() });
+        case 'writeTasks': return ok({ items: writes === undefined ? [] : await writes.pending() });
+        case 'resolveWrite': {
+          if (writes === undefined) return fail('write receipts are unavailable in this build', 'PROVIDER_UNAVAILABLE');
+          if (!isRecord(payload) || typeof payload['taskId'] !== 'string' || !UUID.test(payload['taskId'])
+            || typeof payload['index'] !== 'number' || !Number.isInteger(payload['index'])) invalid('taskId and index are required');
+          return ok(await writes.resolve(payload['taskId'], payload['index']));
+        }
+        case 'retryWrite': {
+          if (writes === undefined) return fail('write receipts are unavailable in this build', 'PROVIDER_UNAVAILABLE');
+          if (!isRecord(payload) || typeof payload['taskId'] !== 'string' || !UUID.test(payload['taskId'])
+            || typeof payload['index'] !== 'number' || !Number.isInteger(payload['index'])) invalid('taskId and index are required');
+          return ok(await writes.retry(payload['taskId'], payload['index']));
+        }
+        case 'replyPreview': {
+          if (!isRecord(payload) || typeof payload['sessionId'] !== 'string' || typeof payload['replyId'] !== 'string') invalid('sessionId and replyId are required');
+          return ok(task?.completedReply?.(payload['sessionId'], payload['replyId']) ?? null);
+        }
+        case 'replySave': {
+          // One confirmed save of one finished reply. The task id is derived from the reply, so a
+          // second click on the same reply resolves the same key instead of writing twice.
+          if (writes === undefined) return fail('write receipts are unavailable in this build', 'PROVIDER_UNAVAILABLE');
+          if (!isRecord(payload)) invalid('Invalid reply save');
+          const sessionId = typeof payload['sessionId'] === 'string' ? payload['sessionId'].trim() : '';
+          const replyId = typeof payload['replyId'] === 'string' ? payload['replyId'].trim() : '';
+          const turnId = typeof payload['turnId'] === 'string' ? payload['turnId'].trim() : '';
+          const content = typeof payload['content'] === 'string' ? payload['content'].trim() : '';
+          const taskId = typeof payload['taskId'] === 'string' ? payload['taskId'].trim() : '';
+          if (sessionId === '' || replyId === '' || turnId === '') invalid('sessionId, replyId and turnId are required');
+          if (task?.completedReply?.(sessionId, replyId)?.turnId !== turnId) invalid('The completed reply does not belong to this turn');
+          if (taskId !== replyTaskId(sessionId, replyId)) invalid('taskId does not match the reply');
+          if (content === '' || Buffer.byteLength(content, 'utf8') > 8000) invalid('content must be 1–8000 UTF-8 bytes');
+          if (payload['category'] !== undefined && typeof payload['category'] !== 'string') invalid('category must be a string');
+          return ok(await writes.submit({
+            taskId, index: 0, kind: 'formal-memory', action: 'create',
+            confirmation: { text: content },
+            request: {
+              kind: 'formal-memory', trigger: 'reply-save', action: 'create',
+              sessionId, turnId,
+              content,
+              ...(typeof payload['category'] === 'string' ? { category: payload['category'] } : {}),
+              ...(typeof payload['reason'] === 'string' && payload['reason'].trim() !== '' ? { reason: payload['reason'].trim() } : { reason: '用户从回复旁保存' }),
+              evidenceRefs: [`reply:${replyId}`],
+              assessment: 'supported',
+            },
+          }));
+        }
         case 'organizeMemories': {
           if (task === undefined) return fail('task agents are unavailable in this build', 'PROVIDER_UNAVAILABLE');
           if (!isRecord(payload)) invalid('Invalid organize request');
@@ -602,13 +655,26 @@ export function createRpcHandler(source: MemorySource, settings?: SettingsLike, 
           if (workspaceId !== undefined && !UUID.test(workspaceId)) invalid('workspaceId must be a UUID');
           if (payload['apply'] === true) {
             // Only confirmed items run; the plan carries the versions the Agent was shown so a
-            // change made in between stops that one item instead of overwriting it.
+            // change made in between stops that one item instead of overwriting it. The task id
+            // is the caller's, so a retry of the same plan resolves the same receipts.
             const plan = isRecord(payload['plan']) ? payload['plan'] : null;
             const confirmed = Array.isArray(payload['confirmed'])
               ? payload['confirmed'].filter((item): item is number => typeof item === 'number' && Number.isInteger(item) && item >= 0).slice(0, 8)
               : [];
-            if (plan === null) invalid('A confirmed plan is required');
-            return ok(await applyOrganizeMemories(source, plan as never, confirmed));
+            if (plan === null || !Array.isArray(plan['items']) || plan['items'].length > 8) invalid('A confirmed plan is required');
+            for (const item of plan['items']) {
+              if (!isRecord(item) || !Number.isInteger(item['index']) || typeof item['index'] !== 'number'
+                || item['index'] < 0 || item['index'] >= 8 || typeof item['reason'] !== 'string'
+                || !['create', 'edit', 'withdraw', 'skip'].includes(String(item['action']))) invalid('Invalid plan item');
+              if (confirmed.includes(item['index']) && item['action'] === 'withdraw'
+                && (typeof item['targetId'] !== 'string' || !UUID.test(item['targetId'])
+                  || !instruction.toLowerCase().includes(item['targetId'].toLowerCase()))) invalid('Withdrawal target must be named in the instruction');
+            }
+            if (new Set(plan['items'].map(item => item['index'])).size !== plan['items'].length) invalid('Duplicate action index');
+            const taskId = typeof payload['taskId'] === 'string' ? payload['taskId'].trim() : '';
+            if (!UUID.test(taskId)) invalid('taskId must be a UUID');
+            if (writes === undefined) return fail('write receipts are unavailable in this build', 'PROVIDER_UNAVAILABLE');
+            return ok(await applyOrganizeMemories(plan as never, confirmed, writes, taskId));
           }
           return ok(await previewOrganizeMemories(source, task, { instruction }, signal));
         }
@@ -649,7 +715,10 @@ export function createRpcHandler(source: MemorySource, settings?: SettingsLike, 
           const sessionId = typeof input['sessionId'] === 'string' ? input['sessionId'].trim() : '';
           if (sessionId === '') invalid('sessionId is required.');
           if (input['projectId'] !== undefined) invalid('projectId was removed: formal memories are one shared collection');
-          return ok(await runIdleReview(source, task, sessionId, undefined, signal));
+          const session = (await source.idleReviewPending()).find(item => item.sessionId === sessionId);
+          const pinned = task.pin?.(sessionId) ?? task;
+          if (session === undefined || writes === undefined) invalid('No pending idle-review evidence or write journal');
+          return ok(await runIdleReview(source, pinned, sessionId, session.workspaceId, signal, writes));
         }
         case 'explore': {
           const request = exploreRequest(payload);
@@ -658,6 +727,14 @@ export function createRpcHandler(source: MemorySource, settings?: SettingsLike, 
         case 'injection': return ok(await source.injection());
         case 'rules': return ok(await source.rules());
         case 'ruleUsage': return ok(await source.ruleUsage());
+        case 'saveRuleLimits': {
+          if (!settings?.saveRuleLimits) invalid('local Server settings are unavailable');
+          if (!isRecord(payload) || typeof payload['capacityBytes'] !== 'number' || typeof payload['itemMaxBytes'] !== 'number') {
+            invalid('rule limits must be numbers');
+          }
+          settings.saveRuleLimits({ capacityBytes: payload['capacityBytes'], itemMaxBytes: payload['itemMaxBytes'] });
+          return ok(true);
+        }
         case 'workspaces': return ok(await source.workspaces());
         case 'archiveCapacities': {
           const workspaceId = workspaceRequest(payload);

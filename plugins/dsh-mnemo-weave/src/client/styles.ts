@@ -48,6 +48,7 @@ export const CSS = `
 .mwui-pane-title{font-weight:650;font-size:12.5px}
 .mwui-pane-count{margin-left:auto;color:var(--mwui-muted);font-size:11.5px}
 .mwui-search{display:flex;gap:8px;padding:10px 12px;border-bottom:1px solid var(--mwui-border)}
+.mwui-search:has(> select){flex-wrap:wrap}
 .mwui-input{flex:1;min-width:0;appearance:none;border:1px solid var(--mwui-border);border-radius:8px;background:transparent;
   color:inherit;font:inherit;padding:6px 10px}
 .mwui-input:focus{outline:none;border-color:var(--mwui-accent)}
@@ -85,7 +86,7 @@ export const CSS = `
 @media (max-width:900px){.mwui-skills-split{grid-template-columns:1fr}}
 .mwui-content{display:flex;flex-direction:column;flex:1;min-height:0}
 .mwui-memory-grid{list-style:none;margin:0;padding:6px;overflow:auto;min-height:0;flex:1;
-  display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;align-items:start}
+  display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;align-items:stretch}
 .mwui-memory-grid > li{min-width:0}
 .mwui-memory-grid > .mwui-empty{grid-column:1 / -1;padding:24px;text-align:center}
 @media (max-width:900px){.mwui-memory-grid{grid-template-columns:1fr}}
@@ -104,16 +105,37 @@ export const CSS = `
 .mwui-filter{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--mwui-border)}
 .mwui-filter-label{color:var(--mwui-muted);font-size:11.5px}
 .mwui-filter-count{margin-left:auto;color:var(--mwui-muted);font-size:11.5px}
+/* Row height comes from the tallest card in it; the card fills that height so its border is flush
+   with its neighbours. */
 .mwui-memcard{width:100%;text-align:left;appearance:none;border:1px solid var(--mwui-border);background:transparent;color:inherit;
-  border-radius:10px;padding:9px 11px;cursor:pointer;display:flex;flex-direction:column;gap:4px;font:inherit}
+  border-radius:10px;padding:9px 11px;cursor:pointer;display:flex;flex-direction:column;gap:4px;font:inherit;flex:1}
 .mwui-memcard:hover{background:var(--mwui-surface)}
 .mwui-memcard[data-active="true"]{border-color:var(--mwui-accent);background:var(--mwui-surface)}
-.mwui-memcard-item{display:flex;flex-direction:column;gap:4px}
+.mwui-memcard-item{display:flex;flex-direction:column;gap:4px;min-width:0}
 .mwui-memcard-badges{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
 .mwui-memcard-content{font-size:12.5px;line-height:1.5;white-space:pre-wrap;word-break:break-word}
 .mwui-memcard-tags{display:flex;gap:6px;flex-wrap:wrap}
 .mwui-memcard-meta{display:flex;gap:8px;align-items:center;color:var(--mwui-muted);font-size:11px;flex-wrap:wrap}
 .mwui-memcard-actions{display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:0 2px}
+/* The memory list gives every card one height. The body is clamped to four lines and the rows
+   around it are held to one line, so the only variation left is the rows a memory happens to lack;
+   a minimum slightly above the fullest card's natural height replaces those rows with empty space.
+   A row can still grow if the action row outside the card has to wrap, but the grid stretches both
+   cards in a row to that height, so neighbours stay flush. The full body stays one click away in
+   the detail window; the single-column lists, which have the width to spare, keep the whole body. */
+.mwui-memory-grid .mwui-memcard{box-sizing:border-box;min-height:184px}
+.mwui-memory-grid .mwui-memcard-badges{flex-wrap:nowrap}
+.mwui-memory-grid .mwui-memcard-badges>.mwui-chip-slim{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 6em is four lines at 1.5: the clamp and the reserved height are the same box, so the body of a
+   one-line memory and of a hundred-line one occupy identical space and the rows below start at the
+   same height in every card. */
+.mwui-memory-grid .mwui-memcard-content{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:4;
+  height:6em;overflow:hidden}
+/* One line per row: tags keep their own width and the ones past the right edge are cut off, so a
+   memory with many tags cannot become taller than the card beside it. */
+.mwui-memory-grid .mwui-memcard-tags{flex-wrap:nowrap;overflow:hidden}
+.mwui-memory-grid .mwui-memcard-tags>span{flex:0 0 auto;white-space:nowrap}
+.mwui-memory-grid .mwui-memcard-meta{margin-top:auto;flex-wrap:nowrap;overflow:hidden;white-space:nowrap}
 .mwui-meter{display:flex;align-items:center;gap:8px;min-width:0;flex:1 1 180px;max-width:320px}
 .mwui-meter-label{font-size:12px;color:var(--mwui-muted);white-space:nowrap}
 .mwui-meter-track{position:relative;display:block;height:6px;flex:1;min-width:48px;border-radius:999px;background:var(--mwui-border);overflow:hidden}
@@ -350,7 +372,14 @@ export const CSS = `
 .mwui-memory-actions{margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .mwui-filter{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--mwui-muted)}
 .mwui-filter .mwui-select{max-width:200px}
-.mwui-memory-meta{color:var(--mwui-muted);font-size:11.5px}
+/* The list's three pickers share one row. As direct children of the list column each picked up a
+   full line of its own; here they split the row and the selects shrink instead of pushing it wider.
+   A minimum width keeps a squeezed select readable by wrapping the row on a narrow pane. */
+.mwui-filter-row{display:flex;align-items:center;gap:6px 10px;flex-wrap:wrap;padding:8px 12px;
+  border-bottom:1px solid var(--mwui-border)}
+.mwui-filter-row .mwui-filter{flex:1 1 0;min-width:88px;max-width:100%;padding:0;border-bottom:0}
+.mwui-filter-row .mwui-filter-label{flex:0 0 auto;white-space:nowrap}
+.mwui-filter-row .mwui-filter .mwui-select{flex:1 1 auto;width:auto;min-width:0;max-width:100%;text-overflow:ellipsis}
 .mwui-memory-tabs{display:flex;gap:22px;min-width:0;overflow-x:auto;scrollbar-width:none}
 .mwui-memory-tabs::-webkit-scrollbar{display:none}
 .mwui-memory-tabs button{position:relative;appearance:none;border:0;border-bottom:2px solid transparent;background:transparent;

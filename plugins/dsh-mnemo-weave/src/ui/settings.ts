@@ -17,6 +17,9 @@ import {
 } from '../shared/host-config.js';
 import type { HostConfigDescription, ResolvedHostConfig } from '../shared/host-config.js';
 import type { UiConnectionTest, UiRegisterTest, UiSettings, UiWakeTest } from '../shared/contract.ts';
+import { readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { RULE_CAPACITY_MAX_BYTES } from '../../../../packages/core/contracts/src/capacity.ts';
 
 /**
  * The settings page's registration action. It runs only when a person asks for it, and it is the
@@ -190,6 +193,29 @@ export class SettingsService {
     }, this.env);
     this.reload();
     return this.settings();
+  }
+
+  saveRuleLimits(input: { capacityBytes: number; itemMaxBytes: number }): void {
+    const { capacityBytes, itemMaxBytes } = input;
+    if (!Number.isInteger(capacityBytes) || !Number.isInteger(itemMaxBytes)
+      || itemMaxBytes < 1 || capacityBytes < itemMaxBytes || capacityBytes > RULE_CAPACITY_MAX_BYTES) {
+      throw Object.assign(new Error('Invalid rule limits'), { code: 'INVALID_INPUT' });
+    }
+    const target = resolveLocalServerRegistration(this.env);
+    if (!target) throw new Error('No published local Server environment file');
+    const path = target.envFile;
+    const original = readFileSync(path, 'utf8');
+    const lines = original.split(/\r?\n/u).filter(line => !/^\s*MNEMOWEAVE_RULE_(?:CAPACITY|ITEM_MAX)_BYTES\s*=/iu.test(line));
+    if (lines.at(-1) === '') lines.pop();
+    const newline = original.includes('\r\n') ? '\r\n' : '\n';
+    const temporary = path + '.' + randomUUID() + '.tmp';
+    try {
+      writeFileSync(temporary, [...lines, `MNEMOWEAVE_RULE_CAPACITY_BYTES=${capacityBytes}`,
+        `MNEMOWEAVE_RULE_ITEM_MAX_BYTES=${itemMaxBytes}`, ''].join(newline), { flag: 'wx', mode: 0o600 });
+      renameSync(temporary, path);
+    } finally {
+      rmSync(temporary, { force: true });
+    }
   }
 
   saveAutoStart(input: { enabled?: boolean }): UiSettings {

@@ -47,19 +47,32 @@ export function createApi(connection: ClientConnection) {
     skillTrash: (input: { path: string; workspace?: string }, signal?: AbortSignal) => call<import('../shared/contract.ts').UiTrashEntry>('skillTrash', input, signal),
     skillTrashList: (signal?: AbortSignal) => call<import('../shared/contract.ts').UiTrashEntry[]>('skillTrashList', {}, signal),
     skillTrashRestore: (input: { id: string; workspace?: string }, signal?: AbortSignal) => call<import('../shared/contract.ts').UiTrashEntry>('skillTrashRestore', input, signal),
-    skillPreferences: (signal?: AbortSignal) => call<import('../shared/contract.ts').UiSkillsPreferences>('skillPreferences', {}, signal),
-    setSkillAutoAdopt: (input: { autoAdopt: boolean }, signal?: AbortSignal) => call<import('../shared/contract.ts').UiSkillsPreferences>('setSkillAutoAdopt', input, signal),
-    skillAutoAdopt: (input: { path: string; candidate: string; baselineHash: string; review: unknown; workspace?: string }, signal?: AbortSignal) => call<import('../shared/contract.ts').UiAdoptionResult>('skillAutoAdopt', input, signal),
     skillAdopt: (input: { path: string; candidate: string; baselineHash: string; workspace?: string }, signal?: AbortSignal) => call<import('../shared/contract.ts').UiSkillWrite>('skillAdopt', input, signal),
     skillRestore: (input: { path: string; versionId: string; baselineHash: string; workspace?: string }, signal?: AbortSignal) => call<import('../shared/contract.ts').UiSkillWrite>('skillRestore', input, signal),
     skillBacktest: (input: import('../shared/contract.ts').SkillBacktestInput, signal?: AbortSignal) =>
       call<import('../shared/contract.ts').SkillBacktestResult>('skillBacktest', input, signal),
     organizeMemory: (input: UiCreateInput, signal?: AbortSignal) => call<import('../shared/contract.ts').UiSaveResult>('organizeMemory', input, signal),
-    organizeMemories: (input: { instruction: string; workspaceId?: string }, signal?: AbortSignal) => call<import('../shared/contract.ts').UiOrganizeResult>('organizeMemories', input, signal),
+    organizeMemories: (input: { instruction: string; workspaceId?: string }, signal?: AbortSignal) => call<import('../shared/contract.ts').UiOrganizePlan>('organizeMemories', input, signal),
+    /** Apply only the ticked plan items; the task id keeps a retry on the same receipts. */
+    applyOrganizeMemories: (input: { instruction: string; plan: import('../shared/contract.ts').UiOrganizePlan; confirmed: number[]; taskId: string }, signal?: AbortSignal) =>
+      call<import('../shared/contract.ts').UiOrganizeResult>('organizeMemories', { ...input, apply: true }, signal),
+    embeddingBackfill: () => call<import('../shared/contract.ts').UiDiagnosticJob>('embeddingBackfill', {}),
+    embeddingBackfillHistory: (signal?: AbortSignal) => call<{ items: import('../shared/contract.ts').UiDiagnosticJob[] }>('embeddingBackfillHistory', {}, signal),
+    idleReviewRecent: (signal?: AbortSignal) => call<{ items: import('../shared/contract.ts').UiIdleReviewRun[] }>('idleReviewRecent', {}, signal),
+    idleReviewSkips: (signal?: AbortSignal) => call<{ items: import('../shared/contract.ts').UiIdleSkip[] }>('idleReviewSkips', {}, signal),
+    writeTasks: (signal?: AbortSignal) => call<{ items: import('../shared/contract.ts').UiPendingWrite[] }>('writeTasks', {}, signal),
+    resolveWrite: (input: { taskId: string; index: number }, signal?: AbortSignal) =>
+      call<import('../shared/contract.ts').WriteTaskOutcome>('resolveWrite', input, signal),
+    retryWrite: (input: { taskId: string; index: number }, signal?: AbortSignal) =>
+      call<import('../shared/contract.ts').WriteTaskOutcome>('retryWrite', input, signal),
+    replyPreview: (input: { sessionId: string; replyId: string }, signal?: AbortSignal) =>
+      call<{ text: string; turnId: string } | null>('replyPreview', input, signal),
+    replySave: (input: { taskId: string; sessionId: string; replyId: string; turnId: string; content: string; category?: string; reason?: string }, signal?: AbortSignal) =>
+      call<import('../shared/contract.ts').WriteTaskOutcome>('replySave', input, signal),
     create: (input: UiCreateInput, signal?: AbortSignal): Promise<UiCreateResult> => call<UiCreateResult>('create', input, signal),
     edit: (input: UiEditInput, signal?: AbortSignal): Promise<UiEditResult> => call<UiEditResult>('edit', input, signal),
     withdraw: (input: UiWithdrawInput, signal?: AbortSignal): Promise<UiWithdrawResult> => call<UiWithdrawResult>('withdraw', input, signal),
-    explore: (input: { query: string; limit?: number; minScore?: number; hint?: string }, signal?: AbortSignal): Promise<UiExplore> => call<UiExplore>('explore', input, signal),
+    explore: (input: { query: string; limit?: number; hint?: string; mode?: 'smart' | 'keyword' | 'basic'; category?: string }, signal?: AbortSignal): Promise<UiExplore> => call<UiExplore>('explore', input, signal),
     graph: (input: { limit?: number }, signal?: AbortSignal): Promise<UiGraph> => call<UiGraph>('graph', input, signal),
     /** Workspaces this Host may reach. A host response carries no local path. */
     workspaces: (signal?: AbortSignal): Promise<UiWorkspace[]> => call<UiWorkspace[]>('workspaces', {}, signal),
@@ -69,6 +82,7 @@ export function createApi(connection: ClientConnection) {
     injection: (signal?: AbortSignal): Promise<UiInjection | null> => call<UiInjection | null>('injection', {}, signal),
     rules: (signal?: AbortSignal): Promise<UiRule[]> => call<UiRule[]>('rules', {}, signal),
     ruleUsage: (signal?: AbortSignal): Promise<UiRuleUsage> => call<UiRuleUsage>('ruleUsage', {}, signal),
+    saveRuleLimits: (input: { capacityBytes: number; itemMaxBytes: number }): Promise<true> => call<true>('saveRuleLimits', input),
     createRule: (input: UiRuleCreateInput, signal?: AbortSignal): Promise<UiRule> => call<UiRule>('createRule', input, signal),
     editRule: (input: UiRuleEditInput & { ruleId: string }, signal?: AbortSignal): Promise<UiRule> => call<UiRule>('editRule', input, signal),
     saveArchive: (input: import('../shared/contract.ts').UiArchiveDraft & { entryId?: string; baseVersion?: number }): Promise<UiArchive> => call<UiArchive>('saveArchive', input),

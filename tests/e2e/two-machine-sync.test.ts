@@ -45,10 +45,9 @@ test('a memory written on one machine is editable on the other and returns updat
     mkdirSync(path, { recursive: true });
     return resolve(path);
   }) as [string, string, string, string];
-  const streams = [{ stream: 'formal-memories', canRead: true, canWrite: true }, { stream: 'rules', canRead: true, canWrite: true }];
   const remote = new SyncStore({ path: join(root, 'remote.db') });
-  remote.enroll('machine-a', TOKEN_A, streams);
-  remote.enroll('machine-b', TOKEN_B, streams);
+  remote.enroll('machine-a', TOKEN_A);
+  remote.enroll('machine-b', TOKEN_B);
   const server: Server = createSyncServer({ gateway: remote });
   await new Promise<void>((done) => server.listen(0, '127.0.0.1', () => done()));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -125,9 +124,8 @@ test('two isolated devices creating the same formal text receive one authoritati
   const root = await tempDir('two-machine-sync', 'two-machine-duplicate');
   mkdirSync(root, { recursive: true });
   const remote = new SyncStore({ path: join(root, 'remote.db') });
-  const grants = [{ stream: 'formal-memories', canRead: true, canWrite: true }];
-  remote.enroll('device-a', TOKEN_A, grants);
-  remote.enroll('device-b', TOKEN_B, grants);
+  remote.enroll('device-a', TOKEN_A);
+  remote.enroll('device-b', TOKEN_B);
   const server = createSyncServer({ gateway: remote });
   await new Promise<void>(done => server.listen(0, '127.0.0.1', done));
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;

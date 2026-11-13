@@ -35,6 +35,8 @@ export const syncRoutes = [
 
 export interface SyncServerOptions {
   gateway: SyncGateway;
+  enrollment?: (method: string | undefined, path: string, token: () => string, read: () => Promise<unknown>, source: string) => Promise<unknown>;
+  enrollmentSource?: (request: IncomingMessage) => string;
   now?: () => Date;
 }
 
@@ -52,8 +54,13 @@ export function createSyncServer(options: SyncServerOptions) {
     };
     try {
       if (req.headers.origin) throw new MnemoWeaveError('UNAUTHORIZED');
-      const token = bearer(req);
       const url = new URL(req.url ?? '/', 'http://sync.invalid');
+      const enrollment = await options.enrollment?.(
+        req.method, url.pathname, () => bearer(req), () => readJson(req, 4096),
+        options.enrollmentSource?.(req) ?? req.socket.remoteAddress ?? 'unknown',
+      );
+      if (enrollment !== undefined) return reply(200, enrollment);
+      const token = bearer(req);
       if (req.method === 'GET' && url.pathname === '/v1/sync/health') {
         // Liveness still proves the caller is a live device: an unknown or revoked token must not
         // learn anything about the service.
@@ -122,14 +129,14 @@ function numberParam(url: URL, name: string, fallback: number): number {
   return value;
 }
 
-async function readJson(req: IncomingMessage): Promise<unknown> {
+async function readJson(req: IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<unknown> {
   if (!req.headers['content-type']?.startsWith('application/json')) throw new MnemoWeaveError('INVALID_INPUT');
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
     const bytes = Buffer.from(chunk as Uint8Array);
     size += bytes.length;
-    if (size > MAX_BODY_BYTES) throw new MnemoWeaveError('INVALID_INPUT');
+    if (size > maxBytes) throw new MnemoWeaveError('INVALID_INPUT');
     chunks.push(bytes);
   }
   try {

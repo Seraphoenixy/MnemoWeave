@@ -3,27 +3,25 @@ import { DatabaseSync } from 'node:sqlite';
 import { VersionConflictError } from '../../../core/application/src/sync.ts';
 import {
   MnemoWeaveError, SyncAccepted, SyncChangeRecord, SyncEntry, SyncPullPage, SyncSnapshot,
-  SyncStream, SyncStreamGrant, SyncStreamsOutput, ARCHIVE_ACTIVE_CAPACITY_BYTES, RULE_CAPACITY_BYTES,
+  SyncStream, SyncStreamsOutput, ARCHIVE_ACTIVE_CAPACITY_BYTES, RULE_CAPACITY_BYTES,
   FORMAL_STREAM, RULES_STREAM, streamOf,
 } from '../../../core/contracts/src/index.ts';
 import type {
   LegacyWorkspaceMapValue, SyncAcceptedValue, SyncChangeRecordValue, SyncChangeRequest, SyncEntryValue, SyncPullPageValue,
-  SyncPullRequest, SyncSnapshotValue, SyncStreamGrantValue, SyncStreamsValue,
+  SyncPullRequest, SyncSnapshotValue, SyncStreamsValue,
 } from '../../../core/contracts/src/index.ts';
 
 /**
- * Authoritative remote store for shared memory (sync protocol 2, schema v3).
+ * Authoritative remote store for shared memory (sync protocol 2, schema v4).
  *
- * Ordering rule: `seq` is per stream, starting at 1 and contiguous. A device only ever reads
- * streams it is granted. The stream an entry belongs to is derived from the entry itself: a
- * client cannot name one, and a change whose entry names a different stream than its granted
- * write authority is refused.
+ * Ordering rule: `seq` is per stream, starting at 1 and contiguous. Authenticated devices share the full library.
+ * The server derives the stream of each entry.
  *
  * The remote never parses a body's meaning. It checks the payload hash and length, the derived
  * stream, the base version, and capacity for the rule and workspace-archive streams.
  */
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 /** The rule collection capacity the remote enforces before assigning a version. */
 const RULE_STREAM_CAPACITY_BYTES = RULE_CAPACITY_BYTES;
 
@@ -72,7 +70,8 @@ export class SyncStore {
             device_id TEXT PRIMARY KEY,
             token_hash TEXT NOT NULL UNIQUE,
             created_at TEXT NOT NULL,
-            revoked_at TEXT
+            revoked_at TEXT,
+            label TEXT
           );
           CREATE TABLE sync_device_streams(
             device_id TEXT NOT NULL REFERENCES sync_devices(device_id),
@@ -250,6 +249,19 @@ export class SyncStore {
         this.db.exec('INSERT INTO sync_migrated_streams SELECT DISTINCT stream FROM sync_entries');
       });
     }
+    if (version === 3) this.db.prepare('VACUUM INTO ?').run(`${options.path}.v3-${randomUUID()}.bak`);
+    this.transaction(() => {
+      if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) !== 3) return;
+      if (version !== 0) this.db.exec('ALTER TABLE sync_devices ADD COLUMN label TEXT');
+      this.db.exec(`
+        CREATE TABLE sync_auth_registration(
+          singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+          access_salt TEXT NOT NULL, srp_salt TEXT NOT NULL, verifier TEXT NOT NULL
+        );
+        DROP TABLE sync_device_streams;
+        PRAGMA user_version=4;
+      `);
+    });
   }
 
   close(): void { this.db.close(); }
@@ -278,46 +290,54 @@ export class SyncStore {
     }
   }
 
-  /** Register a device and its stream grants. Tokens are stored hashed. */
-  enroll(deviceId: string, token: string, grants: readonly SyncStreamGrantValue[]): void {
-    const streams = grants.map((grant) => SyncStreamGrant.parse(grant));
+  enroll(deviceId: string, token: string, label?: string): void {
+    this.db.prepare('INSERT INTO sync_devices(device_id, token_hash, created_at, label) VALUES(?, ?, ?, ?)').run(deviceId, digest(token), this.now(), label ?? null);
+  }
+
+  devices() {
+    return this.db.prepare(`
+      SELECT device_id AS deviceId, label, created_at AS createdAt, revoked_at AS revokedAt
+      FROM sync_devices ORDER BY created_at, device_id
+    `).all();
+  }
+
+  authRegistration(): { accessSalt: string; srpSalt: string; verifier: string } | undefined {
+    return this.db.prepare('SELECT access_salt AS accessSalt, srp_salt AS srpSalt, verifier FROM sync_auth_registration WHERE singleton = 1').get() as ReturnType<SyncStore['authRegistration']>;
+  }
+
+  initializeAuth(registration: NonNullable<ReturnType<SyncStore['authRegistration']>>, deviceId: string, token: string, label: string): void {
     this.transaction(() => {
-      this.db.prepare('INSERT INTO sync_devices(device_id, token_hash, created_at) VALUES(?, ?, ?)').run(deviceId, digest(token), this.now());
-      for (const grant of streams) {
-        this.db.prepare('INSERT INTO sync_device_streams(device_id, stream, can_read, can_write) VALUES(?, ?, ?, ?)')
-          .run(deviceId, grant.stream, grant.canRead ? 1 : 0, grant.canWrite ? 1 : 0);
-      }
+      if (this.authRegistration()) throw new MnemoWeaveError('VERSION_CONFLICT');
+      this.db.prepare('INSERT INTO sync_auth_registration VALUES(1, ?, ?, ?)').run(registration.accessSalt, registration.srpSalt, registration.verifier);
+      this.enroll(deviceId, token, label);
     });
   }
 
-  revoke(deviceId: string): void {
-    this.db.prepare('UPDATE sync_devices SET revoked_at = ? WHERE device_id = ?').run(this.now(), deviceId);
+  revoke(deviceId: string): boolean {
+    return this.db.prepare('UPDATE sync_devices SET revoked_at = COALESCE(revoked_at, ?) WHERE device_id = ?')
+      .run(this.now(), deviceId).changes !== 0;
   }
 
-  private identity(token: string): { deviceId: string; grants: Map<string, { canRead: boolean; canWrite: boolean }> } {
-    const row = this.db.prepare('SELECT device_id, token_hash, revoked_at FROM sync_devices WHERE token_hash = ?').get(digest(token)) as DeviceRow | undefined;
+  requireActiveDevice(deviceId: string): void {
+    if (!this.db.prepare('SELECT 1 FROM sync_devices WHERE device_id = ? AND revoked_at IS NULL').get(deviceId)) {
+      throw new MnemoWeaveError('DEVICE_REVOKED');
+    }
+  }
+
+  private identity(token: string): string {
+    const row = this.db.prepare('SELECT device_id, revoked_at FROM sync_devices WHERE token_hash = ?').get(digest(token)) as DeviceRow | undefined;
     if (!row) throw new MnemoWeaveError('UNAUTHORIZED');
     if (row.revoked_at) throw new MnemoWeaveError('DEVICE_REVOKED');
-    const grants = new Map<string, { canRead: boolean; canWrite: boolean }>();
-    for (const stream of this.db.prepare('SELECT stream, can_read, can_write FROM sync_device_streams WHERE device_id = ?').all(row.device_id) as { stream: string; can_read: number; can_write: number }[]) {
-      grants.set(stream.stream, { canRead: stream.can_read === 1, canWrite: stream.can_write === 1 });
-    }
-    return { deviceId: row.device_id, grants };
-  }
-
-  private requireRead(grants: Map<string, { canRead: boolean; canWrite: boolean }>, stream: string): void {
-    if (!grants.get(stream)?.canRead) throw new MnemoWeaveError('SCOPE_FORBIDDEN');
-  }
-
-  private requireWrite(grants: Map<string, { canRead: boolean; canWrite: boolean }>, stream: string): void {
-    if (!grants.get(stream)?.canWrite) throw new MnemoWeaveError('SCOPE_FORBIDDEN');
+    return row.device_id;
   }
 
   streams(token: string): SyncStreamsValue {
-    const { deviceId, grants } = this.identity(token);
+    const deviceId = this.identity(token);
+    const streams = new Set([RULES_STREAM, FORMAL_STREAM]);
+    for (const row of this.db.prepare('SELECT DISTINCT stream FROM sync_entries').all()) streams.add(SyncStream.parse(row['stream']));
     return SyncStreamsOutput.parse({
       deviceId,
-      streams: [...grants.entries()].map(([stream, grant]) => ({ stream, canRead: grant.canRead, canWrite: grant.canWrite })),
+      streams: [...streams].sort().map(stream => ({ stream, canRead: true, canWrite: true })),
     });
   }
 
@@ -399,7 +419,7 @@ export class SyncStore {
   }
 
   submit(token: string, change: SyncChangeRequest): SyncAcceptedValue {
-    const { deviceId, grants } = this.identity(token);
+    const deviceId = this.identity(token);
     let stream: string;
     try {
       stream = streamOf(change.entry.kind, change.entry.payload);
@@ -408,7 +428,6 @@ export class SyncStore {
     }
     const parsedStream = SyncStream.safeParse(stream);
     if (!parsedStream.success) throw new MnemoWeaveError('INVALID_INPUT');
-    this.requireWrite(grants, stream);
     this.assertContent(JSON.stringify(change.entry.content));
     const requestHash = digest(JSON.stringify(change));
     return this.transaction(() => {
@@ -483,8 +502,7 @@ export class SyncStore {
   }
 
   pull(token: string, query: SyncPullRequest): SyncPullPageValue {
-    const { grants } = this.identity(token);
-    this.requireRead(grants, query.stream);
+    this.identity(token);
     const floorRow = this.db.prepare('SELECT MIN(seq) AS value FROM sync_changes WHERE stream = ?').get(query.stream) as { value: number | null };
     // With nothing retained, a device behind the head must still take a snapshot, so the floor is
     // the first seq a reader could ever see again: head + 1.
@@ -522,27 +540,24 @@ export class SyncStore {
    * resolved: the answer comes from the receipt, not from guessing about a timeout.
    */
   receipt(token: string, changeId: string): SyncAcceptedValue {
-    const { grants } = this.identity(token);
+    this.identity(token);
     const row = this.db.prepare('SELECT stream, entry_id, version, seq, created_at FROM sync_change_receipts WHERE change_id = ?').get(changeId) as
       { stream: string; entry_id: string; version: number; seq: number; created_at: string } | undefined;
     if (!row) throw new MnemoWeaveError('NOT_FOUND');
-    this.requireRead(grants, row.stream);
     return SyncAccepted.parse({ changeId, entryId: row.entry_id, stream: row.stream, version: row.version, seq: row.seq, duplicate: true, confirmedAt: row.created_at });
   }
 
   entry(token: string, entryId: string): SyncEntryValue {
-    const { grants } = this.identity(token);
+    this.identity(token);
     const entry = this.entryRow(entryId);
     if (!entry) throw new MnemoWeaveError('NOT_FOUND');
-    this.requireRead(grants, streamOf(entry.kind, entry.payload));
     return entry;
   }
 
   /** Snapshot and cut point are read inside one transaction, so they cannot disagree. */
   snapshot(token: string, stream: string): SyncSnapshotValue {
-    const { grants } = this.identity(token);
+    this.identity(token);
     const parsedStream = SyncStream.parse(stream);
-    this.requireRead(grants, parsedStream);
     return this.readTransaction(() => {
       const asOfSeq = this.head(parsedStream);
       const ids = this.db.prepare('SELECT entry_id FROM sync_entries WHERE stream = ? ORDER BY entry_id ASC').all(parsedStream) as { entry_id: string }[];

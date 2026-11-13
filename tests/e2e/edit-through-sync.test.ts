@@ -31,11 +31,8 @@ test('a user edit is confirmed remotely, applied locally and published once', as
   mkdirSync(join(dir, 'state'), { recursive: true });
 
   const remote = new SyncStore({ path: join(dir, 'remote.db') });
-  remote.enroll('device-local', DEVICE_TOKEN, [
-    { stream: FORMAL_STREAM, canRead: true, canWrite: true },
-    { stream: ARCHIVE_STREAM, canRead: true, canWrite: true },
-  ]);
-  remote.enroll('device-b', B_TOKEN, [{ stream: FORMAL_STREAM, canRead: true, canWrite: true }]);
+  remote.enroll('device-local', DEVICE_TOKEN);
+  remote.enroll('device-b', B_TOKEN);
   const server: Server = createSyncServer({ gateway: remote });
   await new Promise<void>((done) => server.listen(0, '127.0.0.1', () => done()));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;

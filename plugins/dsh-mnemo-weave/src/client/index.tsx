@@ -7,6 +7,9 @@
 import { MAIN_PANEL_ID, type ClientContext, type LocaleService } from './dsh-types.ts';
 import { MnemoWeaveIcon } from './icon.tsx';
 import { MemoryPage } from './page.tsx';
+import { ReplySaveButton } from './reply-save.tsx';
+import { createApi } from './api.ts';
+import type { Language } from './i18n.ts';
 import { ensureStyles } from './styles.ts';
 
 export const name = 'dsh-mnemo-weave';
@@ -79,4 +82,27 @@ export function apply(ctx: ClientContext): void {
       return () => { entry?.(); panel(); };
     }));
   }, 'dsh-mnemo-weave: page');
+
+  /**
+   * 「保存回复」 beside each finalised assistant message.
+   *
+   * The slot passes the message's durable id and the Host resolves the completed reply.
+   * Registration is independent
+   * of the panel above: a Host that refuses this slot still gets the memory page.
+   */
+  ctx.effect(() => {
+    const api = createApi(ctx.connection);
+    return ctx.slots.inject('conversation.chat.assistant-actions', () => ctx.slots.register({
+      name: 'conversation.chat.assistant-actions',
+      id: MAIN_PANEL_ID,
+      order: 60,
+      label: () => currentLabel(ctx),
+    }, ((props: { messageId?: string; sessionId?: string }) => ReplySaveButton({
+      messageId: props.messageId ?? '',
+      language: (readActiveLocale(ctx)?.toLowerCase().startsWith('zh') === true ? 'zh' : 'en') as Language,
+      preview: api.replyPreview,
+      ...(props.sessionId === undefined ? {} : { sessionId: props.sessionId }),
+      save: input => api.replySave(input),
+    })) as never));
+  }, 'dsh-mnemo-weave: reply actions');
 }

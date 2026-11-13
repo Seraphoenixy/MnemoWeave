@@ -1,8 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { tempDir } from '../support/temp.ts';
 import { NO_RETENTION_COMMAND, apply, createTools, inject, render } from '../../plugins/dsh-mnemo-weave/lib/index.js';
 
 /**
@@ -13,7 +12,7 @@ import { NO_RETENTION_COMMAND, apply, createTools, inject, render } from '../../
  * not replace the Server's own contract tests.
  */
 
-const root = mkdtempSync(join(tmpdir(), 'mnemoweave-dsh-tools-'));
+const root = await tempDir('dsh-tools', 'settings');
 const TOKEN = 't'.repeat(32);
 const CONFIG = { serverUrl: 'http://127.0.0.1:4399', token: TOKEN, hostId: 'dsh-test' };
 const EXPECTED_TOOLS = [
@@ -45,7 +44,6 @@ before(() => {
 
 after(() => {
   delete process.env.MNEMOWEAVE_DSH_SETTINGS;
-  rmSync(root, { recursive: true, force: true });
 });
 
 /**
@@ -325,7 +323,12 @@ test('the no-retention command reports the marker to the Server and refuses this
   assert.equal(body.kind, 'message.user');
 });
 
-test('a missing service token fails before any request is sent', async () => {
+test('a missing service token fails before any request is sent', async t => {
+  const inheritedToken = process.env.MNEMOWEAVE_TOKEN;
+  delete process.env.MNEMOWEAVE_TOKEN;
+  t.after(() => {
+    if (inheritedToken !== undefined) process.env.MNEMOWEAVE_TOKEN = inheritedToken;
+  });
   calls = [];
   const tools = createTools({ serverUrl: 'http://127.0.0.1:4399', hostId: 'dsh-test' });
   await assert.rejects(

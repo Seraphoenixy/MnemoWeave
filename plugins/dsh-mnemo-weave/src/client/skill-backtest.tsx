@@ -248,14 +248,13 @@ export function SkillBacktestPanel({ language, run, conversations, review, selec
 }
 
 /** What DSH can load from the four skill roots, before any write operation. */
-export function SkillListPanel({ language, report, error, onRefresh, selected, onSelect, versions, roots, onRestore, onCreate, busy = false, notice = null, autoAdopt = false, onAutoAdoptChange, trash, onTrash, onRestoreTrash, diff, onDiff, drafts, onDismissDraft, onAdoptDraft, onLoadDraft }: {
+export function SkillListPanel({ language, report, error, onRefresh, selected, onSelect, versions, roots, onRestore, onCreate, busy = false, notice = null, trash, onTrash, onRestoreTrash, diff, onDiff, drafts, onDismissDraft, onAdoptDraft, onLoadDraft }: {
   language: Language; report: UiSkillReport | null; error: string | null; onRefresh(): void;
   selected?: string | null; onSelect?(entry: UiSkillEntry): void;
   versions?: UiSkillVersion[]; roots?: string[];
   onRestore?(versionId: string): void;
   onCreate?(input: { root: string; name: string; description: string }): void;
   busy?: boolean; notice?: string | null;
-  autoAdopt?: boolean; onAutoAdoptChange?(enabled: boolean): void;
   trash?: UiTrashEntry[];
   onTrash?(path: string): void;
   onRestoreTrash?(id: string): void;
@@ -362,13 +361,6 @@ export function SkillListPanel({ language, report, error, onRefresh, selected, o
                 </ul>
               )}
           </div>
-        )}
-        {onAutoAdoptChange === undefined ? null : (
-          <label className="mwui-field" data-direction="row">
-            <input type="checkbox" checked={autoAdopt} disabled={busy} onChange={event => onAutoAdoptChange(event.target.checked)} />
-            <span>{t('skills.autoAdopt')}</span>
-            <span className="mwui-edit-hint" data-tone="muted">{t('skills.autoAdoptHint')}</span>
-          </label>
         )}
         {versions === undefined || selected === null || selected === undefined ? null : (
           <div className="mwui-settings-group">

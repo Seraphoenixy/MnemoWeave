@@ -180,18 +180,31 @@ export type MemoryListRecord = z.infer<typeof MemoryList>;
 /**
  * Semantic search over the Provider, mapped back to this machine's catalog. An optional
  * `hint` is a recall cue such as a workspace name; it goes into the query text only.
+ *
+ * There is no score floor. Which rows are relevant is decided by the recall quality policy, from
+ * a score the Provider itself reports on a scale that differs by retrieval mode; asking a caller
+ * to supply a threshold would require it to know that scale.
  */
 export const ExploreInput = z.object({
   query: z.string().trim().min(1).max(500),
   limit: z.coerce.number().int().min(1).max(50).default(20),
-  minScore: z.coerce.number().min(0).max(1).default(0),
+  mode: z.enum(['smart', 'keyword', 'basic']).optional(),
+  category: z.enum(['preference', 'decision', 'fact', 'insight', 'context', 'general']).optional(),
   /** Optional workspace display name used as an extra relevance line in the query. */
   hint: z.string().trim().min(1).max(200).optional(),
 }).strict();
+/**
+ * One ranked memory this machine published and can open.
+ *
+ * `score` is present only when the Provider reported one. A row the Provider ranked without a
+ * number is still an answer, so the field is optional rather than defaulted to zero: a zero
+ * score would claim the row is irrelevant when the Provider never made that claim.
+ */
 export const ExploreHit = z.object({
   memoryId: z.uuid(), revisionId: z.uuid(), providerMemoryId: z.string().min(1),
   state: z.enum(['active', 'superseded', 'unverified']),
-  content: z.string(), score: z.number(), publishedAt: z.iso.datetime(),
+  content: z.string(), score: z.number().optional(), relevance: z.enum(['high', 'medium', 'low', 'unknown']).optional(),
+  publishedAt: z.iso.datetime(),
   category: z.string().optional(), tags: z.array(z.string()).optional(),
 }).strict();
 export const ExploreOutput = z.object({
