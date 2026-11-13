@@ -505,7 +505,7 @@ export * from './registration.ts';
 
 export interface MemoryListItem {
   memoryId: string; revisionId: string; providerMemoryId: string;
-  applicability: string; publishedAt: string; content: string;
+  publishedAt: string; content: string;
   /** Base version for an edit; 0 until the memory has been edited. */
   entryVersion: number;
   category?: string;

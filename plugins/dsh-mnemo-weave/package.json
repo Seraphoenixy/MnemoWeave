@@ -39,7 +39,8 @@
   },
   "peerDependenciesMeta": {
     "react": {
-      "optional": true
+      "optional": true,
+      "description": "Provided by the DSH application, not by the plugin's own node_modules. The bundle loads it through the host module loader, and a host profile installed with `link:` has no react of its own to satisfy a peer range."
     }
   },
   "devDependencies": {

@@ -6,13 +6,14 @@
 
 | 目标 | 当前实现 |
 |---|---|
-| 正式记忆共享 | 单一共享集合。目录、列表、图谱和召回均无条目级工作区字段与同步流字段；出现已移除字段返回 `INVALID_INPUT`。查重跨整个集合。工作区名称只作为召回线索进入查询文本 |
+| 正式记忆共享 | 单一共享集合。目录、列表、图谱和召回均无条目级工作区字段与同步流字段；出现已移除字段返回 `INVALID_INPUT`。查重跨整个集合。工作区名称只作为召回线索进入查询文本。列表以 Provider 全量为准，本机目录降级为增强层：读取时对未登记条目自动补建 v1 修订（`adoptProviderMemory`），由目录提供条目版本与修订历史 |
 | 工作区档案 | 按稳定 `workspaceId` 跨会话共享，设备各自绑定本地根目录，会话绑定不可中途更换。管理列表、搜索和新增必须选择工作区，缺少时返回 `WORKSPACE_REQUIRED`。旧档案经 v22 迁移保留原 ID、版本与历史 |
 | 同步流 | 协议 2 使用 `rules`、`formal-memories` 与 `workspace-archives:<workspaceId>`。写入流由条目类型和 `payload.workspaceId` 派生，客户端不能指定。设备授权、序号、游标、快照按流隔离。远端 v2→v3 迁移把旧 `global` 授权复制为两条流授权，旧 `project:*` 授权及旧档案按明确的工作区对照表重建，缺少映射或合并授权不一致时停止迁移。旧日志与游标退出运行状态，迁移流首次读取快照 |
 | 准则与注入 | 聚合 View、`/v1/view`、`memory_view` 与 `runtime_context` 已移除。`/v1/inject` 只返回完整准则集合；10,000 UTF-8 字节容量按所有未移除准则计量（含停用条目），超限写入拒绝且不自动归档，只允许使集合变小的替换和移除；入站超限集合进入 `needs_review` 而不推进游标 |
 | 条目版本 | 正式记忆提交 `entryVersion`，准则与工作区档案提交 `baseVersion`；服务端不补全为本机最新版本，过期基准返回 `VERSION_CONFLICT` |
 | 写入任务 Agent | `/v1/memory-write-tasks/{taskId}/actions/{index}` 按 (Host, 任务, 动作序号) 幂等，先写 `unknown` 再结算；同键异载荷返回 `IDEMPOTENCY_CONFLICT`。Server 在占用幂等键前校验触发方式、动作白名单、每任务动作数、证据引用可解析和目标运行状态，超出返回 `SCOPE_FORBIDDEN`/`INVALID_INPUT`，被拒绝的动作不留下回执；草稿提炼同时禁止显式正文与分类。回执状态见 [实现与契约](implementation.md#授权任务接口)。界面与人工审批仍走各自入口 |
 | 主动记录工程经验 | DSH 原生工具与通用 MCP 共用同一份经验指引。无委派能力时 `mnemoweave_remember` 返回候选回执，不报告发布 |
+| 图谱与实体统计 | 图谱以官方 `mnemon viz --format dot` 的真实边为主（entity、backbone、proximity、semantic、causal），目录内部的取代与冲突关系叠加其上；边数超过上限时返回 `truncated`。实体与分类统计读 Provider 的 `status`（`top_entities`、`by_category`），目录仅补 Provider 未列出的实体 |
 | 准则、档案与正式记忆工具 | `mnemoweave_read_rules`、`mnemoweave_workspace_archives`、`mnemoweave_related` 已注册；档案搜索与分段读取共用每轮四次额度、单次 6,000 字符 |
 | DSH 会话与轮次 | 工具从执行上下文取 Host、会话、Agent 和轮次，模型参数不能提供。每轮预算在 Source 调用前校验；部分身份被拒绝为 `UNAUTHORIZED`，不退到管理额度。`/no-retention` 命令把本轮标记经宿主事件报给 Server，`remember`、准则和档案写入在该轮被拒绝；标记只覆盖该轮 |
 | 空闲复盘 | 仅在有模型路由和证据时启动；连续空闲 30 秒、活动分达到 5、两次尝试间隔 5 分钟、最多 20 次。扫描读取本机保留的用户轮次（含不留存标记）；动作经授权任务接口提交，Server 校验运行属于发起 Host、同会话且仍在运行。每次至多一条准则变更及一篇新建档案，不写正式记忆。失败运行只重试未完成动作 |
@@ -66,7 +67,7 @@
 | 自动端到端用例 | 覆盖真实 Mnemon 0.2.13、发布与恢复、并发编辑、两机与三机同步、离线恢复、快照重建、DSH Host 半链路、MCP 与 Hook 进程 |
 | 实机 | Windows 计划任务注册及唤醒；DSH 基本浏览编辑和注入记录 |
 
-最近一次运行：类型检查与构建通过，Unit 与 Contract 478 项通过；E2E 41 项在真实 Mnemon 0.2.13 下全部通过（含两机同文归一、按流快照重建、归档回执重放、档案提炼来源过期拒绝和空闲复盘动作边界）。本机治理库从 v14 迁移到 v22，迁移前快照保留在 `dist/data/state/governance.db.pre-v22.*`，迁移后 `workspaces`、`workspace_bindings` 建成且正式记忆的 `project_id` 列已移除。真实桌面宿主（ChatGPT 桌面、ZCode）与 Linux 远端部署尚未验收。
+最近一次运行：类型检查与构建通过，Unit 与 Contract 481 项通过（24 秒，`work/` 单轮不残留测试目录）；E2E 37 项在真实 Mnemon 0.2.13 下全部通过（含两机同文归一、按流快照重建、归档回执重放、档案提炼来源过期拒绝和空闲复盘动作边界）。E2E 数量减少是因为移除了只验证 Mnemon CLI 自身输出语义的用例（`cli-behavior`、`supersedes-behavior`、`native`、真实 CLI 覆盖率报告），这些行为由适配器契约测试覆盖。本机治理库从 v14 迁移到 v22，迁移前快照保留在 `dist/data/state/governance.db.pre-v22.*`，迁移后 `workspaces`、`workspace_bindings` 建成且正式记忆的 `project_id` 列已移除。真实桌面宿主（ChatGPT 桌面、ZCode）与 Linux 远端部署尚未验收。
 
 测试命令见 [根目录 README](../README.md)，真实宿主判据见 [宿主验收](host-acceptance.md)。
 

@@ -12,14 +12,11 @@ const request = (key: string): RememberRequest => ({
   content: 'Quota fixture content for the governance store.',
   tags: [],
   provenance: {
-    source: 'quota-test', sourceReference: 'fixture:quota', evidence: ['fixture'],
-    verificationStatus: 'unverified', confidence: 0.5, applicability: 'isolated quota fixture',
-    limitations: 'not production knowledge', lastVerified: null,
+    source: 'quota-test', sourceReference: 'fixture:quota',
   },
 });
 
 async function fixture(softBytes: number, hardBytes: number) {
-  await mkdir('work/tests', { recursive: true });
   const root = await tempDir('quota', 'quota');
   return new SqliteCandidates(join(root, 'governance.db'), { softBytes, hardBytes });
 }
@@ -46,7 +43,6 @@ test('Soft quota admits new growth and reports soft state', async () => {
 });
 
 test('Quota limits must be ordered soft below hard', async () => {
-  await mkdir('work/tests', { recursive: true });
   const root = await tempDir('quota', 'quota-invalid');
   assert.throws(() => new SqliteCandidates(join(root, 'governance.db'), { softBytes: 10, hardBytes: 5 }));
 });

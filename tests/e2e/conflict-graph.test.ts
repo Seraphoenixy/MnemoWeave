@@ -11,6 +11,7 @@ import { MnemonCliProvider } from '../../packages/providers/mnemon/src/index.ts'
 import { createHttpServer } from '../../packages/protocols/http/src/index.ts';
 import { configure } from '../../apps/server/src/config.ts';
 import { mnemonBinary } from '../e2e/mnemon-binary.ts';
+import { tempDir } from '../support/temp.ts';
 
 /**
  * A conflict resolved as "coexist" leaves two live memories that disagree, and the graph draws it.
@@ -38,14 +39,13 @@ function request(key: string, content: string) {
   return RememberInput.parse({
     idempotencyKey: key, content, tags: [],
     provenance: {
-      source: 'local-user', sourceReference: `conflict:${key}`, evidence: ['fixture'], verificationStatus: 'verified',
-      confidence: 1, applicability: 'global', limitations: '无', lastVerified: '2026-11-10T00:00:00.000Z',
+      source: 'local-user', sourceReference: `conflict:${key}`,
     },
   });
 }
 
 test('a coexist resolution draws a conflict edge between two live memories', { timeout: 120_000 }, async () => {
-  const root = resolve('work', 'conflict-graph', randomUUID());
+  const root = await tempDir('conflict-graph', 'conflict-graph');
   mkdirSync(join(root, 'provider'), { recursive: true });
   mkdirSync(join(root, 'state'), { recursive: true });
 
@@ -104,7 +104,7 @@ test('a coexist resolution draws a conflict edge between two live memories', { t
 
     // Resolve as coexist with a scope-qualified replacement, then approve the follow-up.
     const qualified = request(`coexist-${randomUUID()}`, '并行总线在 PowerPC 上使用 64 位地址。');
-    qualified.provenance.applicability = 'PowerPC fixture environment';
+    
     const resolved = await fetch(`${origin}/v1/conflicts/resolve`, {
       method: 'POST', headers: operator,
       body: JSON.stringify({

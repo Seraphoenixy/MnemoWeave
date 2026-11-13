@@ -9,6 +9,7 @@ import { configure } from '../../apps/server/src/config.ts';
 import { SyncStore } from '../../packages/infrastructure/sync-store/src/index.ts';
 import { createSyncServer } from '../../packages/protocols/sync-http/src/index.ts';
 import { RememberInput } from '../../packages/core/contracts/src/index.ts';import { mnemonBinary } from './mnemon-binary.ts';
+import { tempDir } from '../support/temp.ts';
 
 /**
  * A memory published through the reviewed candidate path must reach the shared server.
@@ -22,7 +23,7 @@ const DEVICE_TOKEN = 'd'.repeat(32);
 const STREAM = 'formal-memories';
 
 test('a memory published by the reviewed worker path is shared with the remote', async () => {
-  const dir = resolve('work', 'publish-to-sync', randomUUID());
+  const dir = await tempDir('publish-through-sync', 'publish-to-sync');
   mkdirSync(join(dir, 'provider'), { recursive: true });
   mkdirSync(join(dir, 'state'), { recursive: true });
 
@@ -49,8 +50,7 @@ test('a memory published by the reviewed worker path is shared with the remote',
     const submitted = await app.app.remember({
       idempotencyKey: `publish-${randomUUID()}`, content: '通过授权写入链路发布的正式记忆。', tags: [],
       provenance: {
-        source: 'local-user', sourceReference: 'e2e:publish', evidence: ['publish'], verificationStatus: 'verified',
-        confidence: 1, applicability: 'alpha', limitations: '无（验收固定值）', lastVerified: '2026-11-10T12:00:00.000Z',
+        source: 'local-user', sourceReference: 'e2e:publish',
       },
     });
     assert.ok(['pending_review', 'needs_review'].includes(submitted.status));

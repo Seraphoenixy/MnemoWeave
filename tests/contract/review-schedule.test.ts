@@ -19,13 +19,11 @@ import { tempDir } from '../support/temp.ts';
 const request = (key: string): RememberRequest => ({
   idempotencyKey: key, content: `Migration fixture content ${key}.`, tags: [],
   provenance: {
-    source: 'migration-test', sourceReference: `fixture:${key}`, evidence: ['fixture'], verificationStatus: 'verified',
-    confidence: 0.5, applicability: 'isolated migration fixture', limitations: 'not production knowledge', lastVerified: null,
+    source: 'migration-test', sourceReference: `fixture:${key}`,
   },
 });
 
 async function published() {
-  await mkdir('work/tests', { recursive: true });
   const root = await tempDir('review-schedule', 'v23');
   const repo = new SqliteCandidates(join(root, 'governance.db'));
   const candidate = repo.submit(request('v23-migration-001'));
@@ -103,6 +101,6 @@ test('upgrading a v22 library keeps reviews impossible and clears stored knowled
   // A v23 library refuses to be edited into an inconsistent state by an immutable-revision update.
   const check = new DatabaseSync(path);
   try {
-    assert.throws(() => check.exec("UPDATE catalog_revisions SET applicability='changed'"), /immutable/i);
+    assert.throws(() => check.exec("UPDATE catalog_revisions SET category='changed'"), /immutable/i);
   } finally { check.close(); }
 });

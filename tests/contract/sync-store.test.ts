@@ -7,14 +7,14 @@ import { MnemoWeaveError, SyncChangeInput } from '../../packages/core/contracts/
 import type { SyncChangeRequest, SyncEntryDraftValue } from '../../packages/core/contracts/src/index.ts';
 import { buildChange, planPull, plainContent, VersionConflictError } from '../../packages/core/application/src/sync.ts';
 import { SyncStore } from '../../packages/infrastructure/sync-store/src/index.ts';
+import { tempDir } from '../support/temp.ts';
 
 const TOKEN_A = 'a'.repeat(32);
 const TOKEN_B = 'b'.repeat(32);
 const NOW = '2026-11-10T04:00:00.000Z';
 
-function openStore(archiveCapacityBytes?: number) {
-  const dir = join('work', 'sync-store-test', randomUUID());
-  mkdirSync(dir, { recursive: true });
+async function openStore(archiveCapacityBytes?: number): Promise<SyncStore> {
+  const dir = await tempDir('sync-store', 'store');
   const store = new SyncStore({ path: join(dir, 'sync.db'), now: () => NOW, ...(archiveCapacityBytes === undefined ? {} : { archiveCapacityBytes }) });
   store.enroll('device-a', TOKEN_A, [
     { stream: 'rules', canRead: true, canWrite: true },
@@ -57,8 +57,8 @@ function update(entry: SyncEntryDraftValue, baseVersion: number, changeId = rand
   return buildChange({ changeId, baseVersion, operation: 'update', entry });
 }
 
-test('devices authenticate by hashed token and lose access when revoked', () => {
-  const store = openStore();
+test('devices authenticate by hashed token and lose access when revoked', async () => {
+  const store = await openStore();
   try {
     assert.deepEqual(store.streams(TOKEN_A).streams.map((item) => item.stream).sort(), ['formal-memories', 'rules', `workspace-archives:${WORKSPACE}`]);
     assert.throws(() => store.streams('c'.repeat(32)), (error: unknown) => error instanceof MnemoWeaveError && error.code === 'UNAUTHORIZED');
@@ -69,8 +69,8 @@ test('devices authenticate by hashed token and lose access when revoked', () => 
   }
 });
 
-test('a submitted change gets the next version and a per-stream sequence', () => {
-  const store = openStore();
+test('a submitted change gets the next version and a per-stream sequence', async () => {
+  const store = await openStore();
   try {
     const first = create(draft());
     const accepted = store.submit(TOKEN_A, first);
@@ -84,8 +84,8 @@ test('a submitted change gets the next version and a per-stream sequence', () =>
   }
 });
 
-test('a reused change id with different content is rejected', () => {
-  const store = openStore();
+test('a reused change id with different content is rejected', async () => {
+  const store = await openStore();
   try {
     const entry = draft();
     const first = create(entry);
@@ -97,8 +97,8 @@ test('a reused change id with different content is rejected', () => {
   }
 });
 
-test('a stale base version is refused and reports the current version', () => {
-  const store = openStore();
+test('a stale base version is refused and reports the current version', async () => {
+  const store = await openStore();
   try {
     const entry = draft();
     store.submit(TOKEN_A, create(entry));
@@ -120,8 +120,8 @@ test('a stale base version is refused and reports the current version', () => {
   }
 });
 
-test('writing a stream the device was not granted is refused', () => {
-  const store = openStore();
+test('writing a stream the device was not granted is refused', async () => {
+  const store = await openStore();
   try {
     assert.throws(() => store.submit(TOKEN_B, create(draft())), (error: unknown) => error instanceof MnemoWeaveError && error.code === 'SCOPE_FORBIDDEN');
     assert.throws(() => store.submit(TOKEN_B, create(archiveDraft())), (error: unknown) => error instanceof MnemoWeaveError && error.code === 'SCOPE_FORBIDDEN');
@@ -133,8 +133,8 @@ test('writing a stream the device was not granted is refused', () => {
   }
 });
 
-test('a change cannot name a stream, and its stream is derived from the entry', () => {
-  const store = openStore();
+test('a change cannot name a stream, and its stream is derived from the entry', async () => {
+  const store = await openStore();
   try {
     const entry = draft();
     // A client-supplied stream or scope is not part of the protocol: strict parsing refuses it.
@@ -157,8 +157,8 @@ test('a change cannot name a stream, and its stream is derived from the entry', 
   }
 });
 
-test('sequences stay contiguous per stream and paging never skips', () => {
-  const store = openStore();
+test('sequences stay contiguous per stream and paging never skips', async () => {
+  const store = await openStore();
   try {
     const one = draft();
     const two = draft();
@@ -180,8 +180,8 @@ test('sequences stay contiguous per stream and paging never skips', () => {
   }
 });
 
-test('entry reads carry the revision chain and refuse other streams', () => {
-  const store = openStore();
+test('entry reads carry the revision chain and refuse other streams', async () => {
+  const store = await openStore();
   try {
     const entry = draft({ kind: 'formal-memory', payload: { category: 'fact', importance: 3, tags: [], entities: [], relations: [] } });
     store.submit(TOKEN_A, create(entry));
@@ -199,8 +199,8 @@ test('entry reads carry the revision chain and refuse other streams', () => {
   }
 });
 
-test('a snapshot is a consistent cut point and carries formal history', () => {
-  const store = openStore();
+test('a snapshot is a consistent cut point and carries formal history', async () => {
+  const store = await openStore();
   try {
     const formal = draft({ kind: 'formal-memory', payload: { category: 'decision', importance: 4, tags: ['sync'], entities: ['mnemoweave'], relations: [] } });
     store.submit(TOKEN_A, create(formal));
@@ -219,8 +219,8 @@ test('a snapshot is a consistent cut point and carries formal history', () => {
   }
 });
 
-test('pruning keeps a per-stream prefix rule and outlives changes with receipts', () => {
-  const store = openStore();
+test('pruning keeps a per-stream prefix rule and outlives changes with receipts', async () => {
+  const store = await openStore();
   try {
     const first = create(draft());
     store.submit(TOKEN_A, first);
@@ -246,8 +246,8 @@ test('pruning keeps a per-stream prefix rule and outlives changes with receipts'
   }
 });
 
-test('pruning one stream leaves other streams and their cursors alone', () => {
-  const store = openStore();
+test('pruning one stream leaves other streams and their cursors alone', async () => {
+  const store = await openStore();
   try {
     store.submit(TOKEN_A, create(draft({ kind: 'formal-memory', payload: { category: 'fact', importance: 3, tags: [], entities: [], relations: [] } })));
     store.submit(TOKEN_A, create(draft()));
@@ -260,8 +260,8 @@ test('pruning one stream leaves other streams and their cursors alone', () => {
   }
 });
 
-test('pruning a whole stream keeps the sequence head so devices are not stranded', () => {
-  const store = openStore();
+test('pruning a whole stream keeps the sequence head so devices are not stranded', async () => {
+  const store = await openStore();
   try {
     store.submit(TOKEN_A, create(draft()));
     store.submit(TOKEN_A, create(draft()));
@@ -299,9 +299,8 @@ test('a protocol-1 database is switched to streams without carrying an old curso
   const hash = (value: string) => createHash('sha256').update(value, 'utf8').digest('hex');
   const { join, resolve } = await import('node:path');
   const { randomUUID } = await import('node:crypto');
-  mkdirSync(join('work', 'tests'), { recursive: true });
-  const path = join(resolve('work/tests'), `sync-v2-${randomUUID()}`, 'sync.db');
-  mkdirSync(resolve(path, '..'), { recursive: true });
+  const legacyDir = await tempDir('sync-store', 'legacy-v2');
+  const path = join(legacyDir, 'sync.db');
   // Build the protocol-1 shape by hand: scope grants, a shared scope head and a few changes.
   const db = new DatabaseSync(path);
   db.exec(`
@@ -346,8 +345,8 @@ test('a protocol-1 database is switched to streams without carrying an old curso
   } finally { store.close(); }
 });
 
-test('remote archive capacity counts active bodies and frees space after confirmed archive', () => {
-  const store = openStore(8);
+test('remote archive capacity counts active bodies and frees space after confirmed archive', async () => {
+  const store = await openStore(8);
   try {
     const first = archiveDraft({ content: plainContent('12345678') });
     const second = archiveDraft({ content: plainContent('a') });
@@ -358,16 +357,16 @@ test('remote archive capacity counts active bodies and frees space after confirm
   } finally { store.close(); }
 });
 
-test('remote rule capacity includes disabled rules', () => {
-  const store = openStore();
+test('remote rule capacity includes disabled rules', async () => {
+  const store = await openStore();
   try {
     store.submit(TOKEN_A, create(draft({ payload: { enabled: false }, content: plainContent('a'.repeat(9999)) })));
     assert.throws(() => store.submit(TOKEN_A, create(draft())), { code: 'RULE_CAPACITY_EXCEEDED' });
   } finally { store.close(); }
 });
 
-test('remote same-body formal creates reuse the authoritative id and receipt without advancing the stream', () => {
-  const store = openStore();
+test('remote same-body formal creates reuse the authoritative id and receipt without advancing the stream', async () => {
+  const store = await openStore();
   try {
     const payload = { category: 'fact' as const, importance: 3, tags: [], entities: [], relations: [] };
     const entry = draft({ kind: 'formal-memory', payload });

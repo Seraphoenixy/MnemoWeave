@@ -1,182 +1,207 @@
 import type { UiGraph, UiGraphEdge } from '../shared/contract.ts';
 
 /**
- * Deterministic layout for the relation graph.
+ * Relation-graph layout, following the DSH memory graph.
  *
- * No physics simulation: a force layout would settle differently on every render, so the same
- * graph would look like it changed between visits, and a test could not assert anything about it.
- * This places nodes on concentric rings by hop distance from a chosen focus — the arrangement is a
- * pure function of the input, which is both predictable to look at and cheap to verify.
+ * The reference implementation does not draw concentric rings: it seeds nodes into category
+ * clusters and then relaxes them with a force pass, so connected memories sit near each other and
+ * unrelated ones drift apart. That is what makes a dense graph readable, and rings cannot express
+ * it. The pass is deterministic — seeded by a hash of the node id and cooled by a fixed schedule —
+ * so the same graph draws the same way on every visit, which a randomised simulation would not.
+ *
+ * Positions live in a fixed drawing space; the caller maps that space into its viewBox.
  */
 
-export interface LayoutNode {
-  memoryId: string;
-  /** Centre in the layout's own coordinate space. */
-  x: number;
-  y: number;
-  /** 0 for the focus, 1 for its direct neighbours, and so on. */
-  hop: number;
-  /** Circle radius, driven by importance when the revision recorded one. */
-  radius: number;
-  /** A retired node is drawn apart: it is reachable history, not a current memory. */
-  retired: boolean;
-  category?: string;
+export const GRAPH_WIDTH = 930;
+export const GRAPH_HEIGHT = 520;
+const MARGIN_X = 58;
+const MARGIN_Y = 58;
+/** Cluster order: the drawing groups kinds the way the page lists them. */
+const CATEGORY_ORDER = ['entity', 'preference', 'decision', 'fact', 'insight', 'context', 'general'];
+const RELAX_ITERATIONS = 150;
+
+export interface GraphPosition { x: number; y: number }
+export type GraphPositions = Map<string, GraphPosition>;
+export type GraphLayoutMode = 'natural' | 'uniform' | 'custom';
+
+/**
+ * Stable spread value for one id.
+ *
+ * The cluster seeds need a spread that does not change between renders. A hash gives that; a
+ * random number would make the first frame jump every time the page reloads.
+ */
+function hash(value: string): number {
+  let result = 2166136261;
+  for (const char of value) result = Math.imul(result ^ char.charCodeAt(0), 16777619);
+  return result >>> 0;
 }
 
-export interface LayoutLink {
-  relationId: string;
-  kind: 'Supersedes' | 'RelatedTo' | 'Conflicts';
-  sourceId: string;
-  targetId: string;
-  x1: number;
-  y1: number;
-  x2: number;
-  y2: number;
-}
-
-export interface GraphLayout {
-  nodes: LayoutNode[];
-  links: LayoutLink[];
-  /** Total extent, so the caller can size its viewBox without guessing. */
-  width: number;
-  height: number;
-  /** Nodes with no relation at all: placed on the outermost ring and called out separately. */
-  isolated: string[];
-}
-
-export interface LayoutOptions {
-  /** Prefer this memory as the centre; otherwise the most connected node is used. */
-  focusId?: string;
-  /** Distance between rings, in layout units. */
-  ringGap?: number;
-  /** Space around the drawing. */
-  padding?: number;
+export function clampGraphPosition(position: GraphPosition): GraphPosition {
+  return {
+    x: Math.min(GRAPH_WIDTH - MARGIN_X, Math.max(MARGIN_X, position.x)),
+    y: Math.min(GRAPH_HEIGHT - MARGIN_Y, Math.max(MARGIN_Y, position.y)),
+  };
 }
 
 /**
- * Choose the centre.
+ * Category anchors on a ring, so several clusters do not all collapse onto the centre.
  *
- * Degree first so the densest part of the graph lands in the middle, then memoryId so two nodes
- * with the same degree cannot swap places between renders.
+ * A single category sits in the middle: spreading one cluster around a ring would only make the
+ * drawing look like it is missing something.
  */
-function chooseFocus(nodes: readonly string[], edges: readonly { sourceMemoryId: string; targetMemoryId: string }[]): string | null {
-  if (nodes.length === 0) return null;
-  const degree = new Map<string, number>(nodes.map(id => [id, 0]));
-  for (const edge of edges) {
-    if (edge.sourceMemoryId !== edge.targetMemoryId) {
-      degree.set(edge.sourceMemoryId, (degree.get(edge.sourceMemoryId) ?? 0) + 1);
-      degree.set(edge.targetMemoryId, (degree.get(edge.targetMemoryId) ?? 0) + 1);
-    }
+export function categoryAnchors(grouped: Map<string, unknown[]>): Map<string, GraphPosition> {
+  const categories = [...grouped.keys()].sort((left, right) => {
+    const leftIndex = CATEGORY_ORDER.indexOf(left);
+    const rightIndex = CATEGORY_ORDER.indexOf(right);
+    return (leftIndex < 0 ? CATEGORY_ORDER.length : leftIndex) - (rightIndex < 0 ? CATEGORY_ORDER.length : rightIndex);
+  });
+  const anchors = new Map<string, GraphPosition>();
+  if (categories.length === 1) {
+    anchors.set(categories[0]!, { x: GRAPH_WIDTH / 2, y: GRAPH_HEIGHT / 2 });
+    return anchors;
   }
-  return [...nodes].sort((left, right) => {
-    const byDegree = (degree.get(right) ?? 0) - (degree.get(left) ?? 0);
-    return byDegree !== 0 ? byDegree : left < right ? -1 : left > right ? 1 : 0;
-  })[0] ?? null;
+  categories.forEach((category, index) => {
+    const angle = -Math.PI / 2 + (index / categories.length) * Math.PI * 2;
+    anchors.set(category, {
+      x: GRAPH_WIDTH / 2 + Math.cos(angle) * Math.min(250, 115 + categories.length * 23),
+      y: GRAPH_HEIGHT / 2 + Math.sin(angle) * Math.min(165, 78 + categories.length * 15),
+    });
+  });
+  return anchors;
 }
 
-function radiusFor(importance: number | undefined): number {
-  // Absent importance is not "0": it gets the default size rather than the smallest one.
-  return importance === undefined ? 9 : 6 + importance * 1.4;
-}
-
-export function layoutGraph(graph: UiGraph, options: LayoutOptions = {}): GraphLayout {
-  const ringGap = options.ringGap ?? 120;
-  const padding = options.padding ?? 60;
-  const ids = graph.nodes.map(node => node.memoryId);
-  const byId = new Map(graph.nodes.map(node => [node.memoryId, node]));
-  if (ids.length === 0) return { nodes: [], links: [], width: padding * 2, height: padding * 2, isolated: [] };
-
-  const adjacency = new Map<string, string[]>(ids.map(id => [id, []]));
-  for (const edge of graph.edges) {
-    if (edge.sourceMemoryId === edge.targetMemoryId) continue;
-    adjacency.get(edge.sourceMemoryId)?.push(edge.targetMemoryId);
-    adjacency.get(edge.targetMemoryId)?.push(edge.sourceMemoryId);
+/**
+ * Relax the seeded clusters into a readable arrangement.
+ *
+ * Three forces: repulsion keeps nodes from overlapping, springs pull connected nodes to a distance
+ * that depends on the edge type (an entity link is tighter than a semantic one), and a weak pull
+ * toward the category anchor keeps clusters from dissolving into each other.
+ */
+export function naturalGraphPositions(nodes: readonly UiGraphNode[], edges: readonly UiGraphEdge[]): GraphPositions {
+  const positions: GraphPositions = new Map();
+  const grouped = new Map<string, UiGraphNode[]>();
+  for (const node of nodes) {
+    const category = node.category ?? 'general';
+    grouped.set(category, [...(grouped.get(category) ?? []), node]);
   }
-  const focus = options.focusId !== undefined && byId.has(options.focusId) ? options.focusId : chooseFocus(ids, graph.edges);
-  // A focus that is not in the graph would otherwise leave every node at hop 0.
-  const centre = focus ?? ids[0]!;
-
-  // Breadth-first hop distance from the focus.
-  const hop = new Map<string, number>([[centre, 0]]);
-  const queue = [centre];
-  while (queue.length > 0) {
-    const current = queue.shift()!;
-    for (const neighbour of adjacency.get(current) ?? []) {
-      if (hop.has(neighbour)) continue;
-      hop.set(neighbour, (hop.get(current) ?? 0) + 1);
-      queue.push(neighbour);
-    }
+  const anchors = categoryAnchors(grouped);
+  for (const [category, items] of grouped) {
+    const anchor = anchors.get(category) ?? { x: GRAPH_WIDTH / 2, y: GRAPH_HEIGHT / 2 };
+    items.forEach((node, index) => {
+      const seed = hash(nodeKey(node));
+      // The golden angle spreads successive nodes without ever repeating a direction.
+      const angle = index * 2.399963 + ((seed % 37) / 37) * 0.4;
+      const radius = items.length === 1 ? 0 : 24 + Math.sqrt(index + 1) * 35;
+      positions.set(nodeKey(node), clampGraphPosition({ x: anchor.x + Math.cos(angle) * radius, y: anchor.y + Math.sin(angle) * radius }));
+    });
   }
-  // Anything unreachable has no relation at all; it is drawn on its own ring rather than at the
-  // centre, so "isolated" stays visually distinct from "central".
-  const isolated = ids.filter(id => !hop.has(id)).sort();
-  const isolationHop = isolated.length === 0 ? 0 : Math.max(0, ...hop.values()) + 1;
 
-  const rings = new Map<number, string[]>();
-  for (const id of ids) {
-    const level = hop.get(id) ?? isolationHop;
-    const ring = rings.get(level) ?? [];
-    ring.push(id);
-    rings.set(level, ring);
-  }
-  // Sorting inside a ring by id keeps the drawing identical run to run.
-  for (const ring of rings.values()) ring.sort();
-
-  const maxHop = Math.max(...rings.keys());
-  // The drawing is symmetric around the centre, so one measurement describes both axes.
-  const half = maxHop * ringGap;
-  const centrePoint = half + padding;
-  const placed: LayoutNode[] = [];
-  for (const [level, ring] of [...rings].sort((left, right) => left[0] - right[0])) {
-    if (level === 0) {
-      for (const id of ring) {
-        const node = byId.get(id)!;
-        placed.push({
-          memoryId: id, x: centrePoint, y: centrePoint, hop: 0, radius: radiusFor(node.importance), retired: node.state !== 'active',
-          ...(node.category === undefined ? {} : { category: node.category }),
-        });
+  const velocities = new Map(nodes.map(node => [nodeKey(node), { x: 0, y: 0 }]));
+  const visibleIds = new Set(nodes.map(nodeKey));
+  const visibleEdges = edges.filter(edge => visibleIds.has(edge.sourceMemoryId) && visibleIds.has(edge.targetMemoryId));
+  for (let iteration = 0; iteration < RELAX_ITERATIONS; iteration += 1) {
+    const cooling = 1 - iteration / 180;
+    for (let leftIndex = 0; leftIndex < nodes.length; leftIndex += 1) {
+      const left = nodes[leftIndex]!;
+      const leftPosition = positions.get(nodeKey(left))!;
+      const leftVelocity = velocities.get(nodeKey(left))!;
+      for (let rightIndex = leftIndex + 1; rightIndex < nodes.length; rightIndex += 1) {
+        const right = nodes[rightIndex]!;
+        const rightPosition = positions.get(nodeKey(right))!;
+        const rightVelocity = velocities.get(nodeKey(right))!;
+        let dx = leftPosition.x - rightPosition.x;
+        let dy = leftPosition.y - rightPosition.y;
+        // Coincident points have no direction to push apart; derive one from the ids so the
+        // result stays deterministic instead of depending on iteration order.
+        if (dx === 0 && dy === 0) {
+          dx = ((hash(nodeKey(left)) % 13) - 6) || 1;
+          dy = ((hash(nodeKey(right)) % 11) - 5) || -1;
+        }
+        const distanceSquared = Math.max(100, dx * dx + dy * dy);
+        const distance = Math.sqrt(distanceSquared);
+        const repulsion = Math.min(9, 18000 / distanceSquared) * cooling;
+        const collision = distance < 66 ? (66 - distance) * 0.08 : 0;
+        const force = repulsion + collision;
+        const forceX = (dx / distance) * force;
+        const forceY = (dy / distance) * force;
+        leftVelocity.x += forceX; leftVelocity.y += forceY;
+        rightVelocity.x -= forceX; rightVelocity.y -= forceY;
       }
-      continue;
     }
-    const radius = level * ringGap;
-    ring.forEach((id, index) => {
-      // Even spacing, starting at the top so the first node of the biggest ring is at 12 o'clock.
-      const angle = (index / ring.length) * Math.PI * 2 - Math.PI / 2;
-      const node = byId.get(id)!;
-      placed.push({
-        memoryId: id,
-        x: centrePoint + Math.cos(angle) * radius,
-        y: centrePoint + Math.sin(angle) * radius,
-        hop: level,
-        radius: radiusFor(node.importance),
-        retired: node.state !== 'active',
-        ...(node.category === undefined ? {} : { category: node.category }),
-      });
-    });
+    for (const edge of visibleEdges) {
+      const source = positions.get(edge.sourceMemoryId)!;
+      const target = positions.get(edge.targetMemoryId)!;
+      const sourceVelocity = velocities.get(edge.sourceMemoryId)!;
+      const targetVelocity = velocities.get(edge.targetMemoryId)!;
+      const dx = target.x - source.x;
+      const dy = target.y - source.y;
+      const distance = Math.max(1, Math.hypot(dx, dy));
+      // A sparse graph needs longer edges to fill the canvas; a dense one needs them short.
+      const sparseScale = nodes.length <= 3 ? 2 : nodes.length <= 8 ? 1.45 : 1;
+      const desired = desiredEdgeLength(edge.kind) * sparseScale;
+      const spring = (distance - desired) * 0.018 * cooling;
+      const forceX = (dx / distance) * spring;
+      const forceY = (dy / distance) * spring;
+      sourceVelocity.x += forceX; sourceVelocity.y += forceY;
+      targetVelocity.x -= forceX; targetVelocity.y -= forceY;
+    }
+    for (const node of nodes) {
+      const key = nodeKey(node);
+      const position = positions.get(key)!;
+      const velocity = velocities.get(key)!;
+      const anchor = anchors.get(node.category ?? 'general') ?? { x: GRAPH_WIDTH / 2, y: GRAPH_HEIGHT / 2 };
+      velocity.x += (anchor.x - position.x) * 0.0035 * cooling + (GRAPH_WIDTH / 2 - position.x) * 0.0008;
+      velocity.y += (anchor.y - position.y) * 0.0035 * cooling + (GRAPH_HEIGHT / 2 - position.y) * 0.0008;
+      velocity.x = Math.max(-12, Math.min(12, velocity.x * 0.76));
+      velocity.y = Math.max(-12, Math.min(12, velocity.y * 0.76));
+      positions.set(key, clampGraphPosition({ x: position.x + velocity.x, y: position.y + velocity.y }));
+    }
   }
+  return positions;
+}
 
-  const position = new Map(placed.map(node => [node.memoryId, node]));
-  const links: LayoutLink[] = [];
-  for (const edge of graph.edges) {
-    const source = position.get(edge.sourceMemoryId);
-    const target = position.get(edge.targetMemoryId);
-    // The Server already excludes undrawable edges; skipping again keeps the renderer total.
-    if (source === undefined || target === undefined || edge.sourceMemoryId === edge.targetMemoryId) continue;
-    links.push({
-      relationId: edge.relationId, kind: edge.kind,
-      sourceId: edge.sourceMemoryId, targetId: edge.targetMemoryId,
-      x1: source.x, y1: source.y, x2: target.x, y2: target.y,
+/** Resting length per relation kind: closer for a carried entity, wider for a loose association. */
+function desiredEdgeLength(kind: UiGraphEdge['kind']): number {
+  if (kind === 'Conflicts') return 138;
+  if (kind === 'Supersedes') return 94;
+  return 106;
+}
+
+/** Even grid, used by the uniform layout button. */
+export function uniformGraphPositions(nodes: readonly UiGraphNode[]): GraphPositions {
+  const positions: GraphPositions = new Map();
+  const ordered = [...nodes].sort((left, right) => {
+    const difference = CATEGORY_ORDER.indexOf(left.category ?? 'general') - CATEGORY_ORDER.indexOf(right.category ?? 'general');
+    return difference === 0 ? left.memoryId.localeCompare(right.memoryId) : difference;
+  });
+  const columns = Math.max(1, Math.ceil(Math.sqrt(ordered.length * 1.65)));
+  const rows = Math.max(1, Math.ceil(ordered.length / columns));
+  const cellWidth = (GRAPH_WIDTH - MARGIN_X * 2) / columns;
+  const cellHeight = (GRAPH_HEIGHT - MARGIN_Y * 2) / rows;
+  ordered.forEach((node, index) => {
+    const row = Math.floor(index / columns);
+    const column = index % columns;
+    const rowLength = Math.min(columns, ordered.length - row * columns);
+    const rowOffset = (columns - rowLength) * cellWidth / 2;
+    positions.set(node.memoryId, {
+      x: MARGIN_X + rowOffset + cellWidth * (column + 0.5),
+      y: MARGIN_Y + cellHeight * (row + 0.5),
     });
-  }
+  });
+  return positions;
+}
 
-  const size = centrePoint * 2;
-  return {
-    nodes: placed,
-    links,
-    width: size,
-    height: size,
-    isolated,
-  };
+/** The id a node is positioned by. Entity nodes carry no memory id, so theirs is derived. */
+export function nodeKey(node: UiGraphNode): string {
+  return node.memoryId;
+}
+
+export interface UiGraphNode {
+  memoryId: string;
+  state: 'active' | 'superseded' | 'unverified';
+  publishedAt: string;
+  category?: string;
+  importance?: number;
 }
 
 /** Edge label worth drawing: a supersede changes what is served, a relation does not. */

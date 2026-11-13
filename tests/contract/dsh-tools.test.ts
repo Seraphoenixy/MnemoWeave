@@ -249,11 +249,6 @@ test('remember submits a candidate with host-generated provenance, never a publi
   assert.equal('projectId' in body, false);
   assert.equal(typeof body.provenance.source, 'string');
   assert.ok(body.provenance.sourceReference.length > 0);
-  assert.equal(body.provenance.verificationStatus, 'unverified');
-  assert.equal(body.provenance.lastVerified, null);
-  assert.ok(body.provenance.evidence.length > 0);
-  // The entry never carries a workspace: the formal collection is shared.
-  assert.equal(body.provenance.applicability, 'shared collection');
   // The model never receives a publication: without a delegation capability the answer is a
   // candidate receipt, which the Host must report as pending rather than as published.
   assert.equal((result as { status?: string }).status, 'candidate');

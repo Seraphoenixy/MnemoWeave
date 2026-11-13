@@ -1,4 +1,4 @@
-import type { Assessment, CandidateRecord } from '../../contracts/src/index.ts';
+import type { CandidateRecord } from '../../contracts/src/index.ts';
 
 export interface WriteResult { id: string; action: 'added' | 'skipped' }
 export interface WriteProvider {
@@ -18,7 +18,7 @@ export interface WorkflowRepository {
   acquire(owner: string, duration: number): boolean;
   renew(owner: string, duration: number): boolean;
   release(owner: string): void;
-  review(id: string, decision: ReviewDecision, actor: string, reason: string, assessment: Assessment | null, owner?: string): CandidateRecord;
+  review(id: string, decision: ReviewDecision, actor: string, reason: string, owner?: string): CandidateRecord;
   claim(owner: string): Job | undefined;
   writing(job: Job): void;
   finish(job: Job, result: WriteResult, reconciled: boolean): void;

@@ -123,7 +123,35 @@ test('reading many bodies returns each one and keeps a failed id out of the way'
   const rows = await provider.readMany(['a', 'b', 'missing', 'c']);
   assert.deepEqual(rows, [{ id: 'a', content: '甲' }, { id: 'b', content: '乙' }, { id: 'c', content: '丙' }]);
   // The order the caller asked for is preserved, and the unreadable id left no placeholder.
-  assert.deepEqual(reads.sort(), ['a', 'b', 'c', 'missing']);
+  // It is read twice: a batch failure is indistinguishable from lock contention, so one serial
+  // retry decides whether the id is genuinely unreadable before it is dropped from the page.
+  assert.deepEqual(reads.sort(), ['a', 'b', 'c', 'missing', 'missing']);
+});
+
+test('a first batch settles the store before reading several bodies at once', async () => {
+  // A fresh adapter does not yet know the store exists, so its reads would run without
+  // `--readonly` and four of them would race the CLI's own migration lock. The first read is
+  // therefore serial; everything after it may run concurrently.
+  const order: string[] = [];
+  let inFlight = 0;
+  let overlap = 0;
+  const provider = new MnemonCliProvider({
+    binary: process.execPath, dataDir, store: 'acceptance',
+    runner: async args => {
+      if (args[0] === '--version') return 'mnemon version 0.2.13';
+      const id = args[args.length - 1]!;
+      inFlight += 1;
+      overlap = Math.max(overlap, inFlight);
+      order.push(id);
+      await new Promise(done => setTimeout(done, 5));
+      inFlight -= 1;
+      return JSON.stringify({ id, content: `正文 ${id}` });
+    },
+  });
+  const rows = await provider.readMany(['a', 'b', 'c', 'd', 'e', 'f']);
+  assert.equal(rows.length, 6);
+  assert.equal(order[0], 'a', 'the first read runs alone');
+  assert.ok(overlap > 1, 'later reads still run concurrently');
 });
 
 test('a batched read of cached bodies starts no process at all', async () => {

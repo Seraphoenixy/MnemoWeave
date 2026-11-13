@@ -13,6 +13,7 @@ import { SyncStore } from '../../packages/infrastructure/sync-store/src/index.ts
 import { createSyncServer } from '../../packages/protocols/sync-http/src/index.ts';
 import { MnemoWeaveError, RememberInput } from '../../packages/core/contracts/src/index.ts';
 import { mnemonBinary } from './mnemon-binary.ts';
+import { tempDir } from '../support/temp.ts';
 
 /**
  * Remote outage: an edit must be refused instead of half-applied, the change must stay
@@ -57,8 +58,7 @@ async function seedPublishedMemory(root: string): Promise<string> {
   const request = RememberInput.parse({
     idempotencyKey: `seed-${randomUUID()}`, content: '断网前的初始正文。', tags: [],
     provenance: {
-      source: 'local-user', sourceReference: 'e2e:offline', evidence: ['seed'], verificationStatus: 'verified',
-      confidence: 1, applicability: 'alpha', limitations: '无（验收固定值）', lastVerified: '2026-11-10T12:00:00.000Z',
+      source: 'local-user', sourceReference: 'e2e:offline',
     },
   });
   const candidate = repo.submit(request);
@@ -70,7 +70,7 @@ async function seedPublishedMemory(root: string): Promise<string> {
 
 test('an edit that never reaches the remote is queued, not applied, and drains after recovery', async () => {
   const port = await freePort();
-  const root = resolve('work', 'offline-never-reached', randomUUID());
+  const root = await tempDir('offline-recovery', 'offline-never-reached');
   mkdirSync(root, { recursive: true });
   const remote = new SyncStore({ path: join(root, 'remote.db') });
   remote.enroll('device-local', TOKEN, [{ stream: STREAM, canRead: true, canWrite: true }]);
@@ -104,7 +104,7 @@ test('an edit that never reaches the remote is queued, not applied, and drains a
 });
 
 test('an edit lost after a successful write becomes pending confirmation and still converges', async () => {
-  const root = resolve('work', 'offline-lost-connection', randomUUID());
+  const root = await tempDir('offline-recovery', 'offline-lost-connection');
   mkdirSync(root, { recursive: true });
   const remote = new SyncStore({ path: join(root, 'remote.db') });
   remote.enroll('device-local', TOKEN, [{ stream: STREAM, canRead: true, canWrite: true }]);

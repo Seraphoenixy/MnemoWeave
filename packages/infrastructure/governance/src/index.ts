@@ -1,7 +1,7 @@
 import { SqliteTurnStore } from './turn-store.ts';
 import { SqliteSyncLedger } from './sync-ledger.ts';
 import { SqliteMemoryStore } from './memory-store.ts';
-import { SqliteDistillationStore, SqliteEvidenceStore, SqliteWorkspaceStore, SqliteWriteTaskStore } from './workspace-store.ts';
+import { SqliteDistillationStore, SqliteWorkspaceStore, SqliteWriteTaskStore } from './workspace-store.ts';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, statSync, readFileSync, writeFileSync, renameSync, readdirSync, unlinkSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
@@ -10,6 +10,7 @@ import type { CandidateRepository } from '../../../core/application/src/index.ts
 import { Candidate, CandidateRequest, FORMAL_STREAM, MnemoWeaveError, RememberInput } from '../../../core/contracts/src/index.ts';
 import type { CandidateRecord, LegacyWorkspaceMapValue, RememberRequest, RetentionSweepReport } from '../../../core/contracts/src/index.ts';
 import { CANDIDATE_BODY_RETENTION_DAYS } from './events.ts';
+import { SCHEMA_V23 } from './schema-baseline.ts';
 
 export * from './sync-ledger.ts';
 export * from './memory-store.ts';
@@ -18,7 +19,6 @@ const DAY_MS = 86_400_000;
 /** Larger candidate bodies live in content-addressed files; metadata stays in SQLite. */
 const BLOB_THRESHOLD_BYTES = 4096;
 const BLOB_ORPHAN_GRACE_MS = 3_600_000;
-import type { Assessment } from '../../../core/contracts/src/index.ts';
 import type { WorkflowRepository, ReviewDecision, Job, WriteResult } from '../../../core/application/src/workflow-ports.ts';
 import { SqliteMemoryCatalog } from './catalog.ts';
 import { SessionEventStore } from './events.ts';
@@ -54,7 +54,6 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
   readonly workspaces: SqliteWorkspaceStore;
   readonly writeTasks: SqliteWriteTaskStore;
   readonly distillations: SqliteDistillationStore;
-  readonly evidence: SqliteEvidenceStore;
   /**
    * Called after a reviewed publication commits, so the Server can offer the published
    * memory to shared sync. The catalog's `syncHook` is an internal change stream, not a
@@ -87,22 +86,13 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
       if (version > 23) throw new Error('Unsupported governance schema version');
         if (version === 0) {
           if (this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").get()) throw new Error('Refusing to initialize an unidentified existing database');
-          this.db.exec(`
-            CREATE TABLE governance_candidates (
-              id TEXT PRIMARY KEY,
-              idempotency_key TEXT NOT NULL UNIQUE,
-              request_hash TEXT NOT NULL,
-              request_json TEXT NOT NULL,
-              status TEXT NOT NULL CHECK(status='pending_review'),
-              submitted_at TEXT NOT NULL
-            ) STRICT;
-            CREATE TABLE governance_submission_receipts (
-              id TEXT PRIMARY KEY,
-              candidate_id TEXT NOT NULL UNIQUE REFERENCES governance_candidates(id),
-              status TEXT NOT NULL CHECK(status='candidate')
-            ) STRICT;
-            PRAGMA user_version=1;
-          `);
+          // A new database is created directly at the current version. Walking it through the
+          // migration chain would write 22 `VACUUM INTO` snapshots of an empty database and cost
+          // about half a minute per store; those snapshots protect data that does not exist yet.
+          // The chain below stays the only path for an existing database, and the baseline is
+          // checked against it by `tests/contract/schema-baseline.test.ts`.
+          for (const statement of SCHEMA_V23) this.db.exec(statement);
+          this.db.exec('PRAGMA user_version=23;');
         } else {
           // Validate ownership before changing any persistent database settings.
           this.db.prepare(`SELECT c.id, c.idempotency_key, c.request_hash, c.request_json,
@@ -165,7 +155,6 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
               stage TEXT NOT NULL CHECK(stage IN ('hot','archived','cleared')), important INTEGER NOT NULL DEFAULT 0, protected_reason TEXT,
               archived_at TEXT, inferred INTEGER NOT NULL DEFAULT 0, payload_json TEXT NOT NULL, PRIMARY KEY(host_id,event_id));
             CREATE TABLE session_event_refs(host_id TEXT NOT NULL, event_id TEXT NOT NULL, candidate_id TEXT NOT NULL REFERENCES governance_candidates(id), PRIMARY KEY(host_id,event_id,candidate_id));
-            ALTER TABLE catalog_revisions ADD COLUMN applicability TEXT;
             ALTER TABLE catalog_revisions ADD COLUMN scope TEXT;
             PRAGMA user_version=7;
           `);
@@ -183,10 +172,10 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
           const revisions = this.db.prepare(`SELECT r.id AS revision_id, r.candidate_id, c.request_json FROM catalog_revisions r
             JOIN governance_candidates c ON c.id=r.candidate_id`).all();
           this.db.exec('DROP TRIGGER IF EXISTS catalog_revisions_immutable_update;');
-          const setRevision = this.db.prepare('UPDATE catalog_revisions SET applicability=?, scope=? WHERE id=?');
+          const setRevision = this.db.prepare('UPDATE catalog_revisions SET scope=? WHERE id=?');
           for (const row of revisions) {
-            const request = RememberInput.parse(JSON.parse(String(row['request_json'])));
-            setRevision.run(request.provenance.applicability, 'global', String(row['revision_id']));
+            RememberInput.parse(JSON.parse(String(row['request_json'])));
+            setRevision.run('global', String(row['revision_id']));
           }
           this.db.exec(`CREATE TRIGGER catalog_revisions_immutable_update BEFORE UPDATE ON catalog_revisions BEGIN SELECT RAISE(ABORT,'Revision is immutable'); END;`);
           this.db.exec('UPDATE governance_lifecycle SET changed_at=(SELECT submitted_at FROM governance_candidates c WHERE c.id=governance_lifecycle.candidate_id) WHERE changed_at IS NULL');
@@ -226,14 +215,6 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
         this.transaction(() => {
           if (Number(this.db.prepare('PRAGMA user_version').get()!['user_version']) !== 9) return;
           this.db.exec(`
-            CREATE TABLE runtime_user_events(host_id TEXT NOT NULL,event_id TEXT NOT NULL,event_json TEXT NOT NULL,created_ms INTEGER NOT NULL,PRIMARY KEY(host_id,event_id));
-            CREATE TABLE runtime_projects(id TEXT PRIMARY KEY);
-            CREATE TABLE runtime_pins(id TEXT PRIMARY KEY,pin_json TEXT NOT NULL);
-            CREATE TABLE runtime_sessions(host_id TEXT NOT NULL,session_id TEXT NOT NULL,project_id TEXT,task TEXT,entries_json TEXT NOT NULL,revision INTEGER NOT NULL,closed INTEGER NOT NULL,updated_ms INTEGER NOT NULL,capture_state TEXT NOT NULL,PRIMARY KEY(host_id,session_id));
-            CREATE TABLE runtime_event_ids(host_id TEXT NOT NULL,event_id TEXT NOT NULL,created_ms INTEGER NOT NULL,event_hash TEXT NOT NULL,PRIMARY KEY(host_id,event_id));
-            CREATE TABLE runtime_capture_tasks(id TEXT PRIMARY KEY,host_id TEXT NOT NULL,session_id TEXT NOT NULL,project_id TEXT,input_json TEXT NOT NULL,state TEXT NOT NULL,owner TEXT,until_ms INTEGER NOT NULL,attempts INTEGER NOT NULL,next_ms INTEGER NOT NULL,created_ms INTEGER NOT NULL);
-            CREATE TABLE runtime_capture_runs(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,owner TEXT NOT NULL,state TEXT NOT NULL,started_ms INTEGER NOT NULL,ended_ms INTEGER);
-            CREATE TABLE runtime_capture_receipts(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,run_id TEXT NOT NULL,result_json TEXT NOT NULL,created_ms INTEGER NOT NULL);
             PRAGMA user_version=10;
           `);
         });
@@ -568,18 +549,6 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
               created_at TEXT NOT NULL,
               task_id TEXT
             ) STRICT;
-            CREATE TABLE IF NOT EXISTS host_evidence(
-              id TEXT PRIMARY KEY,
-              host_id TEXT NOT NULL,
-              session_id TEXT NOT NULL,
-              turn_id TEXT NOT NULL,
-              kind TEXT NOT NULL,
-              ref TEXT NOT NULL,
-              summary TEXT NOT NULL,
-              detail TEXT,
-              created_at TEXT NOT NULL
-            ) STRICT;
-            CREATE INDEX IF NOT EXISTS host_evidence_turn ON host_evidence(host_id, session_id, turn_id);
             CREATE TABLE IF NOT EXISTS turn_sessions(
               host_id TEXT NOT NULL,
               session_id TEXT NOT NULL,
@@ -736,7 +705,6 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
       this.workspaces = new SqliteWorkspaceStore(this.db, operation => this.transaction(operation));
       this.writeTasks = new SqliteWriteTaskStore(this.db, operation => this.transaction(operation));
       this.distillations = new SqliteDistillationStore(this.db, operation => this.transaction(operation));
-      this.evidence = new SqliteEvidenceStore(this.db, operation => this.transaction(operation));
       this.turns = new SqliteTurnStore(this.db, operation => this.transaction(operation));
       this.events = new SessionEventStore(this.db, operation => this.transaction(operation));
       this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;');
@@ -849,16 +817,25 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
       WHERE (l.candidate_id IS NULL OR l.status='pending_review') ${filter} ORDER BY c.rowid LIMIT 1`).get(...exclude);
     return row ? String(row['id']) : undefined;
   }
+  /**
+   * Is this candidate the same knowledge as an already published one?
+   *
+   * The comparison is the body alone, matching how the Provider decides: two entries are the same
+   * fact when their text is byte-identical. Comparing more would make the answer depend on fields
+   * that identify a submission rather than describe the knowledge — `sourceReference` carries a
+   * fresh UUID for every user write, so any comparison including it can never be equal and would
+   * quietly turn every duplicate into a manual review. Tags are excluded for the same reason the
+   * Provider excludes them: the same fact re-tagged is still the same fact.
+   */
   isKnownDuplicate(candidateId: string, providerIds: string[]): boolean {
     const incoming = this.get(candidateId).request;
     return providerIds.every(providerId => this.db.prepare(`SELECT r.candidate_id FROM governance_candidates c
       JOIN governance_execution_receipts r ON r.candidate_id=c.id
       WHERE json_extract(r.result_json,'$.status')='persisted' AND json_extract(r.result_json,'$.providerMemoryId')=?`).all(providerId).some(row => {
-      const candidateId = String(row['candidate_id']);
-      const body = this.db.prepare('SELECT content FROM governance_candidate_bodies WHERE candidate_id=?').get(candidateId);
+      const priorCandidateId = String(row['candidate_id']);
+      const body = this.db.prepare('SELECT content FROM governance_candidate_bodies WHERE candidate_id=?').get(priorCandidateId);
       if (!body) return false; // cleared body: no content comparison, never a false duplicate
-      const prior = CandidateRequest.parse(JSON.parse(String(this.db.prepare('SELECT request_json FROM governance_candidates WHERE id=?').get(candidateId)!['request_json'])));
-      return String(body['content']) === incoming.content && JSON.stringify(prior.tags) === JSON.stringify(incoming.tags) && JSON.stringify(prior.provenance) === JSON.stringify(incoming.provenance);
+      return String(body['content']) === incoming.content;
     }));
   }
   acquire(owner: string, duration: number): boolean {
@@ -876,20 +853,20 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
     this.db.prepare(`INSERT INTO governance_lifecycle(candidate_id,status,changed_at) VALUES(?,?,?)
       ON CONFLICT(candidate_id) DO UPDATE SET status=excluded.status, changed_at=excluded.changed_at`).run(id, state, new Date().toISOString());
   }
-  private recordReview(id: string, decision: string, actor: string, reason: string, assessment: Assessment | null): void {
-    this.db.prepare('INSERT INTO governance_reviews VALUES(?,?,?,?,?,?,?)').run(randomUUID(), id, decision, actor, reason, assessment ? JSON.stringify(assessment) : null, new Date().toISOString());
+  private recordReview(id: string, decision: string, actor: string, reason: string): void {
+    this.db.prepare('INSERT INTO governance_reviews VALUES(?,?,?,?,?,?,?)').run(randomUUID(), id, decision, actor, reason, null, new Date().toISOString());
   }
-  review(id: string, decision: ReviewDecision, actor: string, reason: string, assessment: Assessment | null, owner?: string,resolution?:'revise'|'supersede'|'coexist'): CandidateRecord {
+  review(id: string, decision: ReviewDecision, actor: string, reason: string, owner?: string,resolution?:'revise'|'supersede'|'coexist'): CandidateRecord {
     return this.transaction(() => {
       if (owner) this.fence(owner);
       const candidate = this.get(id);
       if (!['pending_review', 'needs_review'].includes(candidate.status)) throw new MnemoWeaveError('INVALID_STATE');
       if (decision === 'approve' && candidate.request.change) this.catalog.prepare(id,candidate.request,resolution);
-      this.recordReview(id, decision, actor, reason, assessment);
+      this.recordReview(id, decision, actor, reason);
       this.status(id, decision === 'approve' ? 'approved' : decision === 'reject' ? 'rejected' : 'needs_review');
       if(decision==='reject')this.catalog.dismissCaseForCandidate(id,actor,reason);
       if (decision === 'human') {
-        this.db.prepare('INSERT OR IGNORE INTO governance_review_tasks VALUES(?,?,?,?)').run(randomUUID(), id, assessment?.conflict && assessment.conflict !== 'none' ? 'conflict' : 'quality', 'open');
+        this.db.prepare('INSERT OR IGNORE INTO governance_review_tasks VALUES(?,?,?,?)').run(randomUUID(), id, 'quality', 'open');
       } else {
         this.db.prepare("UPDATE governance_review_tasks SET state='resolved' WHERE candidate_id=?").run(id);
       }
@@ -1030,7 +1007,7 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
   retry(id: string, actor: string, reason: string): CandidateRecord {
     return this.transaction(() => {
       if (this.get(id).status !== 'failed') throw new MnemoWeaveError('INVALID_STATE');
-      this.recordReview(id, 'retry', actor, reason, null);
+      this.recordReview(id, 'retry', actor, reason);
       this.db.prepare("UPDATE governance_tasks SET state='queued',checkpoint='retry',next_at=?,first_failed_at=NULL,alerted_at=NULL WHERE candidate_id=?").run(Date.now(), id);
       this.status(id, 'approved');
       return this.get(id);
@@ -1040,8 +1017,8 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
     return this.transaction(() => {
       const replacement = this.submit(request);
       if (replacement.id === id) throw new MnemoWeaveError('INVALID_INPUT');
-      this.review(id, 'reject', actor, `${reason}\nReplacement candidate: ${replacement.id}`, null);
-      this.recordReview(replacement.id, 'resubmitted', actor, `Amended from ${id}: ${reason}`, null);
+      this.review(id, 'reject', actor, `${reason}\nReplacement candidate: ${replacement.id}`);
+      this.recordReview(replacement.id, 'resubmitted', actor, `Amended from ${id}: ${reason}`);
       return this.get(replacement.id);
     });
   }
@@ -1058,14 +1035,14 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
         if(followUp.id===candidate.id||followUp.status!=='pending_review')throw new MnemoWeaveError('INVALID_INPUT');
       }
       this.catalog.resolve(input.caseId,input.decision,actor,input.reason,input.evidence,followUp?.id);
-      if(input.decision==='keep_existing')return this.review(candidate.id,'reject',actor,input.reason,null);
-      if(input.decision==='unverified')return this.review(candidate.id,'human',actor,input.reason,null);
+      if(input.decision==='keep_existing')return this.review(candidate.id,'reject',actor,input.reason);
+      if(input.decision==='unverified')return this.review(candidate.id,'human',actor,input.reason);
       if(input.decision==='coexist'){
-        this.review(candidate.id,'reject',actor,`${input.reason}\nQualified replacement: ${followUp!.id}`,null);
-        this.recordReview(followUp!.id,'resubmitted',actor,`Conflict ${input.caseId}: ${input.reason}`,null);
+        this.review(candidate.id,'reject',actor,`${input.reason}\nQualified replacement: ${followUp!.id}`);
+        this.recordReview(followUp!.id,'resubmitted',actor,`Conflict ${input.caseId}: ${input.reason}`);
         return this.get(followUp!.id);
       }
-      return this.review(candidate.id,'approve',actor,input.reason,null,undefined,input.decision);
+      return this.review(candidate.id,'approve',actor,input.reason,undefined,input.decision);
     });
   }
   cancelVersion(candidateId:string,actor:string,reason:string):CandidateRecord{
@@ -1073,7 +1050,7 @@ export class SqliteCandidates implements CandidateRepository, WorkflowRepository
       const candidate=this.get(candidateId);if(!candidate.request.change||!['approved','persisting','failed'].includes(candidate.status))throw new MnemoWeaveError('INVALID_STATE');
       const task=this.db.prepare('SELECT * FROM governance_tasks WHERE candidate_id=?').get(candidateId)!;
       if(task['state']==='running'&&this.db.prepare('SELECT id FROM governance_workflow_lock WHERE until_ms>?').get(Date.now()))throw new MnemoWeaveError('INVALID_STATE');
-      this.catalog.cancel(candidateId,actor,reason);this.recordReview(candidateId,'reject',actor,`Cancelled unpublished version: ${reason}`,null);
+      this.catalog.cancel(candidateId,actor,reason);this.recordReview(candidateId,'reject',actor,`Cancelled unpublished version: ${reason}`);
       const runId=randomUUID();const now=new Date().toISOString();
       this.db.prepare('INSERT INTO governance_runs VALUES(?,?,?,?,?)').run(runId,task['id']!,'cancelled',now,now);
       this.db.prepare('INSERT INTO governance_execution_receipts VALUES(?,?,?,?,?,?)').run(randomUUID(),candidateId,task['id']!,runId,JSON.stringify({status:'failed',code:'OPERATION_CANCELLED',uncertain:true,writeKey:task['write_key']}),now);

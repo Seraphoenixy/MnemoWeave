@@ -88,19 +88,19 @@ export class MemoryWorkflow {
    */
   private async review(id: string, owner: string): Promise<void> {
     const candidate = this.repository.get(id);
-    if (candidate.request.change) { this.repository.review(id,'human','rules','Version/replacement/conflict intent requires explicit operator review.',null,owner); return; }
+    if (candidate.request.change) { this.repository.review(id,'human','rules','Version/replacement/conflict intent requires explicit operator review.',owner); return; }
     try {
       const exact = await this.provider.inspectExact(candidate.request.content);
-      if (!exact.complete) { this.repository.review(id, 'human', 'rules', 'Duplicate lookup truncated; cannot decide.', null, owner); return; }
+      if (!exact.complete) { this.repository.review(id, 'human', 'rules', 'Duplicate lookup truncated; cannot decide.', owner); return; }
       if (exact.matches.length) {
         const duplicate = this.repository.isKnownDuplicate(id, exact.matches.map(memory => memory.id));
-        this.repository.review(id, duplicate ? 'reject' : 'human', 'rules', duplicate ? 'Identical memory with the same known applicability already exists.' : 'Identical content exists, but applicability/evidence differs or is unknown; preserve both for review.', null, owner); return;
+        this.repository.review(id, duplicate ? 'reject' : 'human', 'rules', duplicate ? 'An identical memory with the same source and classification already exists.' : 'Identical content exists, but its source or classification differs; preserve both for review.', owner); return;
       }
       // No duplicate found, and there is no model here to judge anything further.
-      this.repository.review(id, 'human', 'rules', 'No automatic semantic review: the Server does not call a model. A person must approve or reject this candidate.', null, owner);
+      this.repository.review(id, 'human', 'rules', 'No automatic semantic review: the Server does not call a model. A person must approve or reject this candidate.', owner);
     } catch {
       // A Provider failure never becomes implicit approval.
-      this.repository.review(id, 'human', 'auto-review', 'Checks unavailable or inconclusive; manual review required.', null, owner);
+      this.repository.review(id, 'human', 'auto-review', 'Checks unavailable or inconclusive; manual review required.', owner);
     }
   }
   private async write(job: Job): Promise<void> {

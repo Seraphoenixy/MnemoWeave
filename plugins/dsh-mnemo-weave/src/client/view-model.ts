@@ -142,7 +142,6 @@ export function detailMeta(detail: UiMemoryDetail, language: Language): Array<{ 
         ? translate(language, 'detail.viewingCurrent')
         : translate(language, 'detail.viewingHistory', { number: current === undefined ? '—' : `#${current.number}` }),
     },
-    { key: 'applicability', label: translate(language, 'detail.applicability'), value: detail.applicability },
     { key: 'published', label: translate(language, 'detail.published'), value: formatDateTime(detail.publishedAt) },
   ];
 }
@@ -150,6 +149,36 @@ export function detailMeta(detail: UiMemoryDetail, language: Language): Array<{ 
 /** UTF-8 byte length, matching the Server's own limit rather than the string length. */
 export function utf8Bytes(text: string): number {
   return new TextEncoder().encode(text).length;
+}
+
+/**
+ * A byte count in the unit a reader compares at a glance.
+ *
+ * The caps are 10 KB and 10 MiB, so a raw byte figure is unreadable in the place it matters most —
+ * next to a progress bar a reader is judging at a glance. One decimal is kept for KB and above
+ * because it is what distinguishes "nearly full" from "full".
+ */
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return '—';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) {
+    const kb = bytes / 1024;
+    return `${kb < 10 ? kb.toFixed(1) : Math.round(kb)} KB`;
+  }
+  const mb = bytes / (1024 * 1024);
+  return `${mb < 10 ? mb.toFixed(1) : Math.round(mb)} MB`;
+}
+
+/**
+ * How full a capacity is, as a 0–100 integer for a meter.
+ *
+ * An unlimited or missing limit reports 0 rather than 100: a bar drawn full on unknown data would
+ * read as "at capacity", which is the opposite of what an absent limit means. A used value above
+ * the limit is clamped, because the bar cannot show overflow — the number beside it does.
+ */
+export function capacityPercent(used: number, limit: number): number {
+  if (!Number.isFinite(used) || !Number.isFinite(limit) || limit <= 0) return 0;
+  return Math.min(100, Math.max(0, Math.round((used / limit) * 100)));
 }
 
 export const EDIT_LIMIT_BYTES = 8_000;
@@ -215,11 +244,14 @@ export function neighbourhood(
 ): Array<{ memoryId: string; hop: number; kind: 'Supersedes' | 'RelatedTo' | 'Conflicts'; direction: 'out' | 'in'; reason: string }> {
   const found = new Map<string, { hop: number; kind: 'Supersedes' | 'RelatedTo' | 'Conflicts'; direction: 'out' | 'in'; reason: string }>();
   if (!graph.nodes.some(node => node.memoryId === memoryId)) return [];
+  // Entity nodes are not memories: walking through one would report an entity name as a memory id.
+  // They are drawn on the graph, but a memory-to-memory walk ignores them.
+  const walkable = graph.edges.filter((edge): edge is UiGraphEdge & { kind: 'Supersedes' | 'RelatedTo' | 'Conflicts' } => edge.kind !== 'Entity');
   let frontier = [memoryId];
   for (let hop = 1; hop <= depth; hop += 1) {
     const next: string[] = [];
     for (const current of frontier) {
-      for (const edge of graph.edges) {
+      for (const edge of walkable) {
         // An edge can be walked in either direction: the graph is undirected for reading, even
         // though a supersedes edge has a direction that matters when it is displayed.
         const outward = edge.sourceMemoryId === current ? edge.targetMemoryId : edge.targetMemoryId === current ? edge.sourceMemoryId : null;

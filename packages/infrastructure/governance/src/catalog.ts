@@ -1,6 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { createHash, randomUUID } from 'node:crypto';
-import { MemoryDescriptor, MnemoWeaveError, PublicationRef, RememberInput,ConflictDescriptor } from '../../../core/contracts/src/index.ts';
+import { MemoryDescriptor, MnemoWeaveError, PublicationRef, RememberInput, ConflictDescriptor } from '../../../core/contracts/src/index.ts';
 import type { RememberRequest, MemoryCatalogRecord } from '../../../core/contracts/src/index.ts';
 import type { MemoryCatalogReader } from '../../../core/application/src/catalog-ports.ts';
 import type { VersionPlan, VersionCheckpoint, VersionOperation } from '../../../core/application/src/version-ports.ts';
@@ -50,7 +50,7 @@ export class SqliteMemoryCatalog implements MemoryCatalogReader {
           CREATE TABLE catalog_memories(
             id TEXT PRIMARY KEY, current_revision_id TEXT,
             state TEXT NOT NULL CHECK(state IN ('active','superseded','unverified')),
-            scope TEXT NOT NULL, applicability TEXT NOT NULL
+            scope TEXT NOT NULL
           ) STRICT;
           CREATE TABLE catalog_revisions(
             id TEXT PRIMARY KEY, memory_id TEXT NOT NULL REFERENCES catalog_memories(id),
@@ -98,6 +98,22 @@ export class SqliteMemoryCatalog implements MemoryCatalogReader {
     }
     db.prepare('SELECT id,memory_id,provider_memory_id,content_hash FROM catalog_revisions LIMIT 0').all();
   }
+  /**
+   * Insert the memory row itself.
+   *
+   * `scope` stays a fixed `'global'` and no owner is written: formal memories are one shared
+   * collection. Older databases still carry a `project_id` column that the migration kept for
+   * the v21 backup; it is written as null so a NOT NULL variant cannot reject the insert.
+   */
+  private insertMemoryRow(memoryId: string, options: { project: boolean }): void {
+    if (options.project) {
+      this.db.prepare('INSERT INTO catalog_memories(id,current_revision_id,state,scope,project_id) VALUES(?,?,?,?,?)')
+        .run(memoryId, null, 'active', 'global', null);
+    } else {
+      this.db.prepare('INSERT INTO catalog_memories(id,current_revision_id,state,scope) VALUES(?,?,?,?)')
+        .run(memoryId, null, 'active', 'global');
+    }
+  }
   /** Must run in the same transaction as the successful execution receipt. */
   publishInitial(candidateId: string, request: RememberRequest, providerId: string, hash: string, time: string) {
     const existing = this.publicationForCandidate(candidateId);
@@ -105,18 +121,13 @@ export class SqliteMemoryCatalog implements MemoryCatalogReader {
     if (createHash('sha256').update(request.content).digest('hex') !== hash) throw new MnemoWeaveError('PROVIDER_PROTOCOL');
     this.assertUnambiguousPublication(providerId);
     const memoryId = randomUUID(); const revisionId = randomUUID();
-    if (this.hasProjectColumn()) {
-      this.db.prepare('INSERT INTO catalog_memories(id,current_revision_id,state,scope,applicability,project_id) VALUES(?,?,?,?,?,?)').run(memoryId, null, 'active', 'global', request.provenance.applicability, null);
-    } else {
-      this.db.prepare('INSERT INTO catalog_memories VALUES(?,?,?,?,?)').run(memoryId, null, 'active', 'global', request.provenance.applicability);
-    }
+    this.insertMemoryRow(memoryId, { project: this.hasProjectColumn() });
     // During the v2→v3 backfill the provenance columns do not exist yet (v7 adds them and
     // backfills from the candidate request); runtime publications always carry them.
-    if (this.db.prepare("SELECT 1 FROM pragma_table_info('catalog_revisions') WHERE name='applicability'").get()) {
+    if (this.db.prepare("SELECT 1 FROM pragma_table_info('catalog_revisions') WHERE name='category'").get()) {
       this.insertRevision({
         id: revisionId, memoryId, number: 1, parentId: null, providerMemoryId: providerId,
         contentHash: hash, candidateId, publishedAt: time, effectiveAt: time,
-        applicability: request.provenance.applicability,
         meta: revisionMetaOf(request),
       });
     } else {
@@ -164,7 +175,7 @@ export class SqliteMemoryCatalog implements MemoryCatalogReader {
       return {
         id: row['id'], memoryId: row['memory_id'], number: row['revision_number'], parentId: row['parent_id'],
         providerMemoryId: row['provider_memory_id'], contentHash: row['content_hash'], candidateId: row['candidate_id'],
-        publishedAt: row['published_at'], effectiveAt: row['effective_at'], applicability: row['applicability'],
+        publishedAt: row['published_at'], effectiveAt: row['effective_at'],
         ...(row['category'] === null ? {} : { category: row['category'] }),
         ...(row['importance'] === null ? {} : { importance: row['importance'] }),
         tags, entities,
@@ -173,7 +184,7 @@ export class SqliteMemoryCatalog implements MemoryCatalogReader {
     const relations = this.db.prepare('SELECT * FROM catalog_relations WHERE source_memory_id=? OR target_memory_id=?').all(memoryId,memoryId).map(row => ({ id: row['id'], kind: row['kind'], sourceMemoryId: row['source_memory_id'], sourceRevisionId: row['source_revision_id'], targetMemoryId: row['target_memory_id'], targetRevisionId: row['target_revision_id'], effectiveAt: row['effective_at'], reason: row['reason'], evidence: JSON.parse(String(row['evidence_json'])), nativeProjected: row['native_projected'] === 1 }));
     const conflicts=this.db.prepare('SELECT id FROM catalog_conflicts WHERE target_memory_id=?').all(memoryId).map(row=>this.getConflict(String(row['id'])));
     const current = revisions.find(row => row.id === memory['current_revision_id']);
-    return MemoryDescriptor.parse({ id: memory['id'], currentRevisionId: memory['current_revision_id'], state: memory['state'], applicability: memory['applicability'], revisions, relations, conflicts });
+    return MemoryDescriptor.parse({ id: memory['id'], currentRevisionId: memory['current_revision_id'], state: memory['state'], revisions, relations, conflicts });
   }
   /**
    * Every catalogued relation, for the graph view.
@@ -263,9 +274,7 @@ export class SqliteMemoryCatalog implements MemoryCatalogReader {
     if (target.state !== 'active' || target.currentRevisionId !== intent.expectedRevisionId || this.db.prepare('SELECT memory_id FROM catalog_reservations WHERE memory_id=?').get(target.id)) throw new MnemoWeaveError('INVALID_STATE');
     const base = target.revisions.find(revision => revision.id === target.currentRevisionId)!;
     
-    if (kind === 'coexist' && request.provenance.applicability === target.applicability) throw new MnemoWeaveError('REVIEW_REQUIRED');
     if (kind === 'supersede') {
-      if (request.provenance.applicability !== target.applicability) throw new MnemoWeaveError('REVIEW_REQUIRED');
       const aliases = Number(this.db.prepare('SELECT count(DISTINCT memory_id) n FROM catalog_revisions WHERE provider_memory_id=?').get(base.providerMemoryId)!['n']);
       if (aliases > 1) throw new MnemoWeaveError('REVIEW_REQUIRED');
     }
@@ -318,17 +327,16 @@ export class SqliteMemoryCatalog implements MemoryCatalogReader {
   private insertRevision(input: {
     id: string; memoryId: string; number: number; parentId: string | null;
     providerMemoryId: string; contentHash: string; candidateId: string;
-    publishedAt: string; effectiveAt: string; applicability: string;
+    publishedAt: string; effectiveAt: string;
     meta?: RevisionMeta;
   }): void {
     const meta = input.meta ?? {};
     this.db.prepare(`INSERT INTO catalog_revisions(
       id,memory_id,revision_number,parent_id,provider_memory_id,content_hash,candidate_id,
-      published_at,effective_at,applicability,scope,category,importance,tags_json,entities_json
-    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      published_at,effective_at,category,importance,tags_json,entities_json
+    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
       input.id, input.memoryId, input.number, input.parentId, input.providerMemoryId, input.contentHash,
-      input.candidateId, input.publishedAt, input.effectiveAt, input.applicability,
-      'global',
+      input.candidateId, input.publishedAt, input.effectiveAt,
       meta.category ?? null, meta.importance ?? null,
       meta.tags === undefined ? null : JSON.stringify(meta.tags),
       meta.entities === undefined ? null : JSON.stringify(meta.entities),
@@ -341,20 +349,13 @@ export class SqliteMemoryCatalog implements MemoryCatalogReader {
     if (target.currentRevisionId !== plan.baseRevisionId || !this.db.prepare('SELECT memory_id FROM catalog_reservations WHERE memory_id=? AND operation_id=?').get(target.id,plan.id)) throw new MnemoWeaveError('INVALID_STATE');
     if (createHash('sha256').update(request.content).digest('hex') !== hash) throw new MnemoWeaveError('PROVIDER_INTEGRITY');
     this.assertUnambiguousPublication(providerId,plan.memoryId);
-    if (plan.kind !== 'revise') {
-      if (this.hasProjectColumn()) {
-        this.db.prepare('INSERT INTO catalog_memories(id,current_revision_id,state,scope,applicability,project_id) VALUES(?,?,?,?,?,?)').run(plan.memoryId,null,'active','global',request.provenance.applicability,null);
-      } else {
-        this.db.prepare('INSERT INTO catalog_memories VALUES(?,?,?,?,?)').run(plan.memoryId,null,'active','global',request.provenance.applicability);
-      }
-    }
+    if (plan.kind !== 'revise') this.insertMemoryRow(plan.memoryId, { project: this.hasProjectColumn() });
     this.insertRevision({
       id: plan.revisionId, memoryId: plan.memoryId, number: plan.number, parentId: plan.parentId,
       providerMemoryId: providerId, contentHash: hash, candidateId, publishedAt: time, effectiveAt: plan.effectiveAt,
-      applicability: request.provenance.applicability,
       meta: { tags: request.tags },
     });
-    const changed = this.db.prepare('UPDATE catalog_memories SET current_revision_id=?,applicability=? WHERE id=? AND current_revision_id IS ?').run(plan.revisionId,request.provenance.applicability,plan.memoryId,plan.kind === 'revise' ? plan.baseRevisionId : null);
+    const changed = this.db.prepare('UPDATE catalog_memories SET current_revision_id=? WHERE id=? AND current_revision_id IS ?').run(plan.revisionId,plan.memoryId,plan.kind === 'revise' ? plan.baseRevisionId : null);
     if (changed.changes !== 1) throw new MnemoWeaveError('INVALID_STATE');
     if (plan.kind !== 'revise') {
       this.db.prepare('INSERT INTO catalog_relations VALUES(?,?,?,?,?,?,?,?,?,?)').run(plan.id,plan.kind === 'supersede' ? 'Supersedes' : 'RelatedTo',plan.memoryId,plan.revisionId,plan.targetMemoryId,plan.baseRevisionId,plan.effectiveAt,plan.reason,JSON.stringify(plan.evidence),plan.kind === 'supersede' ? 1 : 0);
@@ -401,7 +402,6 @@ export class SqliteMemoryCatalog implements MemoryCatalogReader {
       this.insertRevision({
         id: revisionId, memoryId, number, parentId: currentId, providerMemoryId: providerId,
         contentHash: hash, candidateId, publishedAt: time, effectiveAt: time,
-        applicability: String(memory['applicability']),
         meta: carried,
       });
       const changed = this.db.prepare('UPDATE catalog_memories SET current_revision_id=? WHERE id=? AND current_revision_id=?').run(revisionId, memoryId, currentId);
@@ -474,15 +474,10 @@ export class SqliteMemoryCatalog implements MemoryCatalogReader {
       const memory = this.db.prepare('SELECT * FROM catalog_memories WHERE id=?').get(memoryId);
       if (!memory) {
         const revisionId = randomUUID();
-        if (this.hasProjectColumn()) {
-          this.db.prepare('INSERT INTO catalog_memories(id,current_revision_id,state,scope,applicability,project_id) VALUES(?,?,?,?,?,?)').run(memoryId, null, 'active', 'global', request.provenance.applicability, null);
-        } else {
-          this.db.prepare('INSERT INTO catalog_memories VALUES(?,?,?,?,?)').run(memoryId, null, 'active', 'global', request.provenance.applicability);
-        }
+        this.insertMemoryRow(memoryId, { project: this.hasProjectColumn() });
         this.insertRevision({
           id: revisionId, memoryId, number: 1, parentId: null, providerMemoryId: providerId,
           contentHash: hash, candidateId, publishedAt: time, effectiveAt: time,
-          applicability: request.provenance.applicability,
           ...(meta === undefined ? {} : { meta }),
         });
         this.db.prepare('UPDATE catalog_memories SET current_revision_id=? WHERE id=?').run(revisionId, memoryId);
@@ -497,12 +492,62 @@ export class SqliteMemoryCatalog implements MemoryCatalogReader {
       this.insertRevision({
         id: revisionId, memoryId, number, parentId: currentId, providerMemoryId: providerId,
         contentHash: hash, candidateId, publishedAt: time, effectiveAt: time,
-        applicability: String(memory['applicability']),
         ...(meta === undefined ? {} : { meta }),
       });
       const changed = this.db.prepare('UPDATE catalog_memories SET current_revision_id=? WHERE id=? AND current_revision_id=?').run(revisionId, memoryId, currentId);
       if (changed.changes !== 1) throw new MnemoWeaveError('INVALID_STATE');
       return { memoryId, revisionId };
+    });
+  }
+  /**
+   * Adopt a memory that exists in the Provider but has no catalog row here.
+   *
+   * The Provider owns the library, so a memory can exist that this Server never wrote: another
+   * tool put it there, or it predates this catalog. Leaving such rows out would make the list
+   * answer "what did this Server write" instead of "what memories exist", so a read path adopts
+   * them. Adoption records what is already true — the Provider id, the body hash and the
+   * classification the Provider reports — as revision 1. It does not fabricate a predecessor,
+   * a review decision or a candidate request that never existed; the audit trail says the row was
+   * adopted from the Provider, which is exactly what happened.
+   *
+   * Returns the memory id, or `null` when the Provider id is already catalogued (a concurrent
+   * read may have adopted it first).
+   */
+  adoptProviderMemory(providerId: string, content: string, time: string, meta?: RevisionMeta): string | null {
+    if (!providerId.trim()) throw new MnemoWeaveError('INVALID_INPUT');
+    return this.transaction(() => {
+      const known = this.db.prepare('SELECT memory_id FROM catalog_revisions WHERE provider_memory_id=?').get(providerId);
+      if (known) return null;
+      const memoryId = randomUUID();
+      const revisionId = randomUUID();
+      const candidateId = randomUUID();
+      const hash = createHash('sha256').update(content).digest('hex');
+      const request = RememberInput.parse({
+        idempotencyKey: `adopt-${candidateId}`,
+        content,
+        tags: meta?.tags ?? [],
+        provenance: { source: 'provider-adoption', sourceReference: `provider:${providerId}` },
+        ...(meta?.category === undefined ? {} : { category: meta.category }),
+        ...(meta?.importance === undefined ? {} : { importance: meta.importance }),
+        ...(meta?.entities === undefined ? {} : { entities: meta.entities }),
+      });
+      const requestJson = JSON.stringify(request);
+      this.db.prepare('INSERT INTO governance_candidates(id,idempotency_key,request_hash,request_json,status,submitted_at) VALUES(?,?,?,?,?,?)')
+        .run(candidateId, request.idempotencyKey, createHash('sha256').update(requestJson).digest('hex'), requestJson, 'pending_review', time);
+      this.db.prepare('INSERT INTO governance_submission_receipts(id,candidate_id,status) VALUES(?,?,?)').run(randomUUID(), candidateId, 'candidate');
+      this.db.prepare('INSERT INTO governance_lifecycle(candidate_id,status) VALUES(?,?)').run(candidateId, 'persisted');
+      // The adoption is recorded as a review so the row has the same audit shape as any other
+      // publication, and the reason states plainly that nothing was decided.
+      this.db.prepare('INSERT INTO governance_reviews(id,candidate_id,decision,actor,reason,assessment_json,created_at) VALUES(?,?,?,?,?,?,?)')
+        .run(randomUUID(), candidateId, 'approve', 'local-server', 'Adopted from the Provider: this memory existed before the catalog did', null, time);
+      this.insertMemoryRow(memoryId, { project: this.hasProjectColumn() });
+      this.insertRevision({
+        id: revisionId, memoryId, number: 1, parentId: null, providerMemoryId: providerId,
+        contentHash: hash, candidateId, publishedAt: time, effectiveAt: time,
+        ...(meta === undefined ? {} : { meta }),
+      });
+      this.db.prepare('UPDATE catalog_memories SET current_revision_id=? WHERE id=?').run(revisionId, memoryId);
+      return memoryId;
     });
   }
   /**

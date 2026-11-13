@@ -10,11 +10,11 @@ import { mnemonBinary } from './mnemon-binary.ts';
 import { tempDir } from '../support/temp.ts';
 
 test('Real conflict decisions preserve history: keep, uncertain, revise, supersede and scope-qualified coexist', {timeout:90000},async()=>{
-  await mkdir('work/e2e',{recursive:true});const root=await tempDir('conflict-resolution', 'conflicts');
+  const root=await tempDir('conflict-resolution', 'conflicts');
   const env={MNEMON_BINARY:mnemonBinary(),MNEMON_DATA_DIR:join(root,'provider'),MNEMON_STORE:'conflicts',MNEMOWEAVE_STATE_DIR:join(root,'state'),MNEMOWEAVE_PORT:'0',MNEMOWEAVE_TOKEN:'conflict-host-token-0123456789',MNEMOWEAVE_OPERATOR_TOKEN:'conflict-operator-token-987654321'};
   let server=await startServer(env);
   const headers=testHostHeaders(env.MNEMOWEAVE_TOKEN);const operator={...headers,authorization:`Bearer ${env.MNEMOWEAVE_OPERATOR_TOKEN}`};
-  const request=(key:string,text:string)=>RememberInput.parse({idempotencyKey:key,content:text,provenance:{source:'test',sourceReference:'fixture:conflict',evidence:['isolated fixture'],verificationStatus:'unverified',confidence:0.5,applicability:'same ARM project fixture',limitations:'not verified knowledge',lastVerified:null}});
+  const request=(key:string,text:string)=>RememberInput.parse({idempotencyKey:key,content:text,provenance:{source:'test',sourceReference:'fixture:conflict'}});
   const submit=async(body:unknown)=>{const r=await fetch(`${server.url}/v1/remember`,{method:'POST',headers,body:JSON.stringify(body)});assert.equal(r.status,202);return await r.json() as CandidateRecord;};
   const get=async(id:string)=>await(await fetch(`${server.url}/v1/candidates/${id}`,{headers})).json() as CandidateRecord;
   const publish=async(body:unknown)=>{const c=await submit(body);await until(()=>get(c.id),v=>v.status==='needs_review');const r=await fetch(`${server.url}/v1/review`,{method:'POST',headers:operator,body:JSON.stringify({candidateId:c.id,decision:'approve',reason:'Operator evaluated isolated fixture'})});assert.equal(r.status,200);return until(()=>get(c.id),v=>v.status==='persisted');};
@@ -31,7 +31,7 @@ test('Real conflict decisions preserve history: keep, uncertain, revise, superse
       const attempted=await fetch(`${server.url}/v1/review`,{method:'POST',headers:operator,body:JSON.stringify({candidateId:candidate.id,decision:'approve',reason:'Cannot bypass conflict resolution'})});assert.equal(attempted.status,409);
       const body:{caseId:string;decision:string;reason:string;evidence:string[];replacement?:unknown}={caseId,decision,reason:'Operator compared scope and evidence',evidence:['review fixture result']};
       if(decision==='coexist'){
-        const amended=request('conflict-coexist-qualified','MnemoWeave conflict coexist: both conclusions hold in distinct environments.');amended.provenance.applicability='PowerPC fixture environment';
+        const amended=request('conflict-coexist-qualified','MnemoWeave conflict coexist: both conclusions hold in distinct environments.');
         body.replacement={...amended,change:{...originalRequest.change,kind:'coexist',effectiveAt:new Date().toISOString(),reason:'Both true under explicitly distinct platforms'}};
       }
       const denied=await fetch(`${server.url}/v1/conflicts/resolve`,{method:'POST',headers,body:JSON.stringify(body)});assert.equal(denied.status,401);

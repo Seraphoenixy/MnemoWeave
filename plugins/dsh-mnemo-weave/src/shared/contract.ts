@@ -60,7 +60,6 @@ export interface UiMemorySummary {
   memoryId: string;
   revisionId: string;
   providerMemoryId: string;
-  applicability: string;
   publishedAt: string;
   content: string;
   entryVersion: number;
@@ -85,6 +84,12 @@ export interface UiMemoryList {
   categories?: Array<{ value: string; count: number }>;
   /** Entities named by current revisions, in their recorded spelling. */
   entities?: Array<{ value: string; count: number }>;
+  /**
+   * Size of the whole collection, before any query or entity filter.
+   *
+   * A tab badge that counted `items` would report the filtered size as the library's size.
+   */
+  total?: number;
 }
 
 export interface UiMemoryRevision {
@@ -144,7 +149,6 @@ export interface UiMemoryDetail {
   currentRevisionId: string;
   isCurrent: boolean;
   providerMemoryId: string;
-  applicability: string;
   state: 'active' | 'superseded' | 'unverified';
   content: string;
   publishedAt: string;
@@ -167,19 +171,35 @@ export interface UiExploreHit {
   tags?: string[];
 }
 
-/** Structure-only graph: nodes are memories, edges are catalogued relations. */
+/**
+ * One node of the relation graph.
+ *
+ * Memories and entities share the drawing: an entity node is the same shape of thing to a reader —
+ * something several memories point at — and drawing entities as nodes is what shows how memories
+ * cluster. A node is a memory unless `kind` says otherwise.
+ */
 export interface UiGraphNode {
+  /** The memory id, or the entity name for an entity node. */
   memoryId: string;
+  kind?: 'memory' | 'entity';
   /** A supersede edge points at a retired memory, so those are nodes too. */
   state: 'active' | 'superseded' | 'unverified';
   publishedAt: string;
   category?: string;
   importance?: number;
+  /** Memory content or the entity name, whichever the node stands for. */
+  label?: string;
+  /** How many memories name this entity; absent for a memory node. */
+  occurrenceCount?: number;
 }
 
 export interface UiGraphEdge {
   relationId: string;
-  kind: 'Supersedes' | 'RelatedTo' | 'Conflicts';
+  /**
+   * `Entity` is drawn from the Provider's own index rather than a catalogued decision: it records
+   * that two memories share an entity, which no review produced.
+   */
+  kind: 'Supersedes' | 'RelatedTo' | 'Conflicts' | 'Entity';
   sourceMemoryId: string;
   targetMemoryId: string;
   reason: string;
@@ -555,6 +575,15 @@ export interface UiSyncStream {
 
 export interface UiSyncStatus {
   enabled: boolean;
+  /**
+   * Why the status is unavailable, as a stable reason rather than an error code.
+   *
+   * `REVIEW_REQUIRED` is what the Server answers when no remote sync is configured: a normal
+   * state, not a fault. It arrives as an RPC failure, and the Host RPC layer re-wraps thrown
+   * errors without their code, so the page could only ever show a generic failure. Reporting the
+   * reason as data keeps the distinction the Server already makes.
+   */
+  unavailableReason?: 'not-configured' | 'unauthorized' | 'unreachable';
   protocol: number;
   streams: UiSyncStream[];
   updatedAt: string;
@@ -576,6 +605,14 @@ export interface UiConfigView {
   hasToken: boolean;
   /** Which layer supplied each value, so the page can say who manages it. */
   sources?: Record<string, string>;
+  /**
+   * The build identity of the Host half, so the page can compare it with its own.
+   *
+   * The two halves are loaded at different moments — the Host when DSH starts, the page when it
+   * is fetched — so they can disagree without anything failing at load time. Reporting it here is
+   * what turns that into a stated fact instead of a missing button.
+   */
+  hostBuild?: string;
 }
 
 /** Where a value came from. The settings page shows this beside each field. */

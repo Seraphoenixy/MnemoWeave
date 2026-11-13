@@ -7,7 +7,7 @@ import {
 } from '../../contracts/src/index.ts';
 import type {
   CandidateRecord, ConflictResolutionRequest, EmbeddingDiagnosticsRecord, Health, ProviderEmbeddingStatusRecord,
-  RecallResult, RememberRequest,
+  ProviderGraphRecord, ProviderStatsRecord, RecallResult, RememberRequest,
 } from '../../contracts/src/index.ts';
 import type { MemoryCatalogReader } from './catalog-ports.ts';
 import type { WorkflowRepository } from './workflow-ports.ts';
@@ -21,7 +21,7 @@ export * from './turn-budget.ts';
 
 export interface MemoryProvider {
   health(): Promise<Health>;
-  recall(request: { query: string; limit: number }): Promise<RecallResult>;
+  recall(request: { query: string; limit: number; mode?: 'smart' | 'keyword' | 'basic' | undefined; category?: string | undefined; source?: string | undefined }): Promise<RecallResult>;
   /** Official embedding coverage report; absent when the Provider has no such interface. */
   embeddingStatus?(): Promise<ProviderEmbeddingStatusRecord>;
   /** Backfill missing vectors; absent when the Provider cannot do it. */
@@ -29,6 +29,18 @@ export interface MemoryProvider {
   readMemory?(id: string): Promise<{ id: string; content: string }>;
   /** Read several bodies in one call, so a page does not pay one process per visible row. */
   readMany?(ids: string[]): Promise<{ id: string; content: string }[]>;
+  /**
+   * The Provider's whole store, not a page of it.
+   *
+   * A list that can only show rows this Server already catalogued answers a different question
+   * than "what memories exist": anything written by another tool, or before this Server had a
+   * catalog, would be invisible. The Provider owns the library, so it is asked for all of it.
+   */
+  listAll?(): Promise<NonNullable<RecallResult['memories']>>;
+  /** The Provider's own accounting: counts, categories and the entity frequency table. */
+  stats?(): Promise<ProviderStatsRecord>;
+  /** The Provider's own relation graph, as it draws it. */
+  graph?(): Promise<ProviderGraphRecord>;
 }
 /** Owns candidate and governance data; never reads Provider tables. */
 export interface CandidateRepository {
@@ -182,18 +194,13 @@ export class MemoryApplication {
     if (candidate.status !== 'needs_review') throw new MnemoWeaveError('INVALID_STATE');
     if (review.decision === 'amend') return this.reviewRepository.amend(candidate.id, review.replacement!, operator, review.reason);
     if (review.decision === 'approve') {
-      const conflicting = candidate.reviews.some(value => {
-        const record = value as { assessment?: { conflict?: string } | null };
-        return record.assessment?.conflict && record.assessment.conflict !== 'none' && record.assessment.conflict !== 'different_scope';
-      });
-      if (conflicting && !candidate.request.change) throw new MnemoWeaveError('REVIEW_REQUIRED');
       const catalog = this.reviewRepository?.catalog ?? this.candidates?.catalog;
       if (candidate.request.change && catalog) {
         const target = catalog.get(candidate.request.change.targetMemoryId);
         if (target.conflicts.some(item => item.candidateId !== candidate.id && item.followUpCandidateId !== candidate.id && ['open', 'unverified', 'resolving'].includes(item.state))) throw new MnemoWeaveError('REVIEW_REQUIRED');
       }
     }
-    return this.reviewRepository.review(candidate.id, review.decision, operator, review.reason, null);
+    return this.reviewRepository.review(candidate.id, review.decision, operator, review.reason);
   }
   async retryWrite(input: unknown, operator: string): Promise<CandidateRecord> {
     if (!this.reviewRepository) throw new MnemoWeaveError('REVIEW_REQUIRED');

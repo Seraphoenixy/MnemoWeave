@@ -12,14 +12,14 @@ import { mnemonBinary } from './mnemon-binary.ts';
 import { tempDir } from '../support/temp.ts';
 
 test('Real Provider: logical revisions, stale bases, independent supersession and scope coexistence', { timeout:60000 },async()=>{
-  await mkdir('work/e2e',{recursive:true}); const root=await tempDir('version-publication', 'versions');
+   const root=await tempDir('version-publication', 'versions');
   const env={MNEMON_BINARY:mnemonBinary(),MNEMON_DATA_DIR:join(root,'provider'),MNEMON_STORE:'versions',MNEMOWEAVE_STATE_DIR:join(root,'state'),MNEMOWEAVE_PORT:'0',MNEMOWEAVE_TOKEN:'version-host-token-0123456789',MNEMOWEAVE_OPERATOR_TOKEN:'version-operator-token-987654321'};
   let server=await startServer(env);
   let client:Client|undefined;
   const headers=testHostHeaders(env.MNEMOWEAVE_TOKEN);
   const operator={...headers,authorization:`Bearer ${env.MNEMOWEAVE_OPERATOR_TOKEN}`};
   const getCandidate=async(id:string)=>await(await fetch(`${server.url}/v1/candidates/${id}`,{headers})).json() as CandidateRecord;
-  const input=(key:string,content:string)=>RememberInput.parse({idempotencyKey:key,content,provenance:{source:'test',sourceReference:'fixture:versions',evidence:['fixture only'],verificationStatus:'unverified',confidence:0.5,applicability:'ARM fixture project',limitations:'not production knowledge',lastVerified:null}});
+  const input=(key:string,content:string)=>RememberInput.parse({idempotencyKey:key,content,provenance:{source:'test',sourceReference:'fixture:versions'}});
   const submit=async(body:unknown)=>{const response=await fetch(`${server.url}/v1/remember`,{method:'POST',headers,body:JSON.stringify(body)}); assert.equal(response.status,202);return await response.json() as CandidateRecord;};
   const approve=(id:string)=>fetch(`${server.url}/v1/review`,{method:'POST',headers:operator,body:JSON.stringify({candidateId:id,decision:'approve',reason:'Operator verified the test change and baseline'})});
   const publish=async(body:unknown)=>{const submitted=await submit(body);await until(()=>getCandidate(submitted.id),c=>c.status==='needs_review');assert.equal((await approve(submitted.id)).status,200);return until(()=>getCandidate(submitted.id),c=>c.status==='persisted');};
@@ -46,7 +46,7 @@ test('Real Provider: logical revisions, stale bases, independent supersession an
     assert.notEqual(replacement.publication!.memoryId,target.memoryId);
     assert.equal((await read(target.memoryId)).state,'superseded');
     const replacementMemory=await read(replacement.publication!.memoryId);assert.ok(replacementMemory.relations.some(r=>r.kind==='Supersedes'));
-    const coexistInput=input('version-coexist-001','MnemoWeave version fixture: PowerPC requires an alternative valid transport.');coexistInput.provenance.applicability='PowerPC fixture project';
+    const coexistInput=input('version-coexist-001','MnemoWeave version fixture: PowerPC requires an alternative valid transport.');
     const coexist=await publish({...coexistInput,change:{...change,kind:'coexist',targetMemoryId:replacement.publication!.memoryId,expectedRevisionId:replacement.publication!.revisionId,effectiveAt:new Date().toISOString(),reason:'Different platform, both remain valid'}});
     assert.equal((await read(replacement.publication!.memoryId)).state,'active');assert.equal((await read(coexist.publication!.memoryId)).state,'active');
     const recalled=await(await fetch(`${server.url}/v1/recall`,{method:'POST',headers,body:JSON.stringify({query:'MnemoWeave version fixture',limit:20})})).json() as {memories:{content:string}[]};

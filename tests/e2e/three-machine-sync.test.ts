@@ -12,6 +12,7 @@ import { SyncStore } from '../../packages/infrastructure/sync-store/src/index.ts
 import { createSyncServer } from '../../packages/protocols/sync-http/src/index.ts';
 import { MnemoWeaveError, RememberInput } from '../../packages/core/contracts/src/index.ts';
 import { mnemonBinary } from './mnemon-binary.ts';
+import { tempDir } from '../support/temp.ts';
 
 /**
  * Three machines share one stream: a stale base is rejected, the loser re-reads and
@@ -50,7 +51,7 @@ function machine(root: string, name: string, token: string, base: string) {
 }
 
 test('three machines converge on one revision chain and a stale base is rejected', async () => {
-  const root = resolve('work', 'three-machine', randomUUID());
+  const root = await tempDir('three-machine-sync', 'three-machine');
   mkdirSync(root, { recursive: true });
   const tokens = { a: 'a'.repeat(32), b: 'b'.repeat(32), c: 'c'.repeat(32) };
   const remote = new SyncStore({ path: join(root, 'remote.db') });
@@ -69,8 +70,7 @@ test('three machines converge on one revision chain and a stale base is rejected
   const request = RememberInput.parse({
     idempotencyKey: `seed-${randomUUID()}`, content: '三机共享的初始正文。', tags: [],
     provenance: {
-      source: 'local-user', sourceReference: 'e2e:three', evidence: ['seed'], verificationStatus: 'verified',
-      confidence: 1, applicability: 'alpha', limitations: '无（验收固定值）', lastVerified: '2026-11-10T11:00:00.000Z',
+      source: 'local-user', sourceReference: 'e2e:three',
     },
   });
   const candidate = seedRepo.submit(request);

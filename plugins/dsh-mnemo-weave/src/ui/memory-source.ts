@@ -135,6 +135,7 @@ export function parseMemoryList(value: unknown, query: string | undefined, limit
         return { value: asString(row['value'], `memories.categories[${index}].value`), count: asCount(row['count'], `memories.categories[${index}].count`) };
       }),
     }),
+    ...(root['total'] === undefined ? {} : { total: asCount(root['total'], 'memories.total') }),
     ...(root['entities'] === undefined ? {} : {
       entities: asArray(root['entities'], 'memories.entities').map((entry, index) => {
         const row = asRecord(entry, `memories.entities[${index}]`);
@@ -154,7 +155,6 @@ function asSummary(value: unknown, what: string): UiMemorySummary {
     memoryId: asString(row['memoryId'], `${what}.memoryId`),
     revisionId: asString(row['revisionId'], `${what}.revisionId`),
     providerMemoryId: asString(row['providerMemoryId'], `${what}.providerMemoryId`),
-    applicability: asString(row['applicability'], `${what}.applicability`),
     publishedAt: asString(row['publishedAt'], `${what}.publishedAt`),
     content: asString(row['content'], `${what}.content`),
     entryVersion: asInteger(row['entryVersion'], `${what}.entryVersion`),
@@ -208,7 +208,6 @@ export function parseMemoryDetail(value: unknown): UiMemoryDetail {
     currentRevisionId,
     isCurrent: selectedRevisionId === currentRevisionId,
     providerMemoryId: asString(selected['providerMemoryId'], 'memory.selectedRevision.providerMemoryId'),
-    applicability: asString(root['applicability'], 'memory.applicability'),
     state: asState(root['state'], 'memory.state'),
     content: asString(root['content'], 'memory.content'),
     publishedAt: asString(selected['publishedAt'], 'memory.selectedRevision.publishedAt'),
@@ -544,6 +543,8 @@ export interface MemorySourceOptions {
    * listening. Omitted in tests that only exercise parsing.
    */
   ensureServer?: (budgetMs: number) => Promise<ServerProbe>;
+  /** The build this Host half was composed from, for the page's staleness check. */
+  hostBuild?: string;
 }
 
 export class MemorySource {
@@ -553,6 +554,7 @@ export class MemorySource {
   /** Which layer supplied each setting; shown on the settings page. */
   private sources: Record<string, string> | undefined;
   private readonly ensure: ((budgetMs: number) => Promise<ServerProbe>) | undefined;
+  private readonly hostBuild: string | undefined;
 
   constructor(options: MemorySourceOptions) {
     this.client = options.client;
@@ -560,12 +562,15 @@ export class MemorySource {
     this.hasToken = options.hasToken;
     this.sources = options.sources;
     this.ensure = options.ensureServer;
+    this.hostBuild = options.hostBuild;
   }
 
-  /** Server URL and Host identity only; the token value never leaves the Host process. */  describe(): UiConfigView {
+  /** Server URL and Host identity only; the token value never leaves the Host process. */
+  describe(): UiConfigView {
     return {
       serverUrl: this.serverUrl, hostId: this.client.hostId, hasToken: this.hasToken,
       ...(this.sources === undefined ? {} : { sources: this.sources }),
+      ...(this.hostBuild === undefined ? {} : { hostBuild: this.hostBuild }),
     };
   }
 
@@ -723,19 +728,32 @@ export class MemorySource {
         const where = `graph.nodes[${index}]`;
         const category = row['category'];
         const importance = row['importance'];
+        /**
+         * An entity node is not a memory: its id is the entity name and it opens nothing. The
+         * Server sends `kind` only for entities, so an absent value means a memory.
+         */
+        const kind = row['kind'];
+        if (kind !== undefined && kind !== null && kind !== 'memory' && kind !== 'entity') throw malformed(`${where}.kind`);
+        const label = row['label'];
+        const occurrenceCount = row['occurrenceCount'];
         return {
           memoryId: asString(row['memoryId'], `${where}.memoryId`),
+          ...(kind === undefined || kind === null ? {} : { kind: kind as 'memory' | 'entity' }),
           state: asState(row['state'], `${where}.state`),
           publishedAt: asString(row['publishedAt'], `${where}.publishedAt`),
           ...(category === undefined || category === null ? {} : { category: asString(category, `${where}.category`) }),
           ...(importance === undefined || importance === null ? {} : { importance: asInteger(importance, `${where}.importance`) }),
+          ...(label === undefined || label === null ? {} : { label: asString(label, `${where}.label`) }),
+          ...(occurrenceCount === undefined || occurrenceCount === null ? {} : { occurrenceCount: asCount(occurrenceCount, `${where}.occurrenceCount`) }),
         };
       }),
       edges: asArray(value['edges'], 'graph.edges').map((item, index): UiGraphEdge => {
         const row = asRecord(item, `graph.edges[${index}]`);
         const where = `graph.edges[${index}]`;
         const kind = asString(row['kind'], `${where}.kind`);
-        if (kind !== 'Supersedes' && kind !== 'RelatedTo' && kind !== 'Conflicts') throw malformed(`${where}.kind`);
+        // `Entity` records a shared name rather than a catalogued decision, so it is a kind of its
+        // own; refusing it would reject every graph that has one.
+        if (kind !== 'Supersedes' && kind !== 'RelatedTo' && kind !== 'Conflicts' && kind !== 'Entity') throw malformed(`${where}.kind`);
         return {
           relationId: asString(row['relationId'], `${where}.relationId`),
           kind: kind as UiGraphEdge['kind'],
@@ -952,7 +970,23 @@ export class MemorySource {
 
   /** The local Server's state against the remote sync Server. */
   async sync(): Promise<UiSyncStatus> {
-    return parseSyncStatus(unwrap(await this.client.syncStatus()));
+    const response = await this.client.syncStatus();
+    /**
+     * "No remote sync configured" is a state, not a failed read.
+     *
+     * The Server answers it with a 409 so an accidental call cannot look successful, but every
+     * other consumer of this status needs to tell it apart from a broken Server — and a thrown
+     * error loses its code before it reaches the page. Returning it as a value keeps that
+     * distinction intact.
+     */
+    if (!response.ok) {
+      const code = (response.error as { code?: string }).code;
+      return {
+        enabled: false, protocol: 0, streams: [], updatedAt: new Date().toISOString(),
+        unavailableReason: code === 'REVIEW_REQUIRED' ? 'not-configured' : code === 'UNAUTHORIZED' ? 'unauthorized' : 'unreachable',
+      };
+    }
+    return parseSyncStatus(response.value);
   }
 
   async refreshSync(): Promise<UiSyncPass> {

@@ -1,13 +1,13 @@
 import { SkillBacktestPanel, SkillListPanel } from './skill-backtest.tsx';
 import { diffLines, type DiffLine } from '../shared/skills-diff.ts';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { CreateDraft } from './panels.tsx';
-import type { ListSort, UiArchive, UiArchiveCapacity, UiArchiveHistory, UiConfigView, UiConnectionTest, UiEmbeddingDiagnostics, UiExplore, UiGraph, UiInjection, UiMemoryDetail, UiMemoryList, UiMemorySummary, UiOrganizeItem, UiRegisterTest, UiRule, UiRuleUsage, UiSettings, UiSkillDraft, UiSkillEntry, UiSkillReport, UiSkillVersion, UiStatus, UiSyncPass, UiSyncStatus, UiTrashEntry, UiWakeTest, UiWorkspace } from '../shared/contract.ts';
+import type { ListSort, UiArchive, UiArchiveCapacity, UiArchiveHistory, UiConfigView, UiConnectionTest, UiEmbeddingDiagnostics, UiExplore, UiGraph, UiInjection, UiMemoryDetail, UiMemoryList, UiOrganizeItem, UiRegisterTest, UiRule, UiRuleUsage, UiSettings, UiSkillDraft, UiSkillEntry, UiSkillReport, UiSkillVersion, UiStatus, UiSyncPass, UiSyncStatus, UiTrashEntry, UiWakeTest, UiWorkspace } from '../shared/contract.ts';
 import { createApi, RpcFailure } from './api.ts';
 import type { ClientConnection, LocaleService } from './dsh-types.ts';
 import { normalizeLanguage, translate, type Language, type MessageKey } from './i18n.ts';
 import { ensureStyles } from './styles.ts';
-import { ArchivesPanel, CreateMemoryForm, EntitiesPanel, ExplorePanel, MemoryOverviewPanel, MemoryPageHeader, OverviewPanel, RuntimePanel, SettingsPanel, TAB_KEYS, TAB_ORDER, isTab, type MemoryView, type RuleDraft, type Tab } from './panels.tsx';
+import { ArchivesPanel, CreateMemoryForm, EntitiesPanel, ExplorePanel, MemoryCard, MemoryOverviewPanel, MemoryPageHeader, OverviewPanel, RuntimePanel, SettingsPanel, TAB_KEYS, TAB_ORDER, isTab, type MemoryView, type RuleDraft, type Tab } from './panels.tsx';
 import { Modal } from './modal.tsx';
 import {
   availabilityText, classificationLists, classificationMeta, codeText, detailMeta, EDIT_LIMIT_BYTES, editBlocker, neighbourhood,
@@ -15,6 +15,35 @@ import {
   listSummary, openConflicts, relationRows, relativeTime, revisionTimeline,
   statusChips, utf8Bytes, type Chip, type Tone,
 } from './view-model.ts';
+
+/** The skill modules share one page; each one brings its own two columns. */
+const SKILL_MODULES = [
+  { id: 'library', label: 'skills.moduleLibrary' },
+  { id: 'review', label: 'skills.moduleReview' },
+  { id: 'backtest', label: 'skills.moduleBacktest' },
+] as const satisfies ReadonlyArray<{ id: 'library' | 'review' | 'backtest'; label: MessageKey }>;
+
+/**
+ * The review module keeps its list in the left column and nothing selected yet: the form that
+ * fills the right column belongs to the conversation chosen from the backtest panel.
+ */
+function SkillReviewSlot({ language }: { language: Language }): ReactNode {
+  return (
+    <div className="mwui-skills-split">
+      <section className="mwui-skills-rail" aria-label={translate(language, 'skills.review')}>
+        <div className="mwui-pane-header">
+          <span className="mwui-pane-title">{translate(language, 'skills.review')}</span>
+        </div>
+        <div className="mwui-skills-rail-body">
+          <div className="mwui-empty">{translate(language, 'skills.reviewEmpty')}</div>
+        </div>
+      </section>
+      <section className="mwui-skills-main" aria-label={translate(language, 'skills.detail')}>
+        <div className="mwui-empty">{translate(language, 'skills.reviewHint')}</div>
+      </section>
+    </div>
+  );
+}
 
 export interface MemoryPageProps {
   connection: ClientConnection;
@@ -76,38 +105,6 @@ function ChipRow({ chips, ariaLabel }: { chips: Chip[]; ariaLabel: string }): JS
         </span>
       ))}
     </div>
-  );
-}
-
-/** A card summarizing one memory: text first, then classification, revision and age. */
-function MemoryCard({ item, active, language, now, onSelect }: { item: UiMemorySummary; active: boolean; language: Language; now: number; onSelect(id: string): void }): JSX.Element {
-  // No separate title exists, so the body's first line is the headline and the rest the excerpt.
-  const [firstLine, ...rest] = item.content.split('\n');
-  const headline = (firstLine ?? '').trim() === '' ? item.memoryId : firstLine!;
-  const excerpt = rest.join(' ').trim();
-  // Classification is shown only when the revision recorded it: an absent category is not
-  // "general", and labelling it as such would be inventing data.
-  const label = item.category === undefined
-    ? undefined
-    : translate(language, `category.${item.category}` as MessageKey);
-  return (
-    <li>
-      <button type="button" className="mwui-memcard" data-active={active ? 'true' : 'false'} onClick={() => onSelect(item.memoryId)}>
-        <span className="mwui-memcard-title">{headline}</span>
-        {excerpt === '' ? null : <span className="mwui-memcard-excerpt">{excerpt}</span>}
-        <span className="mwui-memcard-meta">
-          {label === undefined ? null : <span className="mwui-chip-slim" data-tone="category">{label}</span>}
-          <span className="mwui-chip-slim">{translate(language, 'detail.revision')} v{item.entryVersion}</span>
-          {item.tags === undefined || item.tags.length === 0 ? null : (
-            <span className="mwui-memcard-tags">{item.tags.slice(0, 3).map(tag => `#${tag}`).join(' ')}</span>
-          )}
-          {item.entities === undefined || item.entities.length === 0 ? null : (
-            <span className="mwui-memcard-tags" data-tone="entity">{item.entities.slice(0, 3).join(' · ')}</span>
-          )}
-          <span>{relativeTime(item.publishedAt, now, language)}</span>
-        </span>
-      </button>
-    </li>
   );
 }
 
@@ -562,6 +559,14 @@ function MemoryWithdrawForm(props: WithdrawFormProps): JSX.Element {
 }
 
 /** The MnemoWeave page: availability, searchable memories, one memory's detail and its edit entry. */
+/**
+ * This bundle's build identity, injected by `build-client.mjs`.
+ *
+ * Read here rather than imported from the entry: the entry imports this module, so importing the
+ * value back would make the two files depend on each other in both directions.
+ */
+const CLIENT_BUILD: string = typeof __MNEMOWEAVE_BUILD__ === 'string' ? __MNEMOWEAVE_BUILD__ : 'dev';
+
 export function MemoryPage(props: MemoryPageProps): JSX.Element {
   const { connection, locale } = props;
   const api = useMemo(() => createApi(connection), [connection]);
@@ -680,6 +685,15 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
   const [entitiesQuery, setEntitiesQuery] = useState('');
   const [entitiesError, setEntitiesError] = useState<string | null>(null);
   const [entitiesLoading, setEntitiesLoading] = useState(false);
+  /**
+   * The memories carrying the entity selected in the entity view.
+   *
+   * The index alone answers "which entity names exist"; picking one is a question about the
+   * memories behind it, so those are read and shown in place with the same card as everywhere else.
+   */
+  const [entityMemories, setEntityMemories] = useState<UiMemoryList | null>(null);
+  const [entityMemoriesError, setEntityMemoriesError] = useState<string | null>(null);
+  const [entityMemoriesLoading, setEntityMemoriesLoading] = useState(false);
   const [exploreQuery, setExploreQuery] = useState('');
   const [explore, setExplore] = useState<UiExplore | null>(null);
   const [exploreError, setExploreError] = useState<string | null>(null);
@@ -697,6 +711,8 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
   const [relatedPreviews, setRelatedPreviews] = useState<Record<string, { status: 'loading' | 'ready' | 'error'; content?: string; state?: string; detail?: string }>>({});
   /** Withdrawal is a separate confirm step because it changes what recall serves. */
   const [withdrawing, setWithdrawing] = useState(false);
+  /** A row asked to withdraw but its detail was not loaded yet; opened once it is. */
+  const [withdrawPending, setWithdrawPending] = useState(false);
   const [withdrawReason, setWithdrawReason] = useState('');
   const [busy, setBusy] = useState(false);
   /** Settings surface: loaded lazily when the settings tab is opened. */
@@ -836,6 +852,23 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     setCurrentContent(current.content);
   }, [api]);
 
+  /**
+   * Load the entity index for the current filters. A one-row page is enough: the Server builds
+   * the index from every visible memory, not from the page it is about to return.
+   */
+  const loadEntities = useCallback(async (signal?: AbortSignal): Promise<void> => {
+    setEntitiesLoading(true);
+    setEntitiesError(null);
+    try {
+      const page = await api.memories({ limit: 1 }, signal);
+      setEntities(page.entities ?? []);
+    } catch (failure) {
+      setEntitiesError(failureText(failure, language));
+    } finally {
+      setEntitiesLoading(false);
+    }
+  }, [api, language]);
+
   // Initial read: availability and the newest memories; the page loads only when opened.
   useEffect(() => {
     const controller = new AbortController();
@@ -843,7 +876,14 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     setError(null);
     void (async () => {
       try {
-        await Promise.all([loadStatus(controller.signal), loadList({ query: '', category: categoryFilter, entity: entityFilter, sort, append: false }, controller.signal)]);
+        // The entity index is read here too: the entity view is reachable straight from the tab
+        // bar, and a view that only fills after some other action shows an empty index on a store
+        // that has entities.
+        await Promise.all([
+          loadStatus(controller.signal),
+          loadList({ query: '', category: categoryFilter, entity: entityFilter, sort, append: false }, controller.signal),
+          loadEntities(controller.signal),
+        ]);
       } catch (failure) {
         if (!controller.signal.aborted) setError(failureText(failure, language));
       } finally {
@@ -851,7 +891,7 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
       }
     })();
     return () => controller.abort();
-  }, [loadStatus, loadList, language]);
+  }, [loadStatus, loadList, loadEntities, language]);
 
   // Debounced search and filter changes share one path: the previous request is aborted so a
   // late result for the old filter cannot land in the new list.
@@ -913,6 +953,17 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     })();
     return () => controller.abort();
   }, [selectedId, loadDetail, language]);
+
+  // A row's withdraw button can be pressed before that memory is open. The request waits here
+  // rather than opening a window that has no memory to act on.
+  useEffect(() => {
+    if (!withdrawPending || detail === null || detail.memoryId !== selectedId) return;
+    setWithdrawPending(false);
+    setWithdrawing(true);
+    setWithdrawReason('');
+    setEditAction(null);
+    setNotice(null);
+  }, [withdrawPending, detail, selectedId]);
 
   /** Switch the detail to a specific revision, or back to the current one. */
   const selectRevision = useCallback((revisionId: string): void => {
@@ -983,6 +1034,11 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
   const [organizeError, setOrganizeError] = useState<string | null>(null);
   const [organizeItems, setOrganizeItems] = useState<UiOrganizeItem[] | null>(null);
   /** Skills DSH can load; read when the skills tab opens. */
+  /**
+   * Which skill module is showing. The modules share one page and one left column instead of
+   * stacking into three cards, so the reader picks a module and the column changes with it.
+   */
+  const [skillModule, setSkillModule] = useState<'library' | 'review' | 'backtest'>('library');
   const [skillsReport, setSkillsReport] = useState<UiSkillReport | null>(null);
   const [skillsError, setSkillsError] = useState<string | null>(null);
   const [selectedSkill, setSelectedSkill] = useState<{ name: string; path: string; hash: string } | null>(null);
@@ -1327,21 +1383,19 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     }
   }, [api, distillation, language, loadArchives]);
 
-  /**
-   * Load the entity index for the current filters. A one-row page is enough: the Server builds
-   * the index from every visible memory, not from the page it is about to return.
-   */
-  const loadEntities = useCallback(async (signal?: AbortSignal): Promise<void> => {
-    setEntitiesLoading(true);
-    setEntitiesError(null);
-    try {
-      const page = await api.memories({ limit: 1 }, signal);
-      setEntities(page.entities ?? []);
-    } catch (failure) {
-      setEntitiesError(failureText(failure, language));
-    } finally {
-      setEntitiesLoading(false);
-    }
+  /** Read the memories behind one entity; called when the entity view selects a name. */
+  const loadEntityMemories = useCallback((entity: string): void => {
+    if (entity === '') { setEntityMemories(null); setEntityMemoriesError(null); return; }
+    const controller = new AbortController();
+    setEntityMemoriesLoading(true);
+    setEntityMemoriesError(null);
+    void api.memories({ entity, limit: 50 }, controller.signal).then(page => {
+      setEntityMemories(page);
+    }).catch((failure: unknown) => {
+      if (!controller.signal.aborted) setEntityMemoriesError(failureText(failure, language));
+    }).finally(() => {
+      if (!controller.signal.aborted) setEntityMemoriesLoading(false);
+    });
   }, [api, language]);
 
   const refresh = useCallback((): void => {
@@ -1517,6 +1571,19 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     setCreating(true);
   }, []);
 
+  /**
+   * Start a new memory from an existing body.
+   *
+   * This is a draft, not a copy: the body is placed in the create form, where it can be edited
+   * before publishing. The original memory is untouched, and its classification is not carried
+   * over because a reworded fact is usually classified differently.
+   */
+  const cloneFromCard = useCallback((content: string): void => {
+    setCreateError(null);
+    setCreateDraft({ ...EMPTY_CREATE_DRAFT, content });
+    setCreating(true);
+  }, []);
+
   const closeCreate = useCallback((): void => {
     setCreating(false);
     setCreateError(null);
@@ -1532,6 +1599,22 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
       setTimeout(() => setCopied(null), 1200);
     }).catch(() => undefined);
   }, [detail]);
+
+  /**
+   * Copy a row's id without opening it. The confirmation is local to that row: setting the
+   * page-wide `copied` state here would show "copied" on the detail panel's button while the
+   * clipboard holds a different memory's id.
+   */
+  const copyMemoryId = useCallback((memoryId: string): Promise<boolean> => {
+    if (typeof navigator === 'undefined' || navigator.clipboard === undefined) return Promise.resolve(false);
+    return navigator.clipboard.writeText(memoryId).then(() => true).catch(() => false);
+  }, []);
+
+  /** Search the shared collection for the row's own text, which is how a related entry is found. */
+  const exploreFromCard = useCallback((content: string): void => {
+    setExploreQuery(content);
+    setMemoryView('recall');
+  }, []);
 
   /** Follow a relation; an unreadable target is reported instead of showing an empty panel. */
   const openRelated = useCallback((memoryId: string): void => {
@@ -1562,12 +1645,21 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
       });
   }, [api, language]);
 
+  /**
+   * Whether the Host that answers this page was composed from the same code.
+   *
+   * The Host reports its own identity through `config`. A mismatch is not an error in itself —
+   * both halves work — but they are not the same version, so a missing endpoint or an empty
+   * panel is explained by it. An unreported identity means an older Host that cannot say; that is
+   * also a mismatch, because this page is newer than anything that predates the field.
+   */
+  const buildMismatch = config !== null && config.hostBuild !== CLIENT_BUILD;
   const chips = useMemo(() => [...statusChips(status, config, language, now), ...(status === null ? [] : [injectionChip(injection, language)])], [status, config, injection, language, now]);
 
   const sizeOf = (value: unknown): number | null => Array.isArray(value) ? value.length : null;
   const counts: Record<Tab, number | null> = {
     overview: null,
-    memories: list === null ? null : list.items.length,
+    memories: list === null ? null : list.total ?? list.items.length,
     runtime: sizeOf(rules),
     archives: sizeOf(archives),
     skills: null,
@@ -1686,6 +1778,19 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
     setEditAction(null);
     setNotice(null);
   }, []);
+
+  /**
+   * Withdraw straight from a row.
+   *
+   * The confirmation window reads the memory it is acting on, so the row is selected first and
+   * the withdrawal opens only once that memory's detail is loaded. A row whose detail is still
+   * loading keeps the button disabled rather than opening an empty window.
+   */
+  const withdrawFromCard = useCallback((memoryId: string): void => {
+    if (detail !== null && detail.memoryId === memoryId) { beginWithdraw(); return; }
+    setWithdrawPending(true);
+    setSelectedId(memoryId);
+  }, [detail, beginWithdraw]);
 
   const cancelWithdraw = useCallback((): void => {
     setWithdrawing(false);
@@ -1806,7 +1911,13 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
           focusId={selectedId}
           language={language}
           onReloadGraph={() => { void loadGraph(); }}
-          onOpen={openMemoryFromView}
+          onExploreMemory={exploreFromCard}
+          onExploreEntity={value => {
+            // An entity node has no memory to open; its name is the filter the entity page reads.
+            setMemoryView('entities');
+            setEntityFilter(value);
+            loadEntityMemories(value);
+          }}
         />
       ) : memoryView === 'recall' ? (
         <ExplorePanel
@@ -1822,6 +1933,8 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
           onSearch={() => { void searchExplore(); }}
           onShowMore={() => { void searchExplore({ limit: Math.min(50, exploreLimit * 2) }); }}
           onOpen={openMemoryFromView}
+          onCopyId={copyMemoryId}
+          onClone={cloneFromCard}
         />
       ) : memoryView === 'entities' ? (
         <EntitiesPanel
@@ -1833,15 +1946,21 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
           active={entityFilter}
           onChangeQuery={setEntitiesQuery}
           onSelect={value => {
-            // Applying the entity to the content list is the point of this view; moving there
-            // keeps one results view instead of a second one that could drift from it.
+            // Selecting reads that entity's memories in place; the same card is used as elsewhere,
+            // so the view does not need a second results layout that could drift from it.
             setEntityFilter(value);
-            setMemoryView('content');
+            loadEntityMemories(value);
           }}
+          memories={entityMemories}
+          memoriesError={entityMemoriesError}
+          memoriesLoading={entityMemoriesLoading}
+          onOpen={openMemoryFromView}
+          onCopyId={copyMemoryId}
+          onClone={cloneFromCard}
         />
       ) : (
       <>
-      <div className="mwui-body" data-view={selectedId === null ? 'list' : 'detail'}>
+      <div className="mwui-content">
         <section className="mwui-pane mwui-pane-list" aria-label={translate(language, 'list.title')}>
           <div className="mwui-pane-header">
             <span className="mwui-pane-title">{translate(language, 'list.title')}</span>
@@ -1911,7 +2030,7 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
           </div>
           {/* Creating publishes straight to a formal memory; the page-level action starts the
               form in the content view rather than repeating the button in every filter row. */}
-          <ul className="mwui-list">
+          <ul className="mwui-memory-grid">
             {list === null
               ? <li className="mwui-empty">{translate(language, 'list.loading')}</li>
               : list.items.length === 0
@@ -1924,6 +2043,10 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
                     language={language}
                     now={now}
                     onSelect={selectMemory}
+                    onCopyId={copyMemoryId}
+                    onRelated={exploreFromCard}
+                    onWithdraw={withdrawFromCard}
+                    onClone={cloneFromCard}
                   />
                 ))}
           </ul>
@@ -1940,43 +2063,41 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
               </button>
             : null}
         </section>
-
-        <section className="mwui-pane mwui-pane-detail" aria-label={translate(language, 'detail.title')}>
-          <div className="mwui-pane-header">
-            <span className="mwui-pane-title">{translate(language, 'detail.title')}</span>
-            {/* Narrow screens show one pane at a time; this returns to the list with filter and
-                selection intact, because both panes stay mounted. */}
-            <button type="button" className="mwui-button mwui-mini mwui-back" onClick={() => setSelectedId(null)}>
-              {translate(language, 'list.title')}
-            </button>
-          </div>
-          {detail === null || detail.memoryId !== selectedId
-            ? <div className="mwui-empty">{translate(language, 'detail.placeholder')}</div>
-            : (
-              <DetailView
-                detail={detail}
-                language={language}
-                copied={copied}
-                comparing={comparing}
-                currentContent={currentContent}
-                onBeginEdit={beginEdit}
-                onBeginWithdraw={beginWithdraw}
-                onCopy={copy}
-                onSelectRevision={selectRevision}
-                onBackToCurrent={backToCurrent}
-                onToggleCompare={toggleCompare}
-                onOpenRelated={openRelated}
-                relatedPreviews={relatedPreviews}
-                onPreviewRelated={previewRelated}
-                neighbours={graph === null || detail === null ? [] : neighbourhood(graph, detail.memoryId, 2)}
-                graphLoading={graphLoading}
-                graphError={graphError}
-                graphTruncated={graph !== null && graph.truncated}
-                onLoadGraph={() => { void loadGraph(); }}
-              />
-            )}
-        </section>
       </div>
+      {selectedId === null || detail === null || detail.memoryId !== selectedId ? null : (
+        /**
+         * The detail is a floating window rather than a second column: the list keeps the whole
+         * width for its two-column grid, and reading one memory no longer narrows every row.
+         */
+        <Modal
+          title={translate(language, 'detail.title')}
+          subtitle={selectedId}
+          onClose={() => setSelectedId(null)}
+          language={language}
+        >
+          <DetailView
+            detail={detail}
+            language={language}
+            copied={copied}
+            comparing={comparing}
+            currentContent={currentContent}
+            onBeginEdit={beginEdit}
+            onBeginWithdraw={beginWithdraw}
+            onCopy={copy}
+            onSelectRevision={selectRevision}
+            onBackToCurrent={backToCurrent}
+            onToggleCompare={toggleCompare}
+            onOpenRelated={openRelated}
+            relatedPreviews={relatedPreviews}
+            onPreviewRelated={previewRelated}
+            neighbours={graph === null || detail === null ? [] : neighbourhood(graph, detail.memoryId, 2)}
+            graphLoading={graphLoading}
+            graphError={graphError}
+            graphTruncated={graph !== null && graph.truncated}
+            onLoadGraph={() => { void loadGraph(); }}
+          />
+        </Modal>
+      )}
       </>
       )}
       {organizing ? (
@@ -2160,7 +2281,25 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
           }
         }} />
       ) : tab === 'skills' ? (
-        <>
+        /* The skill panel lays itself out in two columns; the page only needs a flex host so
+           the split can take the remaining height. */
+        <div className="mwui-single">
+          <div className="mwui-skills-tabs" role="tablist" aria-label={translate(language, 'skills.modules')}>
+            {SKILL_MODULES.map(module => (
+              <button
+                key={module.id}
+                type="button"
+                role="tab"
+                className="mwui-skills-tab"
+                aria-selected={skillModule === module.id}
+                data-active={skillModule === module.id ? 'true' : 'false'}
+                onClick={() => setSkillModule(module.id)}
+              >
+                {translate(language, module.label)}
+              </button>
+            ))}
+          </div>
+          {skillModule === 'library' ? (
           <SkillListPanel
             language={language}
             report={skillsReport}
@@ -2189,6 +2328,11 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
               void api.setSkillAutoAdopt({ autoAdopt: enabled }).catch(failure => setSkillsError(failureText(failure, language)));
             }}
           />
+          ) : null}
+          {skillModule === 'review' ? (
+            <SkillReviewSlot language={language} />
+          ) : null}
+          {skillModule === 'backtest' ? (
           <SkillBacktestPanel
             language={language}
             run={api.skillBacktest}
@@ -2217,7 +2361,8 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
               }).catch(failure => setSkillsError(failureText(failure, language)));
             }}
           />
-        </>
+          ) : null}
+        </div>
       ) : (
         settings === null
           ? <div className="mwui-empty">{translate(language, 'list.loading')}</div>
@@ -2249,6 +2394,14 @@ export function MemoryPage(props: MemoryPageProps): JSX.Element {
       <footer className="mwui-footer">
         <span>{translate(language, 'footer.note')}</span>
         <span className="mwui-spacer" />
+        {buildMismatch ? (
+          // The page was fetched from disk after the Host was composed, so a rebuild without a
+          // restart leaves the two on different code. Saying which side is stale is the point:
+          // the alternative is an empty panel that looks like a bug in the plugin.
+          <span className="mwui-inline-error" role="alert" data-build-mismatch="true">
+            {translate(language, 'build.mismatch')}
+          </span>
+        ) : null}
         {config === null ? null : <span className="mwui-mono">{config.serverUrl}</span>}
       </footer>
     </div>

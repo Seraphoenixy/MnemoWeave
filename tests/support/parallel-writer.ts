@@ -11,7 +11,7 @@ const request = (index: number): RememberRequest => ({
   idempotencyKey: `${keyPrefix}-${String(index).padStart(4, '0')}`,
   content: `${contentArg} writer=${process.pid} index=${index}`,
   tags: [],
-  provenance: { source: 'parallel-writer', sourceReference: `fixture:${process.pid}:${index}`, evidence: ['multi-process fixture'], verificationStatus: 'unverified', confidence: 0.5, applicability: 'hardening fixture', limitations: 'test only', lastVerified: null },
+  provenance: { source: 'parallel-writer', sourceReference: `fixture:${process.pid}:${index}`},
 });
 const repo = new SqliteCandidates(join(path));
 try {

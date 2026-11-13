@@ -17,17 +17,24 @@ const memoryBody = z.string().refine(
   'Content must contain 1–8000 UTF-8 bytes',
 );
 
+/**
+ * Where a memory came from, and nothing else.
+ *
+ * `source` and `sourceReference` are the two fields a read path actually consults: the catalog
+ * keys a synced revision by its reference, and sync distinguishes its own writes by source.
+ * Four more fields once sat here — an evidence list, a verification status, a confidence score,
+ * a limitations note and a last-verified date — and no production code path ever read any of
+ * them; every writer filled in a fixed string. A field that only records what the writer typed
+ * describes nothing the system verifies, so it is gone rather than kept as decoration.
+ *
+ * Verification is expressed where it is observable: a memory is `unverified` in the catalog until
+ * a publication receipt exists, and a withdrawal is its own operation. What a fact applies to is
+ * part of the fact's own text, which is also how the Provider decides two entries are the same.
+ */
 export const Provenance = z.object({
   source: z.string().trim().min(1).max(200),
   sourceReference: z.string().trim().min(1).max(2000),
-  evidence: z.array(z.string().trim().min(1).max(2000)).min(1).max(20),
-  verificationStatus: z.enum(['unverified', 'verified', 'disputed']),
-  confidence: z.number().min(0).max(1).optional(),
-  applicability: z.string().trim().min(1).max(2000),
-  limitations: z.string().trim().min(1).max(2000),
-  lastVerified: z.iso.datetime().nullable(),
 }).strict();
-
 export const ChangeIntent = z.object({
   kind: z.enum(['revise', 'supersede', 'coexist', 'conflict']),
   targetMemoryId: z.uuid(), expectedRevisionId: z.uuid(),
@@ -64,17 +71,14 @@ export const SubmissionReceipt = z.object({
   status: z.literal('candidate'), submittedAt: z.iso.datetime(),
 });
 
-const Check = z.object({ result: z.enum(['pass', 'fail', 'uncertain']), reason: z.string().min(1).max(2000) }).strict();
-export const SemanticAssessment = z.object({
-  checks: z.object({ source: Check, accuracy: Check, reuse: Check, scope: Check, duplication: Check, consistency: Check }).strict(),
-  requiresHuman: z.boolean(), conflict: z.enum(['none', 'uncertain', 'factual', 'evolution', 'supersedes', 'different_scope']),
-  summary: z.string().min(1).max(2000),
-}).strict();
-export type Assessment = z.infer<typeof SemanticAssessment>;
-
+/**
+ * A review is a decision and the reason for it. There is no structured assessment: the Server
+ * does not call a model, so nothing produces one, and a field that only ever holds null would
+ * describe a judgement the system never makes.
+ */
 export const ReviewRecord = z.object({
   id: z.uuid(), decision: z.enum(['approve', 'reject', 'human', 'retry', 'resubmitted']),
-  actor: z.string(), reason: z.string(), createdAt: z.iso.datetime(), assessment: SemanticAssessment.nullable(),
+  actor: z.string(), reason: z.string(), createdAt: z.iso.datetime(),
 });
 
 const ExecutionBase = { id: z.uuid(), taskId: z.uuid(), runId: z.uuid(), createdAt: z.iso.datetime(), writeKey: z.string() };
@@ -89,7 +93,6 @@ export const RevisionDescriptor = z.object({
   id: z.uuid(), memoryId: z.uuid(), number: z.number().int().positive(), parentId: z.uuid().nullable(),
   providerMemoryId: z.string().min(1), contentHash: z.string().regex(/^[a-f0-9]{64}$/),
   candidateId: z.uuid(), publishedAt: z.iso.datetime(), effectiveAt: z.iso.datetime(),
-  applicability: z.string(),
   /** Classification attached to this revision; omitted when none was recorded. */
   category: Category.optional(),
   importance: z.number().int().min(1).max(5).optional(),
@@ -123,7 +126,7 @@ export type ConflictResolutionRequest = z.infer<typeof ConflictResolutionInput>;
 /** Catalog metadata for one formal memory: pointers and revisions only, never the body. */
 export const MemoryDescriptor = z.object({
   id: z.uuid(), currentRevisionId: z.uuid(), state: z.enum(['active', 'superseded', 'unverified']),
-  applicability: z.string(), revisions: z.array(RevisionDescriptor),
+  revisions: z.array(RevisionDescriptor),
   relations: z.array(LogicalRelation).default([]),
   conflicts: z.array(ConflictDescriptor).default([]),
 }).strict();
@@ -134,7 +137,7 @@ export const MemoryIdInput = z.object({ memoryId: z.uuid(), revisionId: z.uuid()
 /** One entry of the client-facing memory list; content comes from the authoritative Provider. */
 export const MemoryListItem = z.object({
   memoryId: z.uuid(), revisionId: z.uuid(), providerMemoryId: z.string().min(1),
-  applicability: z.string(), publishedAt: z.iso.datetime(), content: z.string(),
+  publishedAt: z.iso.datetime(), content: z.string(),
   entryVersion: z.number().int().nonnegative(),
   category: Category.optional(),
   importance: z.number().int().min(1).max(5).optional(),
@@ -164,6 +167,13 @@ export const MemoryList = z.object({
   categories: z.array(z.object({ value: z.string(), count: z.number().int().nonnegative() }).strict()).optional(),
   /** Entities named by the current revisions in the browsable set, in their recorded spelling. */
   entities: z.array(z.object({ value: z.string(), count: z.number().int().nonnegative() }).strict()).optional(),
+  /**
+   * How many memories the catalog holds, before any query or entity filter.
+   *
+   * `items` answers "what this page shows"; a tab that counted it would report the filtered size
+   * as the size of the library, so picking one entity would look like losing twelve memories.
+   */
+  total: z.number().int().nonnegative().optional(),
 }).strict();
 export type MemoryListRecord = z.infer<typeof MemoryList>;
 
@@ -203,17 +213,33 @@ export const MemoryGraphQuery = z.object({
   limit: z.coerce.number().int().min(1).max(500).default(200),
 }).strict();
 export const MemoryGraphNode = z.object({
-  memoryId: z.uuid(),
+  /**
+   * The memory id, or the entity name for an entity node.
+   *
+   * Entities are nodes because most of what connects these memories is the entities they share —
+   * the Provider indexes that, and a drawing that only showed catalogued decisions would show
+   * almost nothing. An entity name is not a uuid, so this is a plain string.
+   */
+  memoryId: z.string().min(1),
+  kind: z.enum(['memory', 'entity']).optional(),
   state: z.enum(['active', 'superseded', 'unverified']),
   publishedAt: z.iso.datetime(),
   category: z.string().optional(),
   importance: z.number().int().min(1).max(5).optional(),
+  /** Memory content or the entity name, whichever the node stands for. */
+  label: z.string().optional(),
+  /** How many memories name this entity; absent for a memory node. */
+  occurrenceCount: z.number().int().nonnegative().optional(),
 }).strict();
 export const MemoryGraphEdge = z.object({
   relationId: z.string().min(1),
-  kind: z.enum(['Supersedes', 'RelatedTo', 'Conflicts']),
-  sourceMemoryId: z.uuid(),
-  targetMemoryId: z.uuid(),
+  /**
+   * `Entity` is not a catalogued decision: it records that two memories share an entity, which no
+   * review produced. Keeping it distinguishable is what lets the drawing style it differently.
+   */
+  kind: z.enum(['Supersedes', 'RelatedTo', 'Conflicts', 'Entity']),
+  sourceMemoryId: z.string().min(1),
+  targetMemoryId: z.string().min(1),
   reason: z.string(),
   effectiveAt: z.iso.datetime(),
 }).strict();

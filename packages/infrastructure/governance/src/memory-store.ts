@@ -154,11 +154,6 @@ export class SqliteMemoryStore implements MemoryApplyStore {
       provenance: {
         source: 'sync',
         sourceReference: `mnemoweave:${input.entryId}:${input.version}`,
-        evidence: [`synced from the shared server at ${input.at}`],
-        verificationStatus: 'verified',
-        applicability: 'shared collection',
-        limitations: '内容由其他设备写入，本机未重新审核',
-        lastVerified: input.at,
       },
     });
     this.catalog.publishSynced(input.entryId, request, input.providerId, input.contentHash, input.at, 'sync', `synced revision ${input.version}`, {

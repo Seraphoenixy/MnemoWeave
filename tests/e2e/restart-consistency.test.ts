@@ -12,6 +12,7 @@ import { MemoryClient } from '../../packages/client/src/index.ts';
 import { createHttpServer } from '../../packages/protocols/http/src/index.ts';
 import { configure } from '../../apps/server/src/config.ts';
 import { mnemonBinary } from '../e2e/mnemon-binary.ts';
+import { tempDir } from '../support/temp.ts';
 
 /**
  * A written edit must survive a restart.
@@ -56,8 +57,7 @@ async function seed(root: string): Promise<string> {
   const request = RememberInput.parse({
     idempotencyKey: `restart-${randomUUID()}`, content: '重启前的初始正文。', tags: [],
     provenance: {
-      source: 'local-user', sourceReference: 'restart:fixture', evidence: ['restart'], verificationStatus: 'verified',
-      confidence: 1, applicability: 'global', limitations: '无（验收固定值）', lastVerified: '2026-11-10T00:00:00.000Z',
+      source: 'local-user', sourceReference: 'restart:fixture',
     },
   });
   const candidate = repo.submit(request);
@@ -68,7 +68,7 @@ async function seed(root: string): Promise<string> {
 }
 
 test('an edit made before a restart is still the current version afterwards', async () => {
-  const root = resolve('work', 'restart-edit', randomUUID());
+  const root = await tempDir('restart-consistency', 'restart-edit');
   const memoryId = await seed(root);
 
   await withServer(root, async client => {
@@ -93,7 +93,7 @@ test('an edit made before a restart is still the current version afterwards', as
 });
 
 test('a withdrawal made before a restart stays in effect', async () => {
-  const root = resolve('work', 'restart-withdraw', randomUUID());
+  const root = await tempDir('restart-consistency', 'restart-withdraw');
   const memoryId = await seed(root);
 
   await withServer(root, async client => {

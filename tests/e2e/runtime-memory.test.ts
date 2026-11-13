@@ -15,7 +15,6 @@ import { tempDir } from '../support/temp.ts';
  * resident rule set; formal memory is reached through the recall tool, not through the injection.
  */
 test('Real Mnemon + Server + ZCode hook process + MCP proxy deliver resident rules and reachable memory', { timeout: 60000 }, async () => {
-  await mkdir('work/e2e', { recursive: true });
   const root = await tempDir('runtime-memory', 'runtime-flow');
   const env = {
     MNEMON_BINARY: mnemonBinary(), MNEMON_DATA_DIR: join(root, 'provider'), MNEMON_STORE: 'acceptance',
@@ -36,9 +35,7 @@ test('Real Mnemon + Server + ZCode hook process + MCP proxy deliver resident rul
       idempotencyKey: 'runtime-resident-001',
       content: 'Runtime acceptance: always use the isolated acceptance store.',
       provenance: {
-        source: 'e2e', sourceReference: 'isolated runtime scenario', evidence: ['fixture only'],
-        verificationStatus: 'unverified', confidence: 0.5, applicability: 'runtime acceptance only',
-        limitations: 'test data', lastVerified: null,
+        source: 'e2e', sourceReference: 'isolated runtime scenario',
       },
     });
     assert.equal(submission.status, 202);

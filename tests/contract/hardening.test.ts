@@ -13,11 +13,10 @@ import { tempDir } from '../support/temp.ts';
 const DAY_MS = 86_400_000;
 const request = (key: string, content = `Hardening fixture content for ${key}.`): RememberRequest => ({
   idempotencyKey: key, content, tags: [],
-  provenance: { source: 'hardening-test', sourceReference: 'fixture:hardening', evidence: ['fixture'], verificationStatus: 'unverified', confidence: 0.5, applicability: 'hardening fixture', limitations: 'test only', lastVerified: null },
+  provenance: { source: 'hardening-test', sourceReference: 'fixture:hardening'},
 });
 
 async function fixture() {
-  await mkdir('work/tests', { recursive: true });
   const root = await tempDir('hardening', 'hardening');
   return { root, path: join(root, 'governance.db') };
 }
@@ -47,7 +46,7 @@ test('Lease fencing survives clock drift: expired leases cannot commit, future s
   const other = new SqliteCandidates(path);
   try {
     const candidate = repo.submit(request('hardening-clock-001'));
-    repo.review(candidate.id, 'approve', 'operator', 'fixture', null);
+    repo.review(candidate.id, 'approve', 'operator', 'fixture');
     assert.equal(repo.acquire('first', 90000), true);
     const job = repo.claim('first')!;
     repo.writing(job);
@@ -74,7 +73,7 @@ test('Retention sweep and reopen stay correct at data scale', async () => {
     const count = 300;
     for (let index = 0; index < count; index++) {
       const candidate = repo.submit(request(`hardening-scale-${String(index).padStart(4, '0')}`));
-      if (index % 2 === 0) repo.review(candidate.id, 'reject', 'operator', 'scale fixture', null);
+      if (index % 2 === 0) repo.review(candidate.id, 'reject', 'operator', 'scale fixture');
     }
     const future = new Date(Date.now() + 40 * DAY_MS);
     const report = repo.sweepRetention(future);
@@ -113,7 +112,7 @@ test('Two real processes racing one version operation leave exactly one durable 
     // Publish the base memory the racers will revise.
     const baseInput = request('hardening-race-base', 'Race base generation.');
     const baseCandidate = repo.submit(baseInput);
-    repo.review(baseCandidate.id, 'approve', 'operator', 'fixture', null);
+    repo.review(baseCandidate.id, 'approve', 'operator', 'fixture');
     const written = await provider.persistReviewed(baseInput.content);
     repo.acquire('race-owner', 90000);
     repo.finish(repo.claim('race-owner')!, written, false);

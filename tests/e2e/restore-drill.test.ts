@@ -17,7 +17,7 @@ import { mnemonBinary } from './mnemon-binary.ts';
  * drafts and backtests have no storage yet, so they are listed as absent rather than implied.
  */
 test('an isolated copy restores rules, an archive with history, and a formal memory', async () => {
-  await mkdir(resolve('work', 'restore-drill'), { recursive: true });
+  await mkdir(await tempDir('restore-drill', 'restore-drill'), { recursive: true });
   const rootA = await tempDir('restore-drill', 'source');
   const stateA = join(rootA, 'state');
   const providerA = join(rootA, 'provider');
@@ -38,8 +38,7 @@ test('an isolated copy restores rules, an archive with history, and a formal mem
     const request = RememberInput.parse({
       idempotencyKey: `restore-${logicalId}`, content, tags: ['restore'],
       provenance: {
-        source: 'local-user', sourceReference: 'restore-drill', evidence: ['drill'], verificationStatus: 'verified',
-        confidence: 1, applicability: 'project', limitations: '无', lastVerified: '2026-11-10T00:00:00.000Z',
+        source: 'local-user', sourceReference: 'restore-drill',
       },
     });
     repo.catalog.publishSynced(logicalId, request, written.id, createHash('sha256').update(content).digest('hex'), '2026-11-10T02:00:00.000Z', 'sync', 'drill', {});

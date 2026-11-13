@@ -1,3 +1,4 @@
+import { tempDir } from '../support/temp.ts';
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync } from 'node:fs';
@@ -18,7 +19,7 @@ let server: Server;
 let base: string;
 
 before(async () => {
-  const dir = join('work', 'sync-http-test', randomUUID());
+  const dir = await tempDir('sync-http', 'sync-http-test');
   mkdirSync(dir, { recursive: true });
   store = new SyncStore({ path: join(dir, 'sync.db'), now: () => NOW });
   store.enroll('device-a', TOKEN, [

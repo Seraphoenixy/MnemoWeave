@@ -11,7 +11,7 @@ import { tempDir } from '../support/temp.ts';
 const DAY_MS = 86_400_000;
 const request = (key: string, content = 'Retention fixture content for candidate clearing.'): RememberRequest => ({
   idempotencyKey: key, content, tags: [],
-  provenance: { source: 'retention-test', sourceReference: 'fixture:retention', evidence: ['fixture'], verificationStatus: 'unverified', confidence: 0.5, applicability: 'isolated retention fixture', limitations: 'not production knowledge', lastVerified: null },
+  provenance: { source: 'retention-test', sourceReference: 'fixture:retention'},
 });
 
 const hostEvent = (overrides: Record<string, unknown> = {}) => ({
@@ -21,7 +21,6 @@ const hostEvent = (overrides: Record<string, unknown> = {}) => ({
 });
 
 async function fixture() {
-  await mkdir('work/tests', { recursive: true });
   const root = await tempDir('retention', 'retention');
   const repo = new SqliteCandidates(join(root, 'governance.db'));
   return { root, repo };
@@ -108,7 +107,7 @@ test('Candidate bodies clear 30 days after entering a clearable state, metadata 
   try {
     const input = request('retention-clear-001');
     const candidate = repo.submit(input);
-    repo.review(candidate.id, 'reject', 'operator', 'fixture rejection', null);
+    repo.review(candidate.id, 'reject', 'operator', 'fixture rejection');
     assert.equal(repo.get(candidate.id).status, 'rejected');
     const early = repo.sweepRetention(new Date(Date.now() + 1 * DAY_MS));
     assert.ok(early.deferredCandidates.some(item => item.candidateId === candidate.id && item.reason === 'retention_not_due'));
@@ -134,18 +133,16 @@ test('Cleared candidate bodies never affect published revision reads', async () 
   try {
     const input = request('retention-catalog-001', 'Catalog integrity across body clearing.');
     const candidate = repo.submit(input);
-    repo.review(candidate.id, 'approve', 'operator', 'fixture', null);
+    repo.review(candidate.id, 'approve', 'operator', 'fixture');
     repo.acquire('retention-owner', 90000);
     repo.finish(repo.claim('retention-owner')!, { id: 'retention-provider', action: 'added' }, false);
     repo.release('retention-owner');
     const publication = repo.get(candidate.id).publication!;
     const before = repo.catalog.get(publication.memoryId);
-    assert.equal(before.revisions[0]!.applicability, input.provenance.applicability);
     const report = repo.sweepRetention(new Date(Date.now() + (CANDIDATE_BODY_RETENTION_DAYS + 1) * DAY_MS));
     assert.equal(report.clearedCandidates, 1);
     const after = repo.catalog.get(publication.memoryId);
     assert.deepEqual(after, before);
-    assert.equal(after.revisions[0]!.applicability, input.provenance.applicability);
   } finally { repo.close(); }
 });
 
@@ -154,16 +151,16 @@ test('Active, conflicted and evidence-referenced candidates never clear by deadl
   try {
     const pending = repo.submit(request('retention-pending-001'));
     const base = repo.submit(request('retention-base-001', 'Base memory for conflict protection.'));
-    repo.review(base.id, 'approve', 'operator', 'fixture', null);
+    repo.review(base.id, 'approve', 'operator', 'fixture');
     repo.acquire('owner-base', 90000);
     repo.finish(repo.claim('owner-base')!, { id: 'retention-provider-base', action: 'added' }, false);
     repo.release('owner-base');
     const publication = repo.get(base.id).publication!;
     const conflicted = repo.submit({ ...request('retention-conflict-001', 'Conflicting conclusion awaiting adjudication.'), change: { kind: 'conflict', targetMemoryId: publication.memoryId, expectedRevisionId: publication.revisionId, effectiveAt: new Date().toISOString(), reason: 'fixture conflict', evidence: ['fixture'] } });
     assert.ok(repo.get(conflicted.id).conflictCaseId);
-    repo.review(conflicted.id, 'reject', 'operator', 'withdraw the conflict', null);
+    repo.review(conflicted.id, 'reject', 'operator', 'withdraw the conflict');
     const persisted = repo.submit(request('retention-persisted-001'));
-    repo.review(persisted.id, 'approve', 'operator', 'fixture', null);
+    repo.review(persisted.id, 'approve', 'operator', 'fixture');
     repo.acquire('owner-persisted', 90000);
     repo.finish(repo.claim('owner-persisted')!, { id: 'retention-provider-2', action: 'added' }, false);
     repo.release('owner-persisted');

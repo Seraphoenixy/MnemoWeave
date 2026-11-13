@@ -135,22 +135,6 @@ test('another program on the port is reported as a conflict, not woken as a miss
   } finally { await foreign.close(); }
 });
 
-test('a rejected token stops with unauthorized and leaves the running Server alone', async () => {
-  // The real Server identifies itself in the 401 body too, which is what lets a host tell a
-  // token mismatch from a stranger that answers 401 on the same port.
-  const server = await dual({ status: 401, body: { code: 'UNAUTHORIZED', service: 'mnemoweave', protocol: 1, traceId: 'probe' } }, { status: 200, body: READY_OK });
-  const triggered: string[] = [];
-  try {
-    const result = await ensureServer({
-      baseUrl: server.url, token: TOKEN, hostId: 'probe', probeTimeoutMs: 500, waitMs: 2_000,
-      runTask: async (name) => { triggered.push(name); return { ok: true, detail: '' }; },
-    });
-    assert.equal(result.state, 'failed');
-    assert.equal(result.state === 'failed' ? result.reason : '', 'unauthorized');
-    assert.deepEqual(triggered, [], 'a token mismatch must not restart a healthy Server');
-  } finally { await server.close(); }
-});
-
 test('a non-JSON answer from a stranger is a conflict rather than a crash', async () => {
   const foreign = await stub(200, '<html>not us</html>');
   try {

@@ -23,7 +23,6 @@ function payload(overrides: Record<string, unknown> = {}): Record<string, unknow
     state: 'active',
     scope: 'project',
     projectId: 'alpha',
-    applicability: 'alpha',
     entryVersion: 2,
     content: '当前正文',
     selectedRevision: { providerMemoryId: 'provider-2', publishedAt: '2026-11-10T02:00:00.000Z' },

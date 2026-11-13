@@ -373,10 +373,7 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
           idempotencyKey: `edit-${randomUUID()}`.slice(0, 128), content: input.content,
           category, importance, tags, entities,
           provenance: {
-            source: origin.actor, sourceReference: origin.reference, evidence: origin.evidence,
-            verificationStatus: origin.actor === 'local-user' ? 'unverified' : 'verified',
-            applicability: descriptor.applicability, limitations: origin.reason,
-            lastVerified: origin.actor === 'local-user' ? null : time,
+            source: origin.actor, sourceReference: origin.reference,
           },
         }), providerId, hash, time, entryVersion, origin.actor, origin.reason, classificationOf(input));
         return { memoryId, revisionId: published.revisionId, providerMemoryId: providerId, contentHash: hash, entryVersion };
@@ -612,8 +609,6 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
             ...(input.evidenceRefs === undefined ? {} : { evidenceRefs: input.evidenceRefs }),
             provenance: {
               source: 'task-agent', sourceReference: reference,
-              evidence: input.evidenceRefs ?? [input.reason], verificationStatus: 'unverified',
-              applicability: 'shared collection', limitations: '写入任务无法确定依据是否充分，进入人工审核。', lastVerified: null,
             },
           }));
           return { status: 'needs_review', candidateId: candidate.id };
@@ -627,13 +622,11 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
           ...(input.evidenceRefs === undefined ? {} : { evidenceRefs: input.evidenceRefs }),
           provenance: {
             source: 'task-agent', sourceReference: reference,
-            evidence: input.evidenceRefs ?? [input.reason], verificationStatus: 'verified',
-            applicability: 'shared collection', limitations: '无（授权任务写入）', lastVerified: verifiedAt ?? null,
           },
         });
         const candidate = candidates.submit(request);
         if (candidate.status === 'pending_review' || candidate.status === 'needs_review') {
-          candidates.review(candidate.id, 'approve', 'task-agent', input.reason, null);
+          candidates.review(candidate.id, 'approve', 'task-agent', input.reason);
         }
         let publication: Publication;
         try {
@@ -661,11 +654,11 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
       /**
        * Resolve one evidence reference for the action that cites it.
        *
-       * A conversation write cites a persisted user event of the same turn or a host-attested
-       * engineering record; a reply save cites the confirmed reply; an organize task cites the
-       * host's own persisted instruction; a distillation cites its draft confirmation. A
-       * reference that does not resolve for this Host is an invalid request, not a weaker write:
-       * the whole point of the field is that the assertion can be checked.
+       * A conversation write cites a persisted user event of the same turn; a reply save cites
+       * the confirmed reply; an organize task cites the host's own persisted instruction; a
+       * distillation cites its draft confirmation. A reference that does not resolve for this
+       * Host is an invalid request, not a weaker write: the whole point of the field is that the
+       * assertion can be checked.
        */
       const assertEvidence = (hostId: string, action: ReturnType<typeof WriteTaskAction.parse>, taskId: string): void => {
         const refs = action.evidenceRefs ?? [];
@@ -686,14 +679,10 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
         for (const ref of refs) {
           if (sessionId === undefined) throw new MnemoWeaveError('INVALID_INPUT');
           const message = candidates.turns.messages(hostId, sessionId).find(item => item.eventId === ref);
-          if (message !== undefined) {
-            // A user event is usable for the turn that produced it, either as this turn's own
-            // write or as the reply a save cites within the same session.
-            if (turnId !== undefined && message.turnId !== turnId && action.trigger === 'conversation') throw new MnemoWeaveError('INVALID_INPUT');
-            continue;
-          }
-          if (turnId !== undefined && candidates.evidence.get(hostId, sessionId, turnId, ref) !== null) continue;
-          throw new MnemoWeaveError('INVALID_INPUT');
+          if (message === undefined) throw new MnemoWeaveError('INVALID_INPUT');
+          // A user event is usable for the turn that produced it, either as this turn's own
+          // write or as the reply a save cites within the same session.
+          if (turnId !== undefined && message.turnId !== turnId && action.trigger === 'conversation') throw new MnemoWeaveError('INVALID_INPUT');
         }
       };
 
@@ -831,8 +820,6 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
                 ...(action.entities === undefined ? {} : { entities: action.entities }),
                 provenance: {
                   source: 'task-agent', sourceReference: `write-task:${taskId}:${index}`,
-                  evidence: action.evidenceRefs ?? [action.reason], verificationStatus: 'unverified',
-                  applicability: base.descriptor.applicability, limitations: '写入任务无法确定依据是否充分，进入人工审核。', lastVerified: null,
                 },
               }));
               return { status: 'needs_review', candidateId: candidate.id };
@@ -1205,36 +1192,122 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
         memories: async ({ query, limit, category, entity, sort, cursor }) => {
           const terms = query ? query.toLowerCase().split(/\s+/).filter(Boolean) : [];
           const order: ListSort = sort ?? 'newest';
+          /**
+           * The list answers "what memories exist", so the Provider is the source of truth.
+           *
+           * Every entry it holds is adopted into the catalog if this Server has not seen it yet:
+           * a memory written by another tool, or before this catalog existed, is still part of the
+           * library. The catalog then supplies what only it knows — the entry version, the
+           * revision history — while the Provider supplies the body and classification.
+           */
+          const providerRows = typeof provider.listAll === 'function'
+            ? await provider.listAll().catch(() => null)
+            : null;
+          if (providerRows !== null) {
+            const stamp = now();
+            for (const row of providerRows) {
+              candidates.catalog.adoptProviderMemory(row.id, row.content, stamp, {
+                ...(row.category === undefined ? {} : { category: row.category }),
+                ...(row.importance === undefined ? {} : { importance: row.importance }),
+                ...(row.tags === undefined ? {} : { tags: row.tags }),
+                ...(row.entities === undefined ? {} : { entities: row.entities }),
+              });
+            }
+          }
           const scoped: Array<{
             memoryId: string; providerId: string; publishedAt: string; importance: number | null;
             current: { category?: string; importance?: number; tags?: string[]; entities?: string[] };
           }> = [];
+          /**
+           * Classification the Provider holds for rows the catalog has not recorded it for.
+           *
+           * The list is assembled from the catalog because only it knows the entry version and the
+           * revision chain, but the catalog may predate classification being recorded. The Provider
+           * always has a category (rows stored without one are held as `general`), so it supplies
+           * the field whenever the catalog left it empty. Nothing is written back: the catalog is
+           * authoritative for what it recorded, and rewriting an immutable revision to fill a gap
+           * would be a silent history change.
+           */
+          const providerMeta = new Map((providerRows ?? []).map(row => [row.id, row] as const));
           for (const providerId of candidates.catalog.visibleProviderIds()) {
             for (const memoryId of candidates.catalog.currentMemoryIds(providerId)) {
               const descriptor = candidates.catalog.get(memoryId);
               if (descriptor.state !== 'active') continue;
               const current = descriptor.revisions.find(revision => revision.id === descriptor.currentRevisionId);
               if (!current) continue;
+              const fromProvider = providerMeta.get(providerId);
+              const category = current.category ?? fromProvider?.category;
+              const importance = current.importance ?? fromProvider?.importance;
+              const tags = current.tags ?? fromProvider?.tags;
+              const entities = current.entities ?? fromProvider?.entities;
               scoped.push({
-                memoryId, providerId, publishedAt: current.publishedAt, importance: current.importance ?? null,
+                memoryId, providerId, publishedAt: current.publishedAt, importance: importance ?? null,
                 current: {
-                  ...(current.category === undefined ? {} : { category: current.category }),
-                  ...(current.importance === undefined ? {} : { importance: current.importance }),
-                  ...(current.tags === undefined ? {} : { tags: current.tags }),
-                  ...(current.entities === undefined ? {} : { entities: current.entities }),
+                  ...(category === undefined ? {} : { category }),
+                  ...(importance === undefined ? {} : { importance }),
+                  ...(tags === undefined ? {} : { tags }),
+                  ...(entities === undefined ? {} : { entities }),
                 },
               });
             }
           }
+          /**
+           * The entity index is the Provider's frequency table, not a recount of this page.
+           *
+           * `status.top_entities` is maintained by the store over every memory it holds, so it is
+           * the only source that stays whole when the list is filtered or paged. Entities the
+           * catalog recorded but the Provider has not indexed are merged in afterwards, because a
+           * freshly written memory may not be in the store's table yet.
+           */
+          /**
+           * The entity index is the Provider's frequency table, widened by the catalog's own rows.
+           *
+           * `top_entities` is maintained by the store over every memory it holds, so it is the
+           * only source that stays whole when the list is filtered or paged — but it is a *top*
+           * table, not a complete index, so an entity it omits would otherwise report zero and be
+           * unfilterable. Counting the catalog's rows only for entities the table does not already
+           * list keeps both properties: whole counts where the Provider knows them, and coverage
+           * for what it does not.
+           */
+          const providerStats = typeof provider.stats === 'function'
+            ? await provider.stats().catch(() => null)
+            : null;
+          /**
+           * The category index counts rows by the classification the list will report.
+           *
+           * The Provider's `by_category` counts only what it was told: a memory written with a
+           * category here but persisted to the Provider without one lands under `general` there,
+           * while the catalog holds the reviewed value. Counting the assembled rows keeps the
+           * index and the filterable list in agreement, which is the property the picker needs.
+           */
           const categories = new Map<string, number>();
           const entityNames = new Map<string, string>();
           const entityCounts = new Map<string, number>();
+          /**
+           * The Provider's frequency table seeds the index.
+           *
+           * `top_entities` is computed over every memory the store holds, so it is the only count
+           * that stays whole when the list is filtered or paged. It is a *top* table rather than a
+           * complete index, so entries it omits are counted from the catalog below; entries it
+           * lists are not recounted, or each memory would be added twice.
+           */
+          if (providerStats !== null) {
+            for (const entry of providerStats.topEntities) {
+              const key = entry.entity.toLowerCase();
+              if (!entityNames.has(key)) entityNames.set(key, entry.entity);
+              entityCounts.set(key, entry.count);
+            }
+          }
           for (const entry of scoped) {
             if (entry.current.category !== undefined) categories.set(entry.current.category, (categories.get(entry.current.category) ?? 0) + 1);
             for (const value of entry.current.entities ?? []) {
               const key = value.toLowerCase();
               if (!entityNames.has(key)) entityNames.set(key, value);
-              entityCounts.set(key, (entityCounts.get(key) ?? 0) + 1);
+              // The Provider's table already counted this memory for that entity; adding it again
+              // would double the number. Only entities the table omitted are counted here.
+              if (providerStats === null || !providerStats.topEntities.some(item => item.entity.toLowerCase() === key)) {
+                entityCounts.set(key, (entityCounts.get(key) ?? 0) + 1);
+              }
             }
           }
           const wantedEntity = entity?.toLowerCase();
@@ -1274,7 +1347,7 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
               if (!current) continue;
               items.push({
                 memoryId: entry.memoryId, revisionId: current.id, providerMemoryId: entry.providerId,
-                applicability: descriptor.applicability, publishedAt: current.publishedAt, content,
+                publishedAt: current.publishedAt, content,
                 entryVersion: candidates.memory.entryVersion(entry.memoryId),
                 ...entry.current,
               });
@@ -1290,7 +1363,14 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
             items,
             ...(hasMore ? { nextCursor: encodeListCursor({ sort: order, publishedAt: cursorEntry.publishedAt, importance: cursorEntry.importance, memoryId: cursorEntry.memoryId }) } : {}),
             categories: [...categories].map(([value, count]) => ({ value, count })).sort((left, right) => left.value.localeCompare(right.value)),
-            entities: [...entityNames].map(([key, value]) => ({ value, count: entityCounts.get(key) ?? 0 })).sort((left, right) => left.value.localeCompare(right.value)),
+            // Most-referenced first: the index is a frequency table, and the reader looking for
+            // the entities that matter reads the top of it. Equal counts fall back to the name so
+            // the order does not shuffle between requests.
+            entities: [...entityNames].map(([key, value]) => ({ value, count: entityCounts.get(key) ?? 0 }))
+              .sort((left, right) => right.count - left.count || left.value.localeCompare(right.value)),
+            // The whole catalog, not the filtered page: a tab badge reports the size of the
+            // collection, so filtering the list must not make it look like rows were lost.
+            total: scoped.length,
           });
         },
         /**
@@ -1302,8 +1382,22 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
           const recalled = await app.recallDetailed({ query, limit: input.limit });
           const threshold = input.minScore ?? 0;
           const hits: Array<Record<string, unknown>> = [];
+          /**
+           * A hit is adopted before it is mapped.
+           *
+           * A Provider can rank a memory this catalog has never seen, and dropping it here would
+           * make the search silently narrower than the store. Adoption gives it the same logical
+           * id and entry version the list already grants it, so the result can be opened.
+           */
+          const stamp = now();
           for (const memory of recalled.memories) {
             if ((memory.score ?? 0) < threshold) continue;
+            candidates.catalog.adoptProviderMemory(memory.id, memory.content, stamp, {
+              ...(memory.category === undefined ? {} : { category: memory.category }),
+              ...(memory.importance === undefined ? {} : { importance: memory.importance }),
+              ...(memory.tags === undefined ? {} : { tags: memory.tags }),
+              ...(memory.entities === undefined ? {} : { entities: memory.entities }),
+            });
             for (const memoryId of candidates.catalog.currentMemoryIds(memory.id)) {
               const descriptor = candidates.catalog.get(memoryId);
               if (descriptor.state !== 'active') continue;
@@ -1334,7 +1428,7 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
         graph: async (_hostId, { limit }) => {
           const nodes: Array<{
             memoryId: string; publishedAt: string; state: 'active' | 'superseded' | 'unverified';
-            category?: string; importance?: number;
+            category?: string; importance?: number; label?: string;
           }> = [];
           const describeNode = (memoryId: string): (typeof nodes)[number] | null => {
             const descriptor = candidates.catalog.get(memoryId);
@@ -1349,6 +1443,41 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
               ...(current.importance === undefined ? {} : { importance: current.importance }),
             };
           };
+          /**
+           * The graph is the Provider's own, not a picture of this Server's bookkeeping.
+           *
+           * `viz` is the official export and carries the edges the store actually holds — entity
+           * co-occurrence, backbone links, semantic and causal relations — so drawing only the
+           * catalog's supersede/conflict edges would hide most of the structure. The catalog's
+           * logical relations are added on top, because they record decisions the Provider cannot
+           * know about. Both are drawn; neither replaces the other.
+           */
+          const providerGraph = typeof provider.graph === 'function'
+            ? await provider.graph().catch(() => null)
+            : null;
+          /** Provider id to the logical memory id it was adopted as. */
+          const providerToLogical = new Map<string, string>();
+          if (providerGraph !== null) {
+            const stamp = now();
+            const providerRows = typeof provider.listAll === 'function'
+              ? await provider.listAll().catch(() => null)
+              : null;
+            const bodyById = new Map((providerRows ?? []).map(row => [row.id, row] as const));
+            for (const node of providerGraph.nodes) {
+              const row = bodyById.get(node.id);
+              const adopted = candidates.catalog.adoptProviderMemory(
+                node.id, row?.content ?? node.label, stamp,
+                row === undefined ? undefined : {
+                  ...(row.category === undefined ? {} : { category: row.category }),
+                  ...(row.importance === undefined ? {} : { importance: row.importance }),
+                  ...(row.tags === undefined ? {} : { tags: row.tags }),
+                  ...(row.entities === undefined ? {} : { entities: row.entities }),
+                },
+              );
+              const logical = adopted ?? candidates.catalog.currentMemoryIds(node.id)[0];
+              if (logical !== undefined) providerToLogical.set(node.id, logical);
+            }
+          }
           for (const providerId of candidates.catalog.visibleProviderIds()) {
             for (const memoryId of candidates.catalog.currentMemoryIds(providerId)) {
               const descriptor = candidates.catalog.get(memoryId);
@@ -1371,13 +1500,100 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
             if (left.publishedAt !== right.publishedAt) return left.publishedAt < right.publishedAt ? 1 : -1;
             return left.memoryId < right.memoryId ? -1 : left.memoryId > right.memoryId ? 1 : 0;
           });
-          const truncated = nodes.length > limit;
+          const truncated = nodes.length > limit || (providerGraph?.truncated ?? false);
           const kept = nodes.slice(0, limit);
+          const keptIds = new Set(kept.map(node => node.memoryId));
+          // The catalog's own decisions first: they are the edges this Server is authoritative for.
           const edges = drawableEdges(kept.map(node => node.memoryId), [
             ...candidates.catalog.allRelations(limit * 8),
             ...candidates.catalog.allConflictEdges(limit * 8).map(edge => ({ ...edge, kind: 'Conflicts' })),
           ]);
-          return { nodes: kept, edges, truncated };
+          // Then the Provider's, translated through the adoption map, keeping only the ones whose
+          // both ends survived the node limit so the drawing has no dangling endpoints.
+          if (providerGraph !== null) {
+            const seen = new Set(edges.map(edge => `${edge.sourceMemoryId}>${edge.targetMemoryId}`));
+            for (const edge of providerGraph.edges) {
+              const source = providerToLogical.get(edge.sourceId);
+              const target = providerToLogical.get(edge.targetId);
+              if (source === undefined || target === undefined) continue;
+              if (!keptIds.has(source) || !keptIds.has(target)) continue;
+              const key = `${source}>${target}`;
+              if (seen.has(key)) continue;
+              seen.add(key);
+              // The Provider knows the edge but not our audit fields, so the edge names its own
+              // origin instead of borrowing a decision record that does not exist.
+              edges.push({
+                sourceMemoryId: source, targetMemoryId: target, kind: 'RelatedTo',
+                relationId: `provider:${edge.label || 'edge'}`,
+                reason: edge.label === '' ? 'Provider graph edge' : `Provider graph edge: ${edge.label}`,
+                effectiveAt: now(),
+              });
+            }
+          }
+          /**
+           * Entities become nodes too.
+           *
+           * A memory graph drawn only from catalogued relations answers "what superseded what",
+           * which is a small part of the structure: most of what connects these memories is the
+           * entities they share. The Provider already indexes that, so the shared entities are
+           * added as nodes with a link to each memory that names them. A memory with no catalogued
+           * relation is then still visibly attached to the rest.
+           */
+          const entityNodes: Array<{
+            memoryId: string; kind: 'entity'; state: 'active'; publishedAt: string;
+            category: 'entity'; label: string; occurrenceCount: number;
+          }> = [];
+          const entityEdges: Array<{
+            relationId: string; kind: 'Entity'; sourceMemoryId: string; targetMemoryId: string;
+            reason: string; effectiveAt: string;
+          }> = [];
+          if (typeof provider.stats === 'function') {
+            const stats = await provider.stats().catch(() => null);
+            if (stats !== null) {
+              // Which memories name each entity, taken from the rows already read for the nodes.
+              const bodyById = new Map<string, readonly string[]>();
+              for (const node of kept) {
+                const descriptor = candidates.catalog.get(node.memoryId);
+                const current = descriptor.revisions.find(revision => revision.id === descriptor.currentRevisionId);
+                if (current?.entities !== undefined) bodyById.set(node.memoryId, current.entities);
+              }
+              const entityToMemories = new Map<string, { display: string; memoryIds: string[] }>();
+              for (const [memoryId, entities] of bodyById) {
+                for (const raw of entities) {
+                  const key = raw.toLowerCase();
+                  if (key === '') continue;
+                  const entry = entityToMemories.get(key);
+                  if (entry === undefined) entityToMemories.set(key, { display: raw, memoryIds: [memoryId] });
+                  else entry.memoryIds.push(memoryId);
+                }
+              }
+              // Only entities that actually connect something are drawn: a node hanging off one
+              // memory adds clutter without showing a relation.
+              const shared = [...entityToMemories.values()]
+                .filter(entry => entry.memoryIds.length > 1)
+                .sort((left, right) => right.memoryIds.length - left.memoryIds.length || left.display.localeCompare(right.display))
+                .slice(0, 24);
+              const stamp = now();
+              for (const entry of shared) {
+                entityNodes.push({
+                  memoryId: entry.display, kind: 'entity', state: 'active', publishedAt: stamp,
+                  category: 'entity', label: entry.display, occurrenceCount: entry.memoryIds.length,
+                });
+                for (const memoryId of entry.memoryIds) {
+                  entityEdges.push({
+                    relationId: `entity:${entry.display}:${memoryId}`, kind: 'Entity',
+                    sourceMemoryId: entry.display, targetMemoryId: memoryId,
+                    reason: `Shared entity: ${entry.display}`, effectiveAt: stamp,
+                  });
+                }
+              }
+            }
+          }
+          return {
+            nodes: [...kept, ...entityNodes],
+            edges: [...edges, ...entityEdges],
+            truncated,
+          };
         },
         /** Model-facing recall; the per-turn budget is enforced from the turn identity. */
         recall: async (hostId, input, turn) => {
@@ -1449,12 +1665,10 @@ export function configure(env: NodeJS.ProcessEnv = process.env) {
             ...(parsed.entities === undefined ? {} : { entities: parsed.entities }),
             provenance: {
               source: 'local-user', sourceReference: `user-create:${randomUUID()}`,
-              evidence: [reason], verificationStatus: 'unverified',
-              applicability: 'shared collection', limitations: '无（用户直接新增）', lastVerified: null,
             },
           });
           const candidate = candidates.submit(request);
-          candidates.review(candidate.id, 'approve', 'local-user', reason, null);
+          candidates.review(candidate.id, 'approve', 'local-user', reason);
           const publication = await waitForPublication(candidate.id);
           const shareState = coordinator ? await shareMemory(publication) : 'confirmed';
           if (shareState === 'queued') throw new MnemoWeaveError('SYNC_QUEUED');

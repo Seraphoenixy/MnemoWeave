@@ -1,3 +1,4 @@
+import { tempDir } from '../support/temp.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync } from 'node:fs';
@@ -35,7 +36,7 @@ function draft(version: number, body: string): SyncEntryDraftValue {
 }
 
 test('a snapshot rebuilds the revision history when the retention floor passed the cursor', async () => {
-  const dir = resolve('work', 'snapshot-rebuild', randomUUID());
+  const dir = await tempDir('snapshot-rebuild', 'snapshot-rebuild');
   mkdirSync(join(dir, 'mnemon'), { recursive: true });
   const remotePath = join(dir, 'remote.db');
   const remote = new SyncStore({ path: remotePath, now: () => NOW });
@@ -98,7 +99,7 @@ test('a snapshot rebuilds the revision history when the retention floor passed t
 });
 
 test('a device behind a fully pruned scope snapshots from the head and keeps pulling', async () => {
-  const dir = resolve('work', 'snapshot-pruned', randomUUID());
+  const dir = await tempDir('snapshot-rebuild', 'snapshot-pruned');
   mkdirSync(join(dir, 'mnemon'), { recursive: true });
   const remote = new SyncStore({ path: join(dir, 'remote.db'), now: () => NOW });
   remote.enroll('device-local', TOKEN, [{ stream: STREAM, canRead: true, canWrite: true }]);

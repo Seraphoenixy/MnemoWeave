@@ -11,6 +11,7 @@ import { MnemonCliProvider } from '../../packages/providers/mnemon/src/index.ts'
 import { createHttpServer } from '../../packages/protocols/http/src/index.ts';
 import { configure } from '../../apps/server/src/config.ts';
 import { mnemonBinary } from '../e2e/mnemon-binary.ts';
+import { tempDir } from '../support/temp.ts';
 
 /**
  * A reviewed replacement must become a visible relation.
@@ -38,7 +39,7 @@ async function waitFor<T>(what: string, probe: () => Promise<T | undefined>, tim
 }
 
 test('an approved supersede publishes a new memory and draws an edge', async () => {
-  const root = resolve('work', 'review-graph', randomUUID());
+  const root = await tempDir('review-publish-graph', 'review-graph');
   mkdirSync(join(root, 'provider'), { recursive: true });
   mkdirSync(join(root, 'state'), { recursive: true });
 
@@ -48,8 +49,7 @@ test('an approved supersede publishes a new memory and draws an edge', async () 
   const base = RememberInput.parse({
     idempotencyKey: `review-${randomUUID()}`, content: '被替代的旧正文。', tags: [],
     provenance: {
-      source: 'local-user', sourceReference: 'review:old', evidence: ['fixture'], verificationStatus: 'verified',
-      confidence: 1, applicability: 'global', limitations: '无', lastVerified: '2026-11-10T00:00:00.000Z',
+      source: 'local-user', sourceReference: 'review:old',
     },
   });
   const candidate = seed.submit(base);
@@ -91,8 +91,7 @@ test('an approved supersede publishes a new memory and draws an edge', async () 
           evidence: ['验收固定值'],
         },
         provenance: {
-          source: 'local-user', sourceReference: 'review:new', evidence: ['fixture'], verificationStatus: 'verified',
-          confidence: 1, applicability: 'global', limitations: '无', lastVerified: '2026-11-10T00:00:00.000Z',
+          source: 'local-user', sourceReference: 'review:new',
         },
       }),
     });

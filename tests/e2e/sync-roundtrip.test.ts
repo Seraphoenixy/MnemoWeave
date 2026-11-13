@@ -16,6 +16,7 @@ import { createSyncServer } from '../../packages/protocols/sync-http/src/index.t
 import { SqliteCandidates } from '../../packages/infrastructure/governance/src/index.ts';
 import { MnemonCliProvider } from '../../packages/providers/mnemon/src/index.ts';
 import { mnemonBinary } from './mnemon-binary.ts';
+import { tempDir } from '../support/temp.ts';
 
 /**
  * One full local hop against the real Mnemon CLI: a change accepted by the remote
@@ -49,7 +50,7 @@ function draft(version: number, body: string, withdrawnAt: string | null = null)
 }
 
 before(async () => {
-  const dir = join('work', 'sync-roundtrip', randomUUID());
+  const dir = await tempDir('sync-roundtrip', 'sync-roundtrip');
   mkdirSync(dir, { recursive: true });
   remote = new SyncStore({ path: join(dir, 'remote.db'), now: () => NOW });
   remote.enroll('device-local', DEVICE_TOKEN, [{ stream: STREAM, canRead: true, canWrite: true }]);

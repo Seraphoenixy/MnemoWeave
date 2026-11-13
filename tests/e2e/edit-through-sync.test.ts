@@ -12,6 +12,7 @@ import { SyncStore } from '../../packages/infrastructure/sync-store/src/index.ts
 import { createSyncServer } from '../../packages/protocols/sync-http/src/index.ts';
 import { MnemoWeaveError, RememberInput, SyncFormalPayload } from '../../packages/core/contracts/src/index.ts';
 import { mnemonBinary } from './mnemon-binary.ts';
+import { tempDir } from '../support/temp.ts';
 
 /**
  * A user edit against a real published memory, with sync enabled: the change must be
@@ -25,7 +26,7 @@ const FORMAL_STREAM = 'formal-memories';
 const ARCHIVE_STREAM = `workspace-archives:${WORKSPACE}`;
 
 test('a user edit is confirmed remotely, applied locally and published once', async () => {
-  const dir = resolve('work', 'edit-through-sync', randomUUID());
+  const dir = await tempDir('edit-through-sync', 'edit-through-sync');
   mkdirSync(join(dir, 'provider'), { recursive: true });
   mkdirSync(join(dir, 'state'), { recursive: true });
 
@@ -45,8 +46,7 @@ test('a user edit is confirmed remotely, applied locally and published once', as
   const request = RememberInput.parse({
     idempotencyKey: `seed-${randomUUID()}`, content: '初始正文：发布路径写入。', tags: [],
     provenance: {
-      source: 'local-user', sourceReference: 'e2e:seed', evidence: ['seed'], verificationStatus: 'verified',
-      confidence: 1, applicability: 'shared collection', limitations: '无（验收固定值）', lastVerified: '2026-11-10T07:00:00.000Z',
+      source: 'local-user', sourceReference: 'e2e:seed',
     },
   });
   const candidate = seedRepo.submit(request);

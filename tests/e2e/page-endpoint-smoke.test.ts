@@ -15,6 +15,7 @@ import { createRpcHandler } from '../../plugins/dsh-mnemo-weave/src/ui/rpc.ts';
 import { MemorySource } from '../../plugins/dsh-mnemo-weave/src/ui/memory-source.ts';
 import { SettingsService } from '../../plugins/dsh-mnemo-weave/src/ui/settings.ts';
 import { mnemonBinary } from '../e2e/mnemon-binary.ts';
+import { tempDir } from '../support/temp.ts';
 
 /**
  * Exercise every endpoint the memory page calls, through the same channel it uses.
@@ -32,7 +33,7 @@ const HOST = 'page-smoke-probe';
 type Rpc = (endpoint: string, payload?: unknown) => Promise<{ ok: true; value: unknown } | { ok: false; error: { code: string } }>;
 
 test('every endpoint the page uses answers through the Host channel', async () => {
-  const root = resolve('work', 'page-smoke', randomUUID());
+  const root = await tempDir('page-endpoint-smoke', 'page-smoke');
   mkdirSync(join(root, 'provider'), { recursive: true });
   mkdirSync(join(root, 'state'), { recursive: true });
 
@@ -49,8 +50,7 @@ test('every endpoint the page uses answers through the Host channel', async () =
     const request = RememberInput.parse({
       idempotencyKey: `page-smoke-${index}`, content: shape.content, tags: shape.meta.tags ?? [],
       provenance: {
-        source: 'local-user', sourceReference: `page-smoke:${index}`, evidence: ['fixture'], verificationStatus: 'verified',
-        confidence: 1, applicability: 'shared collection', limitations: '无', lastVerified: '2026-11-10T00:00:00.000Z',
+        source: 'local-user', sourceReference: `page-smoke:${index}`,
       },
     });
     const written = await seedProvider.persistReviewed(shape.content, `candidate:${randomUUID()}`);

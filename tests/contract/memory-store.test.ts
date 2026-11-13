@@ -10,7 +10,6 @@ const NOW = '2026-11-10T10:00:00.000Z';
 const WORKSPACE = '11111111-1111-4111-8111-111111111111';
 
 async function open() {
-  await mkdir('work/tests', { recursive: true });
   const path = join(await tempDir('memory-store', 'memory-store'), 'governance.db');
   return new SqliteCandidates(path);
 }

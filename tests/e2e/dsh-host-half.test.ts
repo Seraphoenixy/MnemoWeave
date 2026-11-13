@@ -14,6 +14,7 @@ import { RememberInput } from '../../packages/core/contracts/src/index.ts';
 import { MemorySource } from '../../plugins/dsh-mnemo-weave/src/ui/memory-source.ts';
 import { createRpcHandler } from '../../plugins/dsh-mnemo-weave/src/ui/rpc.ts';
 import { mnemonBinary } from './mnemon-binary.ts';
+import { tempDir } from '../support/temp.ts';
 
 /**
  * The DSH plugin's Host half against a real Server: the same client, the same RPC handler
@@ -25,7 +26,7 @@ const OPERATOR = 'operator-token-0123456789abcdef';
 const HOST = 'dsh-desktop';
 
 test('the DSH Host half lists, reads, edits and reports injections through a real Server', async () => {
-  const dir = resolve('work', 'dsh-host-half', randomUUID());
+  const dir = await tempDir('dsh-host-half', 'dsh-host-half');
   mkdirSync(join(dir, 'provider'), { recursive: true });
   mkdirSync(join(dir, 'state'), { recursive: true });
 
@@ -35,8 +36,7 @@ test('the DSH Host half lists, reads, edits and reports injections through a rea
   const request = RememberInput.parse({
     idempotencyKey: `seed-${randomUUID()}`, content: '插件读取的初始正文。', tags: [],
     provenance: {
-      source: 'local-user', sourceReference: 'e2e:dsh-host', evidence: ['seed'], verificationStatus: 'verified',
-      confidence: 1, applicability: 'shared collection', limitations: '无（验收固定值）', lastVerified: '2026-11-10T10:00:00.000Z',
+      source: 'local-user', sourceReference: 'e2e:dsh-host',
     },
   });
   const candidate = seed.submit(request);

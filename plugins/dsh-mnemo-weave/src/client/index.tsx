@@ -12,6 +12,16 @@ import { ensureStyles } from './styles.ts';
 export const name = 'dsh-mnemo-weave';
 export const inject = ['slots', 'connection', 'layout', 'locale'] as const;
 
+/**
+ * The build this bundle came from.
+ *
+ * This file is fetched from disk when the page loads, while the Host half was composed when DSH
+ * started. Rebuilding the plugin without restarting leaves the page running newer code than the
+ * Host it calls, which surfaces as a missing method or an empty panel. Publishing the value lets
+ * the page compare it with the Host's and say which side is stale.
+ */
+export const BUILD: string = typeof __MNEMOWEAVE_BUILD__ === 'string' ? __MNEMOWEAVE_BUILD__ : 'dev';
+
 // Sidebar entries are narrow: the Chinese label is kept to four characters.
 const LABEL_ZH = '记忆中枢';
 const LABEL_EN = 'MnemoWeave Memory';

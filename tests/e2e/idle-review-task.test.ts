@@ -8,6 +8,7 @@ import type { Server } from 'node:http';
 import { configure } from '../../apps/server/src/config.ts';
 import { createHttpServer } from '../../packages/protocols/http/src/index.ts';
 import { mnemonBinary } from './mnemon-binary.ts';
+import { tempDir } from '../support/temp.ts';
 
 /**
  * An idle review submits through the authorized write-task entry, never the resource routes.
@@ -23,7 +24,7 @@ const HOST = 'idle-probe';
 const WORKSPACE = '11111111-1111-4111-8111-111111111111';
 
 test('an idle-review action is bounded by the run that authorized it', { timeout: 120_000 }, async () => {
-  const dir = resolve('work', 'idle-review-task', randomUUID());
+  const dir = await tempDir('idle-review-task', 'idle-review-task');
   mkdirSync(join(dir, 'provider'), { recursive: true });
   mkdirSync(join(dir, 'state'), { recursive: true });
   const app = configure({

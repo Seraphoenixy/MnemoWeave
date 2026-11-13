@@ -37,7 +37,6 @@ async function stop(child: ChildProcess): Promise<void> {
 }
 
 test('HTTP/MCP candidate submission survives actual Server restart and never writes formal memory', { timeout: 60000 }, async () => {
-  await mkdir('work/e2e', { recursive: true });
   const root = await tempDir('candidate-lifecycle', 'candidates');
   const binary = mnemonBinary();
   const env = {
@@ -47,7 +46,7 @@ test('HTTP/MCP candidate submission survives actual Server restart and never wri
   };
   const input = {
     idempotencyKey: 'http-candidate-001', content: '自动整理写入的内容必须保留来源与证据。', tags: ['test'],
-    provenance: { source: 'test', sourceReference: 'test:lifecycle', evidence: ['actual protocol test'], verificationStatus: 'unverified', confidence: 0.5, applicability: 'test only', limitations: 'not approved', lastVerified: null },
+    provenance: { source: 'test', sourceReference: 'test:lifecycle'},
   };
   const headers = testHostHeaders(env.MNEMOWEAVE_TOKEN);
   let server = await start(env);

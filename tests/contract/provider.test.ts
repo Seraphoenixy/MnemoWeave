@@ -80,3 +80,154 @@ test('Forget and related read back native state without inventing edges', async 
   await assert.rejects(provider.related('native-1', 'unknown' as never), (error: unknown) => error instanceof MnemoWeaveError && error.code === 'INVALID_INPUT');
   await assert.rejects(provider.related('native-1', 'semantic', 6), (error: unknown) => error instanceof MnemoWeaveError && error.code === 'INVALID_INPUT');
 });
+
+test('listAll reads the whole store rather than one page', async () => {
+  // A page-sized read would let a caller mistake "not on this page" for "not in the store", so
+  // the whole-library read asks for everything and refuses a wrapped payload shape instead of
+  // returning the wrapper as if it were a row.
+  const rows = Array.from({ length: 3 }, (_, index) => ({ id: `p${index}`, content: `正文 ${index}`, category: 'insight' }));
+  const calls: string[][] = [];
+  const provider = new MnemonCliProvider({
+    binary: process.execPath, dataDir: resolve('work/test-contract'), store: 'acceptance',
+    runner: async args => {
+      calls.push(args);
+      if (args[0] === '--version') return 'mnemon version 0.2.13';
+      if (args.includes('100000')) return JSON.stringify(rows);
+      throw new Error(`unexpected command: ${args.join(' ')}`);
+    },
+  });
+  const all = await provider.listAll();
+  assert.equal(all.length, 3);
+  assert.equal(all[0]?.category, 'insight', 'classification travels with the row');
+  const recall = calls.find(args => args.includes('recall'));
+  assert.ok(recall?.includes('100000'), 'the whole store is requested, not a page');
+});
+
+test('stats reports the accounting the Provider maintains', async () => {
+  const provider = new MnemonCliProvider({
+    binary: process.execPath, dataDir: resolve('work/test-contract'), store: 'acceptance',
+    runner: async args => {
+      if (args[0] === '--version') return 'mnemon version 0.2.13';
+      return JSON.stringify({
+        total_insights: 13, deleted_insights: 2, edge_count: 206,
+        by_category: { insight: 11, fact: 2 },
+        top_entities: [{ entity: 'NSIS', count: 6 }, { entity: 'Windows', count: 4 }],
+      });
+    },
+  });
+  const stats = await provider.stats();
+  assert.equal(stats.totalInsights, 13);
+  assert.equal(stats.edgeCount, 206);
+  assert.deepEqual(stats.byCategory, { insight: 11, fact: 2 });
+  assert.deepEqual(stats.topEntities, [{ entity: 'NSIS', count: 6 }, { entity: 'Windows', count: 4 }]);
+});
+
+test('graph parses the official DOT export into typed edges', async () => {
+  const dot = [
+    'digraph mnemon {',
+    '  rankdir=LR;',
+    '  "a" [label="a: [insight] 甲", fillcolor="#9b59b6"];',
+    '  "b" [label="b: [insight] 乙", fillcolor="#9b59b6"];',
+    '  "a" -> "b" [label="entity", color="#2ecc71"];',
+    '  "b" -> "a" [label="causal", color="#e67e22"];',
+    '}',
+  ].join('\n');
+  const provider = new MnemonCliProvider({
+    binary: process.execPath, dataDir: resolve('work/test-contract'), store: 'acceptance',
+    runner: async args => {
+      if (args[0] === '--version') return 'mnemon version 0.2.13';
+      if (args.includes('viz')) return dot;
+      throw new Error(`unexpected command: ${args.join(' ')}`);
+    },
+  });
+  const graph = await provider.graph();
+  assert.deepEqual(graph.nodes.map(node => node.id).sort(), ['a', 'b']);
+  assert.equal(graph.nodes.find(node => node.id === 'a')?.label, 'a: [insight] 甲');
+  // The edge type is kept: the drawing and any later filtering depend on it.
+  assert.deepEqual(graph.edges, [
+    { sourceId: 'a', targetId: 'b', label: 'entity' },
+    { sourceId: 'b', targetId: 'a', label: 'causal' },
+  ]);
+  assert.equal(graph.truncated, false);
+});
+
+test('a graph within the edge cap is returned whole', async () => {
+  const lines = ['digraph mnemon {'];
+  for (let index = 0; index < 30; index += 1) lines.push(`  "n${index}" [label="n${index}"];`);
+  for (let index = 0; index < 30; index += 1) lines.push(`  "n${index}" -> "n${(index + 1) % 30}" [label="entity"];`);
+  lines.push('}');
+  const provider = new MnemonCliProvider({
+    binary: process.execPath, dataDir: resolve('work/test-contract'), store: 'acceptance',
+    runner: async args => {
+      if (args[0] === '--version') return 'mnemon version 0.2.13';
+      return lines.join('\n');
+    },
+  });
+  const graph = await provider.graph();
+  assert.equal(graph.truncated, false, 'within the cap the whole picture is returned');
+  assert.equal(graph.edges.length, 30);
+  // 30 entities is the whole set: the nodes are not dropped when only the edges are many.
+  assert.equal(graph.nodes.length, 30);
+});
+
+test('a graph past the edge cap says it is truncated', async () => {
+  // The export has no cursor, so an over-large graph must announce that edges were left out
+  // rather than look complete.
+  const lines = ['digraph mnemon {'];
+  for (let index = 0; index < 2100; index += 1) lines.push(`  "n${index}" -> "n${index + 1}" [label="entity"];`);
+  lines.push('}');
+  const provider = new MnemonCliProvider({
+    binary: process.execPath, dataDir: resolve('work/test-contract'), store: 'acceptance',
+    runner: async args => {
+      if (args[0] === '--version') return 'mnemon version 0.2.13';
+      return lines.join('\n');
+    },
+  });
+  const graph = await provider.graph();
+  assert.equal(graph.truncated, true, 'a cut picture is reported as cut');
+  assert.ok(graph.edges.length <= 2000, 'the cap bounds what is returned');
+});
+
+test('recall accepts both official output shapes and keeps every reported field', async () => {
+  // `recall` wraps rows in {results}; `search` returns a bare array. Both are official, and a
+  // decoder that knows only one of them fails the other mode at runtime.
+  const row = { id: 'm1', content: '正文', score: 0.5, category: 'insight', importance: 4, tags: ['t'], entities: ['E'], confidence: 'medium' };
+  const wrapped = new MnemonCliProvider({
+    binary: process.execPath, dataDir: resolve('work/test-contract'), store: 'acceptance',
+    runner: async args => args[0] === '--version' ? 'mnemon version 0.2.13' : JSON.stringify({ results: [row] }),
+  });
+  const smart = await wrapped.recall({ query: 'q', limit: 5, mode: 'smart' });
+  assert.equal(smart.memories[0]?.category, 'insight', 'classification survives');
+  assert.equal(smart.memories[0]?.confidence, 'medium', 'the Provider relevance band survives');
+  assert.deepEqual(smart.memories[0]?.tags, ['t']);
+  assert.deepEqual(smart.memories[0]?.entities, ['E']);
+
+  const bare = new MnemonCliProvider({
+    binary: process.execPath, dataDir: resolve('work/test-contract'), store: 'acceptance',
+    runner: async args => args[0] === '--version' ? 'mnemon version 0.2.13' : JSON.stringify([row]),
+  });
+  const keyword = await bare.recall({ query: 'q', limit: 5, mode: 'keyword' });
+  assert.equal(keyword.memories.length, 1, 'the bare-array shape is read too');
+  assert.equal(keyword.memories[0]?.id, 'm1');
+});
+
+test('a recall mode reaches the command it names, and filters are passed through', async () => {
+  const calls: string[][] = [];
+  const provider = new MnemonCliProvider({
+    binary: process.execPath, dataDir: resolve('work/test-contract'), store: 'acceptance',
+    runner: async args => {
+      calls.push(args);
+      if (args[0] === '--version') return 'mnemon version 0.2.13';
+      return JSON.stringify({ results: [] });
+    },
+  });
+  await provider.recall({ query: 'q', limit: 5, mode: 'keyword' });
+  await provider.recall({ query: 'q', limit: 5, mode: 'basic' });
+  await provider.recall({ query: 'q', limit: 5, mode: 'smart', category: 'insight', source: 'local-user' });
+  const issued = calls.filter(args => !args.includes('--version'));
+  assert.ok(issued[0]?.includes('search'), 'keyword mode uses the token scorer');
+  assert.ok(issued[1]?.includes('--basic'), 'basic mode uses the LIKE path');
+  assert.ok(!issued[2]?.includes('search') && !issued[2]?.includes('--basic'), 'smart mode is the default ranking');
+  // Provider-side filtering, so the caller does not have to discard a page it already paid for.
+  assert.ok(issued[2]?.includes('--cat') && issued[2]?.includes('--source'), 'filters reach the Provider');
+});

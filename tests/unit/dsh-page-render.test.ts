@@ -1,3 +1,4 @@
+import { tempDir } from '../support/temp.ts';
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, rmSync } from 'node:fs';
@@ -18,7 +19,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
  * project's bundler.
  */
 
-const root = resolve('work', `page-render-${randomUUID()}`);
+const root = await tempDir('dsh-page-render', 'page-render-');
 const outfile = join(root, 'page.mjs');
 type PageModule = { MemoryPage: (props: Record<string, unknown>) => { props: unknown } | null };
 let page: PageModule;

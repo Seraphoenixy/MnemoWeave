@@ -10,11 +10,10 @@ import { createHash } from 'node:crypto';
 import { tempDir } from '../support/temp.ts';
 
 async function fixture() {
-  await mkdir('work/tests', { recursive: true });
   const root = await tempDir('catalog', 'catalog'); const path = join(root, 'governance.db');
   const repo = new SqliteCandidates(path);
-  const request = RememberInput.parse({ idempotencyKey: 'catalog-test-key', content: 'Authoritative Provider text.', provenance: { source: 'test', sourceReference: 'fixture:catalog', evidence: ['test only'], verificationStatus: 'unverified', confidence: 0.5, applicability: 'isolated test', limitations: 'fixture', lastVerified: null } });
-  const candidate = repo.submit(request); repo.review(candidate.id, 'approve', 'fixture-operator', 'fixture', null);
+  const request = RememberInput.parse({ idempotencyKey: 'catalog-test-key', content: 'Authoritative Provider text.', provenance: { source: 'test', sourceReference: 'fixture:catalog'} });
+  const candidate = repo.submit(request); repo.review(candidate.id, 'approve', 'fixture-operator', 'fixture');
   assert.equal(repo.acquire('fixture-owner', 90000), true);
   const job = repo.claim('fixture-owner')!;
   repo.finish(job, { id: 'provider-original', action: 'added' }, false); repo.release('fixture-owner');
@@ -71,7 +70,7 @@ test('v2 published receipts backfill v3 without changing Candidate or Provider i
     -- v13's share queue did not exist in a genuine v2 store.
     DROP TABLE IF EXISTS share_outbox;
     ALTER TABLE governance_candidates DROP COLUMN body_cleared_at; ALTER TABLE governance_lifecycle DROP COLUMN changed_at;
-    DROP TABLE runtime_user_events; DROP TABLE runtime_projects; DROP TABLE runtime_pins; DROP TABLE runtime_sessions; DROP TABLE runtime_event_ids; DROP TABLE runtime_capture_tasks; DROP TABLE runtime_capture_runs; DROP TABLE runtime_capture_receipts;
+    DROP TABLE IF EXISTS runtime_user_events; DROP TABLE IF EXISTS runtime_projects; DROP TABLE IF EXISTS runtime_pins; DROP TABLE IF EXISTS runtime_sessions; DROP TABLE IF EXISTS runtime_event_ids; DROP TABLE IF EXISTS runtime_capture_tasks; DROP TABLE IF EXISTS runtime_capture_runs; DROP TABLE IF EXISTS runtime_capture_receipts;
     PRAGMA user_version=2;`); old.close();
   const upgraded = new SqliteCandidates(f.path);
   try {
@@ -100,7 +99,7 @@ test('revision classification is stored and read back without inventing values',
     // A synced revision carries the payload's classification instead.
     const second = f.repo.catalog.publishSynced(
       memory.id,
-      RememberInput.parse({ idempotencyKey: 'synced-meta', content: '另一台机器的正文。', tags: [], provenance: { source: 'sync', sourceReference: 'x', evidence: ['e'], verificationStatus: 'verified', confidence: 1, applicability: 'isolated test', limitations: 'n', lastVerified: null } }),
+      RememberInput.parse({ idempotencyKey: 'synced-meta', content: '另一台机器的正文。', tags: [], provenance: { source: 'sync', sourceReference: 'x'} }),
       'provider-synced',
       createHash('sha256').update('另一台机器的正文。').digest('hex'),
       '2026-11-11T00:00:00.000Z',

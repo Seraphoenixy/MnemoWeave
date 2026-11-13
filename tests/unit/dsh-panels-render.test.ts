@@ -8,6 +8,8 @@ import { build } from 'esbuild';
 import { createElement, type ReactElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { UiExplore, UiGraph, UiSettings, UiSyncStatus } from '../../plugins/dsh-mnemo-weave/src/shared/contract.ts';
+import { tempDir } from '../support/temp.ts';
+import { formatBytes } from '../../plugins/dsh-mnemo-weave/src/client/view-model.ts';
 
 /**
  * Render each panel to static markup.
@@ -19,12 +21,12 @@ import type { UiExplore, UiGraph, UiSettings, UiSyncStatus } from '../../plugins
  * no extra dependency.
  */
 
-const root = resolve('work', `panels-render-${randomUUID()}`);
+const root = await tempDir('dsh-panels-render', 'panels-render-');
 const outfile = join(root, 'panels.mjs');
 const skillsOutfile = join(root, 'skills.mjs');
 const modalOutfile = join(root, 'modal.mjs');
 type PanelComponent = (props: Record<string, unknown>) => ReactElement | null;
-type Panels = Record<'ExplorePanel' | 'GraphSection' | 'EntitiesPanel' | 'ArchivesPanel' | 'RuntimePanel' | 'MemoryPageHeader' | 'MemoryOverviewPanel' | 'SettingsPanel' | 'CreateMemoryForm', PanelComponent>;
+type Panels = Record<'ExplorePanel' | 'GraphSection' | 'EntitiesPanel' | 'ArchivesPanel' | 'RuntimePanel' | 'MemoryPageHeader' | 'MemoryOverviewPanel' | 'SettingsPanel' | 'CreateMemoryForm' | 'CapacityMeter' | 'SyncGroup', PanelComponent>;
 type SkillPanels = Record<'SkillBacktestPanel' | 'SkillListPanel', PanelComponent>;
 type ModalPanels = Record<'Modal', PanelComponent>;
 let panels: Panels;
@@ -232,15 +234,16 @@ test('an empty explore result reads differently with and without a floor', () =>
   assert.notEqual(withFloor, withoutFloor, 'the two empty states do not read the same');
 });
 
-test('the graph section draws a node per memory and a line per drawable relation', () => {
+test('the graph section draws a node per memory and a curve per drawable relation', () => {
   const html = render(panels.GraphSection, {
     graph: graphFixture, loading: false, error: null, language: 'zh',
-    focusId: '11111111-1111-4111-8111-111111111111', onReload: noop, onOpen: noop,
+    focusId: '11111111-1111-4111-8111-111111111111', onReload: noop,
   });
   assert.equal((html.match(/<g /g) ?? []).length, 2, 'one group per node');
-  assert.equal((html.match(/<line /g) ?? []).length, 1, 'one line per relation');
-  assert.match(html, /data-kind="Supersedes"/, 'a supersede is distinguishable in the markup');
-  assert.match(html, /data-focus="true"/, 'the open memory is marked');
+  // Edges are quadratic curves so that several relations between the same pair stay separable.
+  assert.equal((html.match(/class="mwui-graph-edge"/g) ?? []).length, 1, 'one curve per relation');
+  assert.match(html, /data-edge="Supersedes"/, 'a supersede is distinguishable in the markup');
+  assert.match(html, /data-selected="true"/, 'the open memory is marked');
   assert.match(html, /节点已达上限/, 'a truncated graph says so');
   // A NaN in an SVG coordinate renders an empty canvas rather than failing loudly.
   assert.doesNotMatch(html, /NaN|Infinity/);
@@ -252,7 +255,7 @@ test('the graph section renders an empty canvas without pretending it has data',
     focusId: null, onReload: noop, onOpen: noop,
   });
   assert.match(html, /还没有可绘制的记忆/);
-  assert.equal((html.match(/<line /g) ?? []).length, 0);
+  assert.equal((html.match(/class="mwui-graph-edge"/g) ?? []).length, 0);
 });
 
 test('the formal-memory header names the page, its count and its four views', () => {
@@ -286,8 +289,7 @@ test('the formal-memory header names the page, its count and its four views', ()
 
 test('the formal-memory overview counts what it holds and embeds the graph', () => {
   const summary = (memoryId: string, category: string) => ({
-    memoryId, revisionId: 'r-' + memoryId, providerMemoryId: 'p-' + memoryId,
-    applicability: 'all', publishedAt: '2026-11-10T00:00:00.000Z', content: '正文', entryVersion: 1,
+    memoryId, revisionId: 'r-' + memoryId, providerMemoryId: 'p-' + memoryId, publishedAt: '2026-11-10T00:00:00.000Z', content: '正文', entryVersion: 1,
     category,
   });
   const html = render(panels.MemoryOverviewPanel, {
@@ -302,7 +304,7 @@ test('the formal-memory overview counts what it holds and embeds the graph', () 
   assert.match(html, /已载入记忆/, 'the overview counts the loaded set');
   assert.match(html, /图谱节点/, 'the graph count is part of the overview');
   assert.equal((html.match(/<g /g) ?? []).length, 2, 'the graph itself is inside the overview');
-  assert.match(html, /data-kind="Supersedes"/, 'its relations are drawn there too');
+  assert.match(html, /data-edge="Supersedes"/, 'its relations are drawn there too');
   assert.doesNotMatch(html, /undefined|NaN/, 'no field is printed raw');
 });
 
@@ -314,7 +316,7 @@ test('the entities panel lists every entity with its count and marks the applied
   });
   assert.match(html, /MnemoWeave/);
   assert.match(html, /DSH/);
-  assert.match(html, /data-active="true"/, 'the entity currently applied is marked, ignoring case');
+  assert.match(html, /aria-pressed="true"/, 'the entity currently applied is marked, ignoring case');
 });
 
 test('the entities panel filters by name and says when nothing matches', () => {
@@ -354,7 +356,7 @@ test('a graph with nodes but no relations explains the empty canvas', () => {
       ],
       edges: [], truncated: false,
     },
-    loading: false, error: null, language: 'zh', focusId: null, onReload: noop, onOpen: noop,
+    loading: false, error: null, language: 'zh', focusId: null, onReload: noop,
   });
   assert.match(html, /还没有目录关系/, 'the reason for an edgeless graph is stated');
   assert.equal((html.match(/<g /g) ?? []).length, 2, 'the nodes are still drawn');
@@ -390,4 +392,123 @@ test('the skills page lists loadable skills with scope and unloadable count', ()
   assert.match(compared, /\+1 行，-1 行/);
   assert.match(compared, /old body/);
   assert.match(compared, /new body/);
+});
+
+test('a capacity meter reports a clamped percentage and keeps the real figures', () => {
+  // The fill cannot overflow, so an over-limit state has to be readable from the label. Without
+  // that, "full" and "over full" would draw identically.
+  const half = render(panels.CapacityMeter, { used: 512, limit: 1024, language: 'zh' });
+  assert.match(half, /role="progressbar"/);
+  assert.match(half, /aria-valuenow="50"/, 'half of the limit reads as half');
+  assert.match(half, /512 B \/ 1\.0 KB/, 'the exact figures sit beside the bar');
+
+  const over = render(panels.CapacityMeter, { used: 2048, limit: 1024, exceeded: true, language: 'zh' });
+  assert.match(over, /aria-valuenow="100"/, 'the bar stops at full instead of overflowing');
+  assert.match(over, /已超出/, 'the over-limit state is stated, not just drawn as full');
+  assert.match(over, /data-tone="warn"/);
+
+  // An absent limit must not draw a full bar: that would read as "no room left".
+  const none = render(panels.CapacityMeter, { used: 100, limit: 0, language: 'zh' });
+  assert.match(none, /aria-valuenow="0"/, 'an unknown limit is empty, not full');
+});
+
+test('byte figures use the unit a reader compares at a glance', () => {
+  assert.equal(formatBytes(0), '0 B');
+  assert.equal(formatBytes(999), '999 B');
+  assert.equal(formatBytes(1024), '1.0 KB');
+  assert.equal(formatBytes(10_000), '9.8 KB', 'a value under ten keeps one decimal');
+  assert.equal(formatBytes(10 * 1024), '10 KB', 'ten and above drop the decimal');
+  assert.equal(formatBytes(10 * 1024 * 1024), '10 MB');
+  assert.equal(formatBytes(Number.NaN), '—');
+  assert.equal(formatBytes(-1), '—');
+});
+
+test('selecting a node marks it, dims the rest, and describes it in the inspector', () => {
+  // The drawing and the inspector are one selection seen twice: a node that highlights without
+  // its neighbours staying loud is not selecting anything, and an inspector with no emphasis in
+  // the graph leaves the reader looking for what they just picked.
+  // Three memories in a chain: selecting the middle one leaves the ends connected and the third
+  // memory unconnected, which is what makes "recedes" observable at all.
+  const chain = {
+    nodes: [
+      { memoryId: '11111111-1111-4111-8111-111111111111', state: 'active' as const, publishedAt: '2026-11-10T00:00:00.000Z' },
+      { memoryId: '22222222-2222-4222-8222-222222222222', state: 'active' as const, publishedAt: '2026-11-10T00:00:00.000Z' },
+      { memoryId: '33333333-3333-4333-8333-333333333333', state: 'active' as const, publishedAt: '2026-11-10T00:00:00.000Z' },
+    ],
+    edges: [{ relationId: 'e1', kind: 'RelatedTo' as const, sourceMemoryId: '11111111-1111-4111-8111-111111111111', targetMemoryId: '22222222-2222-4222-8222-222222222222', reason: 'why', effectiveAt: '2026-11-10T00:00:00.000Z' }],
+    truncated: false,
+  };
+  const html = render(panels.GraphSection, {
+    graph: chain, loading: false, error: null, language: 'zh',
+    focusId: '11111111-1111-4111-8111-111111111111', onReload: noop,
+  });
+  // The selected node is marked; everything not connected to it is dimmed.
+  assert.match(html, /data-selected="true"/);
+  assert.match(html, /data-muted="true"/, 'nodes away from the selection recede');
+  // The inspector describes the selection instead of the empty prompt.
+  assert.doesNotMatch(html, /选择一个节点/);
+  assert.match(html, /记忆详情/);
+  assert.match(html, /11111111-1111-4111-8111-111111111111/, 'the inspector names the memory');
+});
+
+test('with nothing selected the inspector invites a pick and nothing is dimmed', () => {
+  const html = render(panels.GraphSection, {
+    graph: graphFixture, loading: false, error: null, language: 'zh', focusId: null, onReload: noop, onOpen: noop,
+  });
+  assert.match(html, /选择一个节点/);
+  assert.doesNotMatch(html, /data-muted="true"/, 'no selection means no emphasis to give');
+  assert.doesNotMatch(html, /data-selected="true"/);
+});
+
+test('an entity node offers the entity page, not a memory that does not exist', () => {
+  const graph = {
+    nodes: [
+      { memoryId: '11111111-1111-4111-8111-111111111111', state: 'active' as const, publishedAt: '2026-11-10T00:00:00.000Z' },
+      { memoryId: '22222222-2222-4222-8222-222222222222', state: 'active' as const, publishedAt: '2026-11-10T00:00:00.000Z' },
+      { memoryId: 'MnemoWeave', kind: 'entity' as const, state: 'active' as const, publishedAt: '2026-11-10T00:00:00.000Z', category: 'entity', label: 'MnemoWeave', occurrenceCount: 2 },
+    ],
+    edges: [
+      { relationId: 'e1', kind: 'Entity' as const, sourceMemoryId: 'MnemoWeave', targetMemoryId: '11111111-1111-4111-8111-111111111111', reason: 'shared', effectiveAt: '2026-11-10T00:00:00.000Z' },
+      { relationId: 'e2', kind: 'Entity' as const, sourceMemoryId: 'MnemoWeave', targetMemoryId: '22222222-2222-4222-8222-222222222222', reason: 'shared', effectiveAt: '2026-11-10T00:00:00.000Z' },
+    ],
+    truncated: false,
+  };
+  const html = render(panels.GraphSection, {
+    graph, loading: false, error: null, language: 'zh', focusId: 'MnemoWeave', onReload: noop,
+    onExploreEntity: noop,
+  });
+  assert.match(html, /实体详情/);
+  assert.match(html, /查看引用它的记忆/, 'an entity leads to the memories naming it');
+  assert.doesNotMatch(html, /打开这条记忆/, 'an entity is not openable as a memory');
+});
+
+test('a memory node leads to a search around it, not to its own body', () => {
+  // A node is a starting point. Opening the body answers what the memory page already answers;
+  // searching its text answers what else resembles it, which only this drawing can lead to.
+  const html = render(panels.GraphSection, {
+    graph: graphFixture, loading: false, error: null, language: 'zh',
+    focusId: '11111111-1111-4111-8111-111111111111', onReload: noop,
+    onExploreMemory: noop,
+  });
+  assert.match(html, /围绕这条检索/, 'the primary action searches around the memory');
+  assert.doesNotMatch(html, /打开这条记忆/, 'the graph no longer offers to open the body');
+  // The node group is not a link: the only control that does anything is in the inspector.
+  assert.doesNotMatch(html, /<a [^>]*graph-node/, 'a node is not an anchor');
+});
+
+test('an unconfigured sync is reported as a state, not as a failed read', () => {
+  // The Server answers 409 REVIEW_REQUIRED when no remote sync exists. That is a normal state;
+  // showing it as "read failed · RPC_FAILED" sent the reader looking for a broken Server.
+  const off = render(panels.SyncGroup, {
+    sync: { enabled: false, protocol: 0, streams: [], updatedAt: '2026-11-10T00:00:00.000Z', unavailableReason: 'not-configured' },
+    error: null, pass: null, language: 'zh', busy: false, onRefresh: noop,
+  });
+  assert.match(off, /未配置远端同步/, 'the reason is stated');
+  assert.doesNotMatch(off, /读取失败/, 'a normal state is not called a failure');
+
+  const denied = render(panels.SyncGroup, {
+    sync: { enabled: false, protocol: 0, streams: [], updatedAt: '2026-11-10T00:00:00.000Z', unavailableReason: 'unauthorized' },
+    error: null, pass: null, language: 'zh', busy: false, onRefresh: noop,
+  });
+  assert.match(denied, /令牌被拒绝/, 'a rejected device token says so instead of "unavailable"');
 });

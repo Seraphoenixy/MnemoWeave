@@ -360,14 +360,6 @@ export function createTools(config) {
           provenance: {
             source: 'dsh-host',
             sourceReference: `mnemoweave-tool:${String(args.reason).slice(0, 200)}`,
-            evidence: Array.isArray(args.evidenceRefs) && args.evidenceRefs.length > 0
-              ? args.evidenceRefs.map(ref => String(ref).slice(0, 2000))
-              : [String(args.reason).slice(0, 2000)],
-            verificationStatus: 'unverified',
-            confidence: args.assessment === 'supported' ? 0.8 : 0.5,
-            applicability: 'shared collection',
-            limitations: '模型提出的候选，需要人工审核或宿主委派任务确认。',
-            lastVerified: null,
           },
           ...(args.assessment === 'supported' ? {} : {}),
         }, execution);

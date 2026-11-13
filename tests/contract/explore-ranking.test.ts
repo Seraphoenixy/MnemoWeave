@@ -12,6 +12,7 @@ import { MemoryClient } from '../../packages/client/src/index.ts';
 import { createHttpServer } from '../../packages/protocols/http/src/index.ts';
 import { configure } from '../../apps/server/src/config.ts';
 import { mnemonBinary } from '../e2e/mnemon-binary.ts';
+import { tempDir } from '../support/temp.ts';
 
 /**
  * Explore is a ranking, not a scan.
@@ -34,8 +35,7 @@ async function seeded(root: string, contents: string[]): Promise<{ client: Memor
     const request = RememberInput.parse({
       idempotencyKey: `explore-${index}`, content, tags: [],
       provenance: {
-        source: 'local-user', sourceReference: `explore:${index}`, evidence: ['explore'], verificationStatus: 'verified',
-        confidence: 1, applicability: 'global', limitations: '无（验收固定值）', lastVerified: '2026-11-10T00:00:00.000Z',
+        source: 'local-user', sourceReference: `explore:${index}`,
       },
     });
     const written = await provider.persistReviewed(content, `candidate:${randomUUID()}`);
@@ -64,7 +64,7 @@ async function seeded(root: string, contents: string[]): Promise<{ client: Memor
 }
 
 test('a larger limit extends the same ranking instead of reshuffling it', async () => {
-  const root = resolve('work', 'explore-ranking', randomUUID());
+  const root = await tempDir('explore-ranking', 'explore-ranking');
   const { client, close } = await seeded(root, [
     'MnemoWeave 记忆界面使用 TypeScript 与 React 编写。',
     'TypeScript 的严格模式要求显式处理 undefined。',
@@ -103,7 +103,7 @@ test('a larger limit extends the same ranking instead of reshuffling it', async 
 });
 
 test('the same query returns the same order twice', async () => {
-  const root = resolve('work', 'explore-stable', randomUUID());
+  const root = await tempDir('explore-ranking', 'explore-stable');
   const { client, close } = await seeded(root, [
     'TypeScript 类型系统在编译期发现问题。',
     'TypeScript 严格模式要求显式处理 undefined。',
@@ -131,7 +131,7 @@ test('the same query returns the same order twice', async () => {
 });
 
 test('an impossible floor returns nothing rather than everything', async () => {
-  const root = resolve('work', 'explore-floor', randomUUID());
+  const root = await tempDir('explore-ranking', 'explore-floor');
   const { client, close } = await seeded(root, ['完整性校验的固定文本。']);
   try {
     const anything = await client.explore('完整性校验', 10, 0);

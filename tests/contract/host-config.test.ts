@@ -8,6 +8,7 @@ import {
   resolveHostConfig, validatePreferences, writePreferences,
 } from '../../plugins/dsh-mnemo-weave/src/shared/host-config.js';
 import { SettingsService } from '../../plugins/dsh-mnemo-weave/src/ui/settings.ts';
+import { tempDir } from '../support/temp.ts';
 
 /**
  * The page and the prompt-injection hook must read one configuration. These tests pin the
@@ -17,15 +18,14 @@ import { SettingsService } from '../../plugins/dsh-mnemo-weave/src/ui/settings.t
 
 const TOKEN = 'service-token-0123456789abcdef';
 
-function tempEnv(name: string): NodeJS.ProcessEnv {
+async function tempEnv(name: string): Promise<NodeJS.ProcessEnv> {
   // A fresh directory per run: preferences are files, so a shared path would leak between runs.
-  const root = resolve('work', 'host-config', name + '-' + randomUUID());
-  mkdirSync(root, { recursive: true });
-  return { MNEMOWEAVE_DSH_SETTINGS: resolve(join(root, 'settings.json')) } as NodeJS.ProcessEnv;
+  const root = await tempDir('host-config', name);
+  return { MNEMOWEAVE_DSH_SETTINGS: join(root, 'settings.json') } as NodeJS.ProcessEnv;
 }
 
-test('resolution order is stored preference, then profile, then environment, then default', () => {
-  const env = tempEnv('order');
+test('resolution order is stored preference, then profile, then environment, then default', async () => {
+  const env = await tempEnv('order');
   // Environment only.
   const workspace = '11111111-1111-4111-8111-111111111111';
   const fromEnv = resolveHostConfig({}, { ...env, MNEMOWEAVE_SERVER: 'http://127.0.0.1:5555', MNEMOWEAVE_HOST_ID: 'env-host', MNEMOWEAVE_WORKSPACE_ID: workspace });
@@ -54,15 +54,16 @@ test('resolution order is stored preference, then profile, then environment, the
   assert.equal(fromPreference.sources.hostId, 'preference');
 
   // Nothing configured falls back to the defaults.
-  const bare = resolveHostConfig({}, { MNEMOWEAVE_DSH_SETTINGS: resolve('work', 'host-config', 'absent-' + randomUUID() + '.json') } as NodeJS.ProcessEnv);
+  const absent = await tempDir('host-config', 'absent');
+  const bare = resolveHostConfig({}, { MNEMOWEAVE_DSH_SETTINGS: join(absent, 'settings.json') } as NodeJS.ProcessEnv);
   assert.equal(bare.serverUrl, DEFAULT_SERVER_URL);
   assert.equal(bare.hostId, 'dsh');
   assert.equal(bare.injectTimeoutMs, DEFAULT_INJECT_TIMEOUT_MS);
   assert.equal(bare.sources.serverUrl, 'default');
 });
 
-test('a non-loopback address is rejected instead of being sent the service token', () => {
-  const env = tempEnv('loopback');
+test('a non-loopback address is rejected instead of being sent the service token', async () => {
+  const env = await tempEnv('loopback');
   for (const serverUrl of ['http://example.com:4317', 'https://10.0.0.5:4317', 'http://169.254.1.1']) {
     assert.throws(() => resolveHostConfig({ serverUrl }, env), /loopback/);
   }
@@ -72,8 +73,8 @@ test('a non-loopback address is rejected instead of being sent the service token
   }
 });
 
-test('the token value never appears in what the page can read', () => {
-  const env = tempEnv('token');
+test('the token value never appears in what the page can read', async () => {
+  const env = await tempEnv('token');
   const resolved = resolveHostConfig({ token: TOKEN }, env);
   const description = describeHostConfig(resolved);
   const serialized = JSON.stringify(description);
@@ -86,7 +87,7 @@ test('the token value never appears in what the page can read', () => {
   assert.equal(short.tokenStatus.configured, false);
 });
 
-test('preferences reject bad values and unknown keys instead of clamping silently', () => {
+test('preferences reject bad values and unknown keys instead of clamping silently', async () => {
   assert.deepEqual(validatePreferences({ pageSize: 25 }), { pageSize: 25 });
   assert.throws(() => validatePreferences({ pageSize: 2 }), /pageSize/);
   assert.throws(() => validatePreferences({ pageSize: 999 }), /pageSize/);
@@ -109,7 +110,7 @@ test('preferences reject bad values and unknown keys instead of clamping silentl
 });
 
 test('a saved connection is what the injection hook resolves too', async () => {
-  const env = tempEnv('connection');
+  const env = await tempEnv('connection');
   const service = new SettingsService({
     entryConfig: { token: TOKEN, serverUrl: 'http://127.0.0.1:4317', hostId: 'dsh' },
     env,
@@ -133,7 +134,7 @@ test('a saved connection is what the injection hook resolves too', async () => {
 });
 
 test('a non-loopback connection is never stored', async () => {
-  const env = tempEnv('connection-guard');
+  const env = await tempEnv('connection-guard');
   const service = new SettingsService({
     entryConfig: { token: TOKEN, serverUrl: 'http://127.0.0.1:4317', hostId: 'dsh' },
     env,
@@ -205,7 +206,7 @@ test('a wake that never becomes ready reports the timeout instead of blocking th
 });
 
 test('a rejected connection leaves the previous client in use', async () => {
-  const env = tempEnv('reject');
+  const env = await tempEnv('reject');
   let switched = 0;
   const service = new SettingsService({
     entryConfig: { token: TOKEN, serverUrl: 'http://127.0.0.1:4317', hostId: 'dsh' },
@@ -237,8 +238,8 @@ test('a rejected connection leaves the previous client in use', async () => {
   assert.equal(settings.connection.hostId, 'other');
 });
 
-test('the page and the injection hook read the same saved values', () => {
-  const env = tempEnv('shared');
+test('the page and the injection hook read the same saved values', async () => {
+  const env = await tempEnv('shared');
   const service = new SettingsService({
     entryConfig: { token: TOKEN, serverUrl: 'http://127.0.0.1:4317', hostId: 'dsh' },
     env,
@@ -254,8 +255,8 @@ test('the page and the injection hook read the same saved values', () => {
   assert.equal(hookView.injectTimeoutMs, 900);
 });
 
-test('preferences survive a restart through the stored file', () => {
-  const env = tempEnv('persist');
+test('preferences survive a restart through the stored file', async () => {
+  const env = await tempEnv('persist');
   writePreferences({ defaultTab: 'memories', pageSize: 40, hostId: 'pref-host' }, env);
   // A fresh read stands in for a DSH restart.
   const reloaded = readPreferences(env);
@@ -268,8 +269,8 @@ test('preferences survive a restart through the stored file', () => {
   assert.equal(raw.includes(TOKEN), false);
 });
 
-test('a corrupt preference file falls back to defaults instead of breaking the page', () => {
-  const env = tempEnv('corrupt');
+test('a corrupt preference file falls back to defaults instead of breaking the page', async () => {
+  const env = await tempEnv('corrupt');
   writePreferences({ pageSize: 30 }, env);
   const path = readPreferences(env).path;
   // Truncate to something unparsable, as a crash mid-write would.
@@ -281,7 +282,7 @@ test('a corrupt preference file falls back to defaults instead of breaking the p
 
 
 test('the registration action is delegated and never runs during a probe', async () => {
-  const env = tempEnv('register');
+  const env = await tempEnv('register');
   let calls = 0;
   const service = new SettingsService({
     entryConfig: { token: TOKEN, serverUrl: 'http://127.0.0.1:4317', hostId: 'dsh' },

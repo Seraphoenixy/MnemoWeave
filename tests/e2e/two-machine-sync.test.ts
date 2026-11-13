@@ -12,6 +12,7 @@ import { SyncStore } from '../../packages/infrastructure/sync-store/src/index.ts
 import { createSyncServer } from '../../packages/protocols/sync-http/src/index.ts';
 import { RememberInput } from '../../packages/core/contracts/src/index.ts';
 import { mnemonBinary } from './mnemon-binary.ts';
+import { tempDir } from '../support/temp.ts';
 
 /**
  * Two machines, each with its own Server and Mnemon, share one remote stream. A write
@@ -38,7 +39,7 @@ async function untilRefreshed(refresh: () => Promise<{ skipped: boolean }>, time
 }
 
 test('a memory written on one machine is editable on the other and returns updated', async () => {
-  const root = resolve('work', 'two-machine', randomUUID());
+  const root = await tempDir('two-machine-sync', 'two-machine');
   const [stateA, stateB, providerA, providerB] = ['a/state', 'b/state', 'a/provider', 'b/provider'].map((part) => {
     const path = join(root, part);
     mkdirSync(path, { recursive: true });
@@ -58,8 +59,7 @@ test('a memory written on one machine is editable on the other and returns updat
   const request = RememberInput.parse({
     idempotencyKey: `seed-${randomUUID()}`, content: '机器 A 写入的初始正文。', tags: [],
     provenance: {
-      source: 'local-user', sourceReference: 'e2e:two-machine', evidence: ['seed'], verificationStatus: 'verified',
-      confidence: 1, applicability: 'alpha', limitations: '无（验收固定值）', lastVerified: '2026-11-10T08:00:00.000Z',
+      source: 'local-user', sourceReference: 'e2e:two-machine',
     },
   });
   const candidate = seed.submit(request);
@@ -122,7 +122,7 @@ test('a memory written on one machine is editable on the other and returns updat
 
 
 test('two isolated devices creating the same formal text receive one authoritative ID', async () => {
-  const root = resolve('work', 'two-machine-duplicate', randomUUID());
+  const root = await tempDir('two-machine-sync', 'two-machine-duplicate');
   mkdirSync(root, { recursive: true });
   const remote = new SyncStore({ path: join(root, 'remote.db') });
   const grants = [{ stream: 'formal-memories', canRead: true, canWrite: true }];

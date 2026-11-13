@@ -14,6 +14,7 @@ import { configure } from '../../apps/server/src/config.ts';
 import { createRpcHandler } from '../../plugins/dsh-mnemo-weave/src/ui/rpc.ts';
 import { MemorySource } from '../../plugins/dsh-mnemo-weave/src/ui/memory-source.ts';
 import { mnemonBinary } from '../e2e/mnemon-binary.ts';
+import { tempDir } from '../support/temp.ts';
 
 /**
  * An edit and a withdrawal of the same memory may race, and only one may win.
@@ -33,7 +34,7 @@ async function harness(): Promise<{
   memoryId: string;
   close: () => Promise<void>;
 }> {
-  const root = resolve('work', 'race', randomUUID());
+  const root = await tempDir('concurrent-writes', 'race');
   mkdirSync(join(root, 'provider'), { recursive: true });
   mkdirSync(join(root, 'state'), { recursive: true });
   const seed = new SqliteCandidates(resolve(join(root, 'state', 'governance.db')));
@@ -41,8 +42,7 @@ async function harness(): Promise<{
   const request = RememberInput.parse({
     idempotencyKey: `race-${randomUUID()}`, content: '并发写入的初始正文。', tags: [],
     provenance: {
-      source: 'local-user', sourceReference: 'race:fixture', evidence: ['race'], verificationStatus: 'verified',
-      confidence: 1, applicability: 'global', limitations: '无（验收固定值）', lastVerified: '2026-11-10T00:00:00.000Z',
+      source: 'local-user', sourceReference: 'race:fixture',
     },
   });
   const candidate = seed.submit(request);

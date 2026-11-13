@@ -12,7 +12,6 @@ import { tempDir } from '../support/temp.ts';
 const NOW = '2026-11-10T07:00:00.000Z';
 
 async function openLedger() {
-  await mkdir('work/tests', { recursive: true });
   const path = join(await tempDir('sync-ledger', 'ledger'), 'governance.db');
   const repo = new SqliteCandidates(path);
   repo.close();

@@ -42,8 +42,9 @@
 - 相关改动完成后运行 `pnpm.cmd typecheck`、`pnpm.cmd build`、`pnpm.cmd test`；涉及真实 Provider 或协议链路时运行 `pnpm.cmd test:e2e`。
 - 本机 `pnpm.cmd` 包装器会先尝试重装依赖，无交互终端时报 `ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY`；此时直接执行 `node node_modules/typescript/bin/tsc --noEmit`、`node node_modules/typescript/bin/tsc` 和 `node --test tests/unit/*.test.ts tests/contract/*.test.ts`，不能把包装器退出码 0 当成通过。
 - E2E 需要可运行的 Mnemon 0.2.13。Windows 上 PATH 里的 `mnemon` 是 npm 的 `.cmd` 包装，`execFile` 不带 shell 无法启动（报 `spawn mnemon ENOENT`，再被 Provider 报成 `PROVIDER_UNAVAILABLE`）；`tests/e2e/mnemon-binary.ts` 依次尝试 `MNEMON_BINARY`、`work/tools/mnemon/mnemon.exe` 与 npm 全局包内的 `mnemon.exe`，每个候选都用 `--version` 探测。仍不可用时必须如实记录为环境缺失，不得写成通过。
-- 测试使用项目 `work/` 下隔离目录和专用 store，禁止使用用户默认记忆目录。
+- 测试使用项目 `work/` 下隔离目录和专用 store，禁止使用用户默认记忆目录。目录一律通过 `tests/support/temp.ts` 的 `tempDir(suite, prefix)` 创建：它把目录放在 `work/tmp/<suite>/` 并在进程退出时回收；不要自己拼 `work/` 路径或调用 `mkdtemp`，否则单轮测试会留下上千个目录。需要保留现场时设 `MW_KEEP_TEMP=1`。
+- 部署与本机运行不使用 `work/`。`work/` 是测试与临时产物的目录，服务进程、记忆库和治理库都不放在这里：Mnemon 库使用标准位置 `~/.mnemon` 与 store `default`，MnemoWeave 治理库使用 `%LOCALAPPDATA%\MnemoWeave\state`，Server 从 `dist/` 运行。三者由 `scripts/publish-server.mjs` 写入 `dist/.env.local-server`，不要手工改回仓库内相对路径。
 - Provider 主要通过真实 CLI 进程验证输入、JSON 输出和副作用；上游 Go 测试不是本项目验收前提。只有修改或排查 Mnemon 内部源码时再考虑。
 - 按改动范围验证，不为简单可逆变更添加镜像实现的测试。不能把未执行或失败的检查写成通过。
-- 治理库当前 schema v23；迁移每步先 `VACUUM INTO` 快照；升级仍需先在隔离状态目录演练，不直接对真实库升级。Host 真实会话验收（ZCode、ChatGPT 桌面、DSH）仍属未完成项，见 `docs/host-acceptance.md` 与 `docs/status.md`。
+- 治理库当前 schema v23。新建库直接按 v23 建表（`packages/infrastructure/governance/src/schema-baseline.ts`）；已有库按版本逐步升级，每步先 `VACUUM INTO` 快照。改动迁移时同步更新基线，`tests/contract/schema-baseline.test.ts` 会比较两种建库路径的结构。升级仍需先在隔离状态目录演练，不直接对真实库升级。Host 真实会话验收（ZCode、ChatGPT 桌面、DSH）仍属未完成项，见 `docs/host-acceptance.md` 与 `docs/status.md`。
 - 向用户说明实际改动路径、执行命令、测试结果、未决事项和下一步；区分已实现、预留和待验证能力。

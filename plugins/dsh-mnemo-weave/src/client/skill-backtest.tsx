@@ -273,12 +273,18 @@ export function SkillListPanel({ language, report, error, onRefresh, selected, o
   const [root, setRoot] = useState(roots?.[0] ?? '');
   const t = (key: MessageKey, params?: Record<string, string | number>): string => translate(language, key, params);
   return (
-    <section className="mwui-pane" aria-label={t('skills.list')}>
-      <div className="mwui-pane-header">
-        <span className="mwui-pane-title">{t('skills.list')}</span>
-        <button type="button" className="mwui-button" onClick={onRefresh}>{t('skills.refresh')}</button>
-      </div>
-      <div className="mwui-detail">
+    /**
+     * Two columns: the index on the left, everything about the selected skill on the right.
+     * The reference implementation splits the same way — a narrow list beside a wide pane — so a
+     * long list never pushes the detail off the page.
+     */
+    <div className="mwui-skills-split">
+      <section className="mwui-skills-rail" aria-label={t('skills.list')}>
+        <div className="mwui-pane-header">
+          <span className="mwui-pane-title">{t('skills.list')}</span>
+          <button type="button" className="mwui-button mwui-mini" onClick={onRefresh}>{t('skills.refresh')}</button>
+        </div>
+        <div className="mwui-skills-rail-body">
         {error === null ? null : <div className="mwui-banner" data-tone="bad">{error}</div>}
         {report === null ? <div className="mwui-muted">{t('list.loading')}</div> : (
           <>
@@ -301,12 +307,15 @@ export function SkillListPanel({ language, report, error, onRefresh, selected, o
             )}
           </>
         )}
-        {notice === null ? null : <div className="mwui-banner" data-tone="ok">{notice}</div>}
         {selected === null || selected === undefined || onTrash === undefined ? null : (
           <div className="mwui-actions">
             <button type="button" className="mwui-button" disabled={busy} onClick={() => onTrash(selected)}>{t('skills.remove')}</button>
           </div>
         )}
+        </div>
+      </section>
+      <section className="mwui-skills-main" aria-label={t('skills.detail')}>
+        {notice === null ? null : <div className="mwui-banner" data-tone="ok">{notice}</div>}
         {drafts === undefined ? null : (
           <div className="mwui-settings-group">
             <h4 className="mwui-section-title">{t('skills.drafts')}</h4>
@@ -424,7 +433,7 @@ export function SkillListPanel({ language, report, error, onRefresh, selected, o
             </div>
           </div>
         )}
-      </div>
-    </section>
+      </section>
+    </div>
   );
 }

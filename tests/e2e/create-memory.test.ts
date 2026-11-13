@@ -9,6 +9,7 @@ import { MemoryClient } from '../../packages/client/src/index.ts';
 import { createHttpServer } from '../../packages/protocols/http/src/index.ts';
 import { configure } from '../../apps/server/src/config.ts';
 import { mnemonBinary } from '../e2e/mnemon-binary.ts';
+import { tempDir } from '../support/temp.ts';
 
 /**
  * Creating a memory publishes it directly.
@@ -24,7 +25,7 @@ const OPERATOR = 'create-operator-0123456789';
 const HOST = 'create-probe';
 
 async function harness(): Promise<{ client: MemoryClient; close: () => Promise<void> }> {
-  const root = resolve('work', 'create-memory', randomUUID());
+  const root = await tempDir('create-memory', 'create-memory');
   mkdirSync(join(root, 'provider'), { recursive: true });
   mkdirSync(join(root, 'state'), { recursive: true });
   const app = configure({

@@ -1,9 +1,9 @@
-import type { UiArchive, UiArchiveCapacity, UiArchiveHistory, UiConfigView, UiConnectionTest, UiEmbeddingDiagnostics, UiExplore, UiGraph, UiInjection, UiMemoryList, UiRegisterTest, UiRule, UiRuleUsage, UiSettings, UiStatus, UiSyncPass, UiSyncStatus, UiWakeTest, UiWorkspace } from '../shared/contract.ts';
+import type { UiArchive, UiArchiveCapacity, UiArchiveHistory, UiConfigView, UiConnectionTest, UiEmbeddingDiagnostics, UiExplore, UiGraph, UiGraphNode, UiInjection, UiMemoryList, UiMemorySummary, UiRegisterTest, UiRule, UiRuleUsage, UiSettings, UiStatus, UiSyncPass, UiSyncStatus, UiWakeTest, UiWorkspace } from '../shared/contract.ts';
 import { translate, type Language, type MessageKey } from './i18n.ts';
 import { Modal } from './modal.tsx';
-import { filterEntities, formatDateTime, relativeTime, utf8Bytes } from './view-model.ts';
-import { layoutGraph } from './graph-layout.ts';
-import { useEffect, useState, type ReactNode } from 'react';
+import { capacityPercent, filterEntities, formatBytes, formatDateTime, relativeTime, utf8Bytes } from './view-model.ts';
+import { GRAPH_HEIGHT, GRAPH_WIDTH, clampGraphPosition, linkLabel, naturalGraphPositions, nodeKey, uniformGraphPositions, type GraphLayoutMode, type GraphPositions } from './graph-layout.ts';
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 
 /**
  * The page-level classes. dsh-mnemon gives every Source one page and shows only those pages in
@@ -58,6 +58,48 @@ function Card({ label, value, hint }: { label: string; value: string; hint?: str
       <span className="mwui-card-label">{label}</span>
       <span className="mwui-card-value">{value}</span>
       {hint === undefined ? null : <span className="mwui-card-hint">{hint}</span>}
+    </div>
+  );
+}
+
+/**
+ * A capacity meter: how much of the limit is in use.
+ *
+ * Both capped collections — runtime rules and each workspace's active archive bytes — fill up
+ * gradually and reject a write once full, so the number alone does not answer the question a reader
+ * has ("how much room is left"). The bar is a reading of the same two values, and the label keeps
+ * the exact figure beside it; a bare bar cannot be compared with the limit that produced it.
+ *
+ * Excess is shown rather than hidden: the fill is clamped at 100% because a bar cannot overflow,
+ * but the label keeps the real numbers so an over-limit state reads as over, not as "full".
+ */
+export function CapacityMeter({ label, used, limit, exceeded, language }: {
+  label?: string;
+  used: number;
+  limit: number;
+  exceeded?: boolean;
+  language: Language;
+}): ReactNode {
+  const percent = capacityPercent(used, limit);
+  const over = exceeded === true || (limit > 0 && used > limit);
+  return (
+    <div className="mwui-meter" data-tone={over ? 'warn' : undefined}>
+      {(label === undefined ? null : <span className="mwui-meter-label">{label}</span>)}
+      <span
+        className="mwui-meter-track"
+        role="progressbar"
+        aria-valuenow={percent}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-label={label === undefined ? translate(language, 'capacity.label') : `${label} ${translate(language, 'capacity.label')}`}
+        title={`${formatBytes(used)} / ${formatBytes(limit)}`}
+      >
+        <span className="mwui-meter-fill" style={{ width: `${percent}%` }} />
+      </span>
+      <span className="mwui-meter-value" data-tone={over ? 'warn' : undefined}>
+        {formatBytes(used)} / {formatBytes(limit)}
+        {over ? ` · ${translate(language, 'capacity.over')}` : ''}
+      </span>
     </div>
   );
 }
@@ -181,8 +223,9 @@ export function RuntimePanel(props: RuntimeProps): ReactNode {
   const [edit, setEdit] = useState<{ ruleId: string; body: string; enabled: boolean; version: number } | null>(null);
   const [editError, setEditError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const editing = edit !== null && current !== null && edit.ruleId === current.entryId;
-  const dirty = editing && (edit.body !== current.body || edit.enabled !== current.enabled);
+  const editing = edit !== null && (rules ?? []).some(rule => rule.entryId === edit.ruleId);
+  const edited = edit === null ? null : (rules ?? []).find(rule => rule.entryId === edit.ruleId) ?? null;
+  const dirty = edit !== null && edited !== null && (edit.body !== edited.body || edit.enabled !== edited.enabled);
 
   /** A window is open over the list, so selecting a rule simply clears the draft behind it. */
   const select = (id: string): void => {
@@ -203,9 +246,12 @@ export function RuntimePanel(props: RuntimeProps): ReactNode {
     setDraft({ body: '', enabled: true });
   };
 
-  const beginEdit = (): void => {
-    if (current === null) return;
-    setEdit({ ruleId: current.entryId, body: current.body, enabled: current.enabled, version: current.version });
+  /** Begin editing one rule; the id is enough, so the row's own edit button works without selecting. */
+  const beginEditFor = (ruleId: string): void => {
+    const rule = (rules ?? []).find(item => item.entryId === ruleId);
+    if (rule === undefined) return;
+    if (ruleId !== selected) props.onSelect(ruleId);
+    setEdit({ ruleId: rule.entryId, body: rule.body, enabled: rule.enabled, version: rule.version });
     setEditError(null);
   };
 
@@ -242,7 +288,7 @@ export function RuntimePanel(props: RuntimeProps): ReactNode {
   };
 
   return (
-    <div className="mwui-body" data-view={current === null ? 'list' : 'detail'}>
+    <div className="mwui-single">
       {creating ? (
         <Modal
           title={translate(language, 'runtime.createTitle')}
@@ -290,7 +336,7 @@ export function RuntimePanel(props: RuntimeProps): ReactNode {
           <span className="mwui-pane-count">{countOf(rules)}</span>
           {usage === null || usage === undefined
             ? null
-            : <span className="mwui-item-meta" data-tone={usage.exceeded ? 'warn' : undefined}>{usage.usedBytes}/{usage.limitBytes} B</span>}
+            : <CapacityMeter used={usage.usedBytes} limit={usage.limitBytes} exceeded={usage.exceeded} language={language} />}
           <button type="button" className="mwui-button mwui-mini" onClick={() => { setCreating(value => !value); setCreateError(null); }} disabled={rules === null}>
             {translate(language, 'runtime.new')}
           </button>
@@ -304,44 +350,27 @@ export function RuntimePanel(props: RuntimeProps): ReactNode {
               ? <li className="mwui-empty">{translate(language, 'runtime.empty')}</li>
               : rules.map(rule => (
                 <li key={rule.entryId}>
-                  <button type="button" className="mwui-item" data-active={rule.entryId === selected ? 'true' : 'false'} onClick={() => select(rule.entryId)}>
-                    <span className="mwui-item-title">{rule.body.split('\n')[0] ?? rule.entryId}</span>
-                    <span className="mwui-item-excerpt">{rule.body}</span>
+                  {/*
+                    * The detail pane repeated what the row already said — body, state, version —
+                    * and the only thing it added was the byte count and an edit button. Both fit
+                    * on the row, so the rule text can use the full width instead of half of it.
+                    */}
+                  <div className="mwui-item mwui-item-static" data-active={rule.entryId === selected ? 'true' : 'false'}>
+                    {/* The body is already the first line, so a separate title would print it twice. */}
+                    <span className="mwui-item-excerpt mwui-rule-body">{rule.body}</span>
                     <span className="mwui-item-meta">
                       <span>{rule.enabled ? translate(language, 'common.enabled') : translate(language, 'common.disabled')}</span>
                       <span>·</span>
-                      <span>·</span>
                       <span>{translate(language, 'common.version')} {rule.version}</span>
+                      <span>·</span>
+                      <span>{rule.bodyBytes} B</span>
+                      <span className="mwui-spacer" />
+                      <button type="button" className="mwui-button mwui-mini" onClick={() => beginEditFor(rule.entryId)}>{translate(language, 'detail.edit')}</button>
                     </span>
-                  </button>
+                  </div>
                 </li>
               ))}
         </ul>
-      </section>
-
-      <section className="mwui-pane" aria-label={translate(language, 'runtime.detail')}>
-        <div className="mwui-pane-header">
-          <span className="mwui-pane-title">{translate(language, 'runtime.detail')}</span>
-          {current === null ? null : (
-            <button type="button" className="mwui-button mwui-mini" onClick={beginEdit}>{translate(language, 'detail.edit')}</button>
-          )}
-        </div>
-        {current === null
-          ? <div className="mwui-empty">{translate(language, 'runtime.placeholder')}</div>
-          : (
-            <div className="mwui-detail">
-              <div className="mwui-chips">
-                <span className="mwui-chip"><span className="mwui-chip-label">{translate(language, 'common.version')}</span><span className="mwui-chip-value">{current.version}</span></span>
-                <span className="mwui-chip" data-tone={current.enabled ? 'ok' : 'warn'}><span className="mwui-chip-label">{translate(language, 'runtime.state')}</span><span className="mwui-chip-value">{current.enabled ? translate(language, 'common.enabled') : translate(language, 'common.disabled')}</span></span>
-                <span className="mwui-chip"><span className="mwui-chip-label">{translate(language, 'runtime.bytes')}</span><span className="mwui-chip-value">{current.bodyBytes}</span></span>
-              </div>
-              <div>
-                <h4 className="mwui-section-title">{translate(language, 'runtime.body')}</h4>
-                <div className="mwui-content">{current.body}</div>
-              </div>
-              <div className="mwui-edit-hint" data-tone="muted">{translate(language, 'runtime.hint')}</div>
-            </div>
-          )}
       </section>
 
       {edit !== null && editing ? (
@@ -480,14 +509,16 @@ export function ArchivesPanel({ archives, capacities, history, error, selected, 
   return (
     <div className="mwui-body">
       <section className="mwui-pane" aria-label={translate(language, 'archives.title')}>
+        {/* Two rows: what this pane is, then the controls that narrow it. Mixing them put a
+            select, a progress bar and a button on the title line, which reads as one crowded run. */}
         <div className="mwui-pane-header">
           <span className="mwui-pane-title">{translate(language, 'archives.title')}</span>
-          <span className="mwui-pane-count">{countOf(archives)}</span>
-          {capacities === null || capacities === undefined || capacities.length === 0
-            ? null
-            : <span className="mwui-item-meta" data-tone={capacity.exceeded ? 'warn' : undefined}>{capacity.activeBytes}/{capacity.limitBytes} B</span>}
+          <span className="mwui-pane-count">{archives === null ? null : countOf(archives)}</span>
+          {onSave && workspace !== null && <button type="button" className="mwui-button mwui-mini" onClick={() => open(null)}>{translate(language, 'archives.create')}</button>}
+        </div>
+        <div className="mwui-archive-controls">
           {onWorkspace === undefined ? null : (
-            <label className="mwui-filter">
+            <label className="mwui-archive-picker">
               <span>{translate(language, 'archives.workspacePicker')}</span>
               <select
                 className="mwui-input mwui-select"
@@ -503,13 +534,18 @@ export function ArchivesPanel({ archives, capacities, history, error, selected, 
               </select>
             </label>
           )}
-          {onSave && workspace !== null && <button type="button" className="mwui-button mwui-mini" onClick={() => open(null)}>{translate(language, 'archives.create')}</button>}
+          {capacities === null || capacities === undefined || capacities.length === 0
+            ? null
+            : <CapacityMeter used={capacity.activeBytes} limit={capacity.limitBytes} exceeded={capacity.exceeded} language={language} />}
         </div>
         {releaseCandidates === null || releaseCandidates === undefined || !releaseCandidates.capacity.exceeded
           ? null
           : (
             <div className="mwui-form" role="group" aria-label={translate(language, 'archives.capacityMaintenance')}>
               <div className="mwui-section-title">{translate(language, 'archives.capacityMaintenance')}</div>
+              {/* The workspace whose capacity actually overflowed: the header meter aggregates every
+                  workspace, so it can sit below the limit while this one is over it. */}
+              <CapacityMeter used={releaseCandidates.capacity.activeBytes} limit={releaseCandidates.capacity.limitBytes} exceeded={releaseCandidates.capacity.exceeded} language={language} />
               <ol className="mwui-list">
                 {releaseCandidates.items.map(item => (
                   <li key={item.entryId}>
@@ -531,14 +567,34 @@ export function ArchivesPanel({ archives, capacities, history, error, selected, 
                 : <div className="mwui-muted">{translate(language, 'archives.capacityRemaining').replace('{count}', String(releaseCandidates.remaining))}</div>}
             </div>
           )}
-        <input type="search" aria-label={translate(language, 'archives.search')} placeholder={translate(language, 'archives.search')} value={query} onChange={event => setQuery(event.currentTarget.value)} />
+        {/* Nothing to search before a workspace is chosen: the field would be a control that
+            answers with the same empty list. */}
+        {(workspaces ?? []).length === 0 ? null : (
+          <div className="mwui-archive-toolbar">
+            <input
+              className="mwui-input"
+              type="search"
+              aria-label={translate(language, 'archives.search')}
+              placeholder={translate(language, 'archives.search')}
+              value={query}
+              onChange={event => setQuery(event.currentTarget.value)}
+            />
+          </div>
+        )}
+        {error === null ? null : <div className="mwui-inline-error" role="alert">{translate(language, 'panel.unavailable')} · {error}</div>}
         <ul className="mwui-list">
           {archives === undefined
             ? <li className="mwui-empty">{translate(language, 'list.loading')}</li>
             : archives === null
-              ? <li className="mwui-empty">{translate(language, 'panel.unavailable')}{error === null ? '' : ` · ${error}`}</li>
+              /**
+               * Three different states answered the same message before: no workspace exists, a
+               * workspace is not selected, and the read actually failed. Only the last one is a
+               * failure, and calling the other two "read failed" sends the reader looking for a
+               * broken Server that is working.
+               */
+              ? <li className="mwui-empty">{translate(language, (workspaces ?? []).length === 0 ? 'archives.noWorkspaceYet' : 'archives.pickWorkspace')}</li>
             : visible.length === 0
-              ? <li className="mwui-empty">{translate(language, workspace === null ? 'archives.noWorkspace' : 'archives.empty')}</li>
+              ? <li className="mwui-empty">{translate(language, workspace === null ? 'archives.pickWorkspace' : 'archives.empty')}</li>
               : visible.map(archive => (
                 <li key={archive.entryId}>
                   <button type="button" className="mwui-item" data-active={archive.entryId === selected ? 'true' : 'false'} disabled={draft !== undefined} onClick={() => onSelect(archive.entryId)}>
@@ -786,6 +842,8 @@ export function SyncGroup({ sync, error, pass, language, busy, onRefresh }: Sync
             ? <span className="mwui-muted">{translate(language, 'list.loading')}</span>
             : sync === null
               ? <span className="mwui-muted">{error === 'REVIEW_REQUIRED' ? translate(language, 'sync.off') : `${translate(language, 'panel.unavailable')}${error === null ? '' : ` · ${error}`}`}</span>
+            : sync.unavailableReason !== undefined
+              ? <span className="mwui-muted">{translate(language, sync.unavailableReason === 'not-configured' ? 'sync.off' : sync.unavailableReason === 'unauthorized' ? 'sync.unauthorized' : 'sync.unreachable')}</span>
             : (
               <>
                 {pass === null ? null : (
@@ -1117,6 +1175,17 @@ export interface EntitiesProps {
   active: string;
   onChangeQuery(value: string): void;
   onSelect(entity: string): void;
+  /**
+   * The memories that carry the selected entity, rendered with the same card as the list and the
+   * search results. The index alone answers "which names exist"; the reason to pick one is to see
+   * what it appears in.
+   */
+  memories?: UiMemoryList | null;
+  memoriesError?: string | null;
+  memoriesLoading?: boolean;
+  onOpen?: (memoryId: string) => void;
+  onCopyId?: (memoryId: string) => Promise<boolean>;
+  onClone?: (content: string) => void;
 }
 
 /**
@@ -1126,51 +1195,123 @@ export interface EntitiesProps {
  * the entities its current revision names, with counts. Selecting one applies it to the memory
  * list rather than duplicating a second results view.
  */
+/**
+ * The Entities page.
+ *
+ * The reference implementation puts the index in a rail beside the results rather than above them:
+ * picking a name is how a reader changes what the right-hand side shows, so the two belong side by
+ * side. The rail is paged — a store can hold thousands of entity names — and states how much of the
+ * index is on screen.
+ */
 export function EntitiesPanel(props: EntitiesProps): ReactNode {
   const { entities, query, error, loading, language, active } = props;
+  const [limit, setLimit] = useState(ENTITY_RAIL_PAGE);
   const visible = filterEntities(entities, query);
+  const shown = visible.slice(0, limit);
+  const remaining = Math.max(0, visible.length - shown.length);
   return (
-    <div className="mwui-page">
-      <section className="mwui-pane">
-        <div className="mwui-pane-header">
-          <span className="mwui-pane-title">{translate(language, 'entities.title')}</span>
-          <span className="mwui-filter-count">{loading ? translate(language, 'toolbar.loading') : `${entities.length}`}</span>
-        </div>
-        <div className="mwui-detail">
-          <div className="mwui-edit-hint" data-tone="muted">{translate(language, 'entities.hint')}</div>
-          <input
-            className="mwui-input"
-            type="search"
-            value={query}
-            placeholder={translate(language, 'entities.filter')}
-            aria-label={translate(language, 'entities.filter')}
-            onChange={event => props.onChangeQuery(event.target.value)}
-          />
+    /* data-fill keeps the page from scrolling as a whole, so both columns can reach the bottom
+       and scroll independently. */
+    <div className="mwui-page" data-fill="true">
+      <div className="mwui-entity-layout">
+        <aside className="mwui-entity-rail" aria-busy={loading || undefined}>
+          <div className="mwui-entity-search">
+            <input
+              className="mwui-input"
+              type="search"
+              value={query}
+              placeholder={translate(language, 'entities.filter')}
+              aria-label={translate(language, 'entities.filter')}
+              onChange={event => { props.onChangeQuery(event.target.value); setLimit(ENTITY_RAIL_PAGE); }}
+            />
+            <button
+              type="button"
+              className="mwui-button"
+              disabled={query.trim() === ''}
+              onClick={() => props.onSelect(query.trim())}
+            >
+              {translate(language, 'entities.action')}
+            </button>
+          </div>
+          <div className="mwui-entity-heading">
+            <span>{translate(language, 'entities.top')}</span>
+            <small>{query === '' ? translate(language, 'entities.frequency') : translate(language, 'entities.filterHint')}</small>
+          </div>
           {error === null ? null : <div className="mwui-inline-error" role="alert">{error}</div>}
           {visible.length === 0
             ? <div className="mwui-empty">{translate(language, entities.length === 0 ? 'entities.empty' : 'entities.noMatch')}</div>
             : (
-              <ul className="mwui-list mwui-entity-list">
-                {visible.map(item => (
-                  <li key={item.value}>
-                    <button
-                      type="button"
-                      className="mwui-subrow-button"
-                      data-active={active !== '' && active.toLowerCase() === item.value.toLowerCase() ? 'true' : 'false'}
-                      onClick={() => props.onSelect(item.value)}
-                    >
-                      <span className="mwui-subrow-main">{item.value}</span>
-                      <span className="mwui-subrow-tail">{item.count}</span>
-                    </button>
-                  </li>
+              <div className="mwui-entity-list">
+                {shown.map(item => (
+                  <button
+                    key={item.value}
+                    type="button"
+                    aria-pressed={active !== '' && active.toLowerCase() === item.value.toLowerCase()}
+                    onClick={() => props.onSelect(item.value)}
+                  >
+                    <span>{item.value}</span>
+                    <strong>{item.count}</strong>
+                  </button>
                 ))}
-              </ul>
+              </div>
             )}
-        </div>
-      </section>
+          {visible.length === 0 ? null : (
+            <div className="mwui-entity-progress">
+              <span>{translate(language, 'common.showing', { visible: String(shown.length), total: String(visible.length) })}</span>
+              {remaining === 0 ? null : (
+                <button type="button" className="mwui-button mwui-mini" onClick={() => setLimit(current => current + ENTITY_RAIL_PAGE)}>
+                  {translate(language, 'common.showMore', { count: String(Math.min(ENTITY_RAIL_PAGE, remaining)) })}
+                </button>
+              )}
+            </div>
+          )}
+        </aside>
+        <section className="mwui-entity-results">
+          {props.active === '' || props.memories === undefined || props.memories === null || props.onOpen === undefined || props.onCopyId === undefined
+            ? <div className="mwui-empty">{translate(language, 'entities.pickHint')}</div>
+            : (
+              <div className="mwui-entity-memories">
+                <div className="mwui-pane-header">
+                  <span className="mwui-pane-title">{props.active}</span>
+                  <span className="mwui-filter-count">{String(props.memories.items.length)}</span>
+                </div>
+                {props.memoriesLoading === true
+                  ? <div className="mwui-empty">{translate(language, 'toolbar.loading')}</div>
+                  : props.memoriesError != null && props.memoriesError !== ''
+                  ? <div className="mwui-inline-error" role="alert">{props.memoriesError}</div>
+                  : props.memories.items.length === 0
+                  ? <div className="mwui-empty">{translate(language, 'entities.noMemories')}</div>
+                  : (
+                    <ul className="mwui-list">
+                      {props.memories.items.map(item => (
+                        <MemoryCard
+                          key={item.memoryId}
+                          item={item}
+                          active={false}
+                          language={language}
+                          now={Date.now()}
+                          onSelect={props.onOpen!}
+                          onCopyId={props.onCopyId!}
+                          {...(props.onClone === undefined ? {} : { onClone: props.onClone })}
+                        />
+                      ))}
+                    </ul>
+                  )}
+              </div>
+            )}
+        </section>
+      </div>
     </div>
   );
 }
+
+/**
+ * How many entity names the rail shows at a time.
+ *
+ * A page of ten: the rail is narrow, and a long scrolling list makes the counts at the top the
+ * only ones a reader ever looks at.
+ */
+const ENTITY_RAIL_PAGE = 10;
 
 /**
  * The relation graph as a picture.
@@ -1183,20 +1324,247 @@ export interface GraphProps {
   graph: UiGraph | null;
   loading: boolean;
   error: string | null;
+  /**
+   * Body text by memory id, from the list the page already holds.
+   *
+   * A node has no body of its own: reading one per node would cost a Provider process each, which
+   * is why the graph is a structure-only answer. The list has already paid that cost for the rows
+   * it shows, so the drawing borrows those labels instead of asking again.
+   */
+  labels?: Map<string, string> | undefined;
+  /**
+   * Open the entity page filtered to one name.
+   *
+   * An entity node has no memory to open, and its name is a filter the entity page already
+   * understands — sending it there is the only action that leads somewhere.
+   */
+  onExploreEntity?(entity: string): void;
+  /**
+   * Search the collection around one memory's own text.
+   *
+   * This is what the graph is for: a node is a starting point, not a destination. Opening the body
+   * answers "what does this say", which the memory page already answers; searching its text answers
+   * "what else is like this", which only this drawing can lead to.
+   */
+  onExploreMemory?(content: string): void;
   language: Language;
   /** The memory whose detail is open, drawn as the focus when it is in the graph. */
   focusId: string | null;
   onReload(): void;
-  onOpen(memoryId: string): void;
 }
 
 /**
  * The graph as a section of a page. dsh-mnemon draws the merged graph below the memory overview's
  * own cards; the overview owns the section, so it has no page wrapper of its own.
  */
+/**
+ * The graph as a section of a page.
+ *
+ * The reference implementation draws one SVG with three things rings cannot express: entity nodes
+ * beside memories, a force arrangement so linked memories sit together, and nodes that can be
+ * dragged. The layout work lives in `graph-layout.ts`; this component owns the interaction.
+ */
 export function GraphSection(props: GraphProps): ReactNode {
-  const { graph, loading, error, language, focusId } = props;
-  const layout = graph === null ? null : layoutGraph(graph, focusId === null ? {} : { focusId });
+  const { graph, loading, error, language, focusId, labels } = props;
+  /**
+   * How many nodes to draw.
+   *
+   * A graph with hundreds of memories is unreadable at this size, so the drawing keeps the
+   * best-connected part of it: the focused memory first, then entity nodes (they are what join
+   * memories), then the rest. The page states the total so a reader knows the drawing is a subset.
+   */
+  const visible = useMemo(() => {
+    if (graph === null) return [];
+    const entities = graph.nodes.filter(item => item.kind === 'entity');
+    const memories = graph.nodes.filter(item => item.kind !== 'entity');
+    const ordered = [
+      ...(focusId === null ? [] : memories.filter(item => item.memoryId === focusId)),
+      ...memories.filter(item => item.memoryId !== focusId),
+    ];
+    return [...entities.slice(0, 24), ...ordered].slice(0, 60);
+  }, [graph, focusId]);
+  const visibleIds = useMemo(() => new Set(visible.map(nodeKey)), [visible]);
+  const edges = useMemo(() => {
+    if (graph === null) return [];
+    // Entity links first: they carry the structure, and the cap must not cut them first.
+    const priority: Record<string, number> = { Entity: 0, Conflicts: 1, Supersedes: 2, RelatedTo: 3 };
+    return graph.edges
+      .filter(edge => visibleIds.has(edge.sourceMemoryId) && visibleIds.has(edge.targetMemoryId))
+      .map((edge, index) => ({ edge, index }))
+      .sort((left, right) => (priority[left.edge.kind] ?? 9) - (priority[right.edge.kind] ?? 9) || left.index - right.index)
+      .slice(0, 180)
+      .map(({ edge }) => edge);
+  }, [graph, visibleIds]);
+  /**
+   * Side-by-side edges are bowed apart.
+   *
+   * Two memories can share several entities, which draws several lines between the same two points;
+   * without an offset they overlap into one and the reader sees a single relation.
+   */
+  const curved = useMemo(() => {
+    const groups = new Map<string, number[]>();
+    edges.forEach((edge, index) => {
+      const key = [edge.sourceMemoryId, edge.targetMemoryId].sort().join('::');
+      groups.set(key, [...(groups.get(key) ?? []), index]);
+    });
+    return edges.map((edge, index) => {
+      const key = [edge.sourceMemoryId, edge.targetMemoryId].sort().join('::');
+      const group = groups.get(key) ?? [index];
+      const position = group.indexOf(index);
+      return { edge, offset: (position - (group.length - 1) / 2) * 12 };
+    });
+  }, [edges]);
+  const layoutKey = `${visible.map(item => `${nodeKey(item)}:${item.kind ?? 'memory'}:${item.category ?? 'general'}`).join('|')}::${edges.map(edge => `${edge.sourceMemoryId}>${edge.targetMemoryId}:${edge.kind}`).join('|')}`;
+  const natural = useMemo(() => naturalGraphPositions(visible, edges), [layoutKey]);
+  const [positions, setPositions] = useState<GraphPositions>(() => natural);
+  const [layoutMode, setLayoutMode] = useState<GraphLayoutMode>('natural');
+  const positionsRef = useRef(positions);
+  const animationRef = useRef<number | null>(null);
+  const dragRef = useRef<{ nodeId: string; pointerId: number; startX: number; startY: number; moved: boolean } | null>(null);
+
+  const commit = useCallback((next: GraphPositions) => {
+    positionsRef.current = next;
+    setPositions(next);
+  }, []);
+  const cancelAnimation = useCallback(() => {
+    if (animationRef.current !== null && typeof window.cancelAnimationFrame === 'function') window.cancelAnimationFrame(animationRef.current);
+    animationRef.current = null;
+  }, []);
+  /**
+   * Move to a new arrangement by animating rather than snapping.
+   *
+   * A snap loses the reader's place: every node jumps at once and the eye cannot follow which one
+   * went where. Environments without animation frames get the target directly.
+   */
+  const animateTo = useCallback((target: GraphPositions, mode: Exclude<GraphLayoutMode, 'custom'>) => {
+    cancelAnimation();
+    setLayoutMode(mode);
+    if (typeof window.requestAnimationFrame !== 'function') { commit(target); return; }
+    const start = new Map(positionsRef.current);
+    const startedAt = performance.now();
+    const tick = (time: number): void => {
+      const progress = Math.min(1, (time - startedAt) / 620);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      const next: GraphPositions = new Map();
+      for (const [id, destination] of target) {
+        const origin = start.get(id) ?? { x: GRAPH_WIDTH / 2, y: GRAPH_HEIGHT / 2 };
+        next.set(id, { x: origin.x + (destination.x - origin.x) * eased, y: origin.y + (destination.y - origin.y) * eased });
+      }
+      commit(next);
+      if (progress < 1) animationRef.current = window.requestAnimationFrame(tick);
+      else animationRef.current = null;
+    };
+    animationRef.current = window.requestAnimationFrame(tick);
+  }, [cancelAnimation, commit]);
+
+  useEffect(() => { animateTo(natural, 'natural'); }, [layoutKey]);
+  useEffect(() => () => cancelAnimation(), [cancelAnimation]);
+
+  const beginDrag = (event: ReactPointerEvent<SVGGElement>, nodeId: string): void => {
+    cancelAnimation();
+    dragRef.current = { nodeId, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, moved: false };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  };
+  /** Map a pointer position into the drawing's coordinate space, so a drag follows the cursor. */
+  const graphPoint = (svg: SVGSVGElement, clientX: number, clientY: number): { x: number; y: number } => {
+    const matrix = svg.getScreenCTM?.();
+    if (matrix !== null && matrix !== undefined && typeof svg.createSVGPoint === 'function') {
+      const point = svg.createSVGPoint();
+      point.x = clientX; point.y = clientY;
+      return clampGraphPosition(point.matrixTransform(matrix.inverse()));
+    }
+    const bounds = svg.getBoundingClientRect();
+    const width = bounds.width || GRAPH_WIDTH;
+    const height = bounds.height || GRAPH_HEIGHT;
+    return clampGraphPosition({ x: (clientX - bounds.left) * GRAPH_WIDTH / width, y: (clientY - bounds.top) * GRAPH_HEIGHT / height });
+  };
+  const moveDrag = (event: ReactPointerEvent<SVGGElement>): void => {
+    const drag = dragRef.current;
+    const svg = event.currentTarget.ownerSVGElement;
+    if (drag === null || svg === null || drag.pointerId !== event.pointerId) return;
+    // A few pixels of movement is a click, not a drag: without this, selecting a node would also
+    // nudge it off the arrangement the reader was looking at.
+    if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 4) return;
+    drag.moved = true;
+    const next = new Map(positionsRef.current);
+    next.set(drag.nodeId, graphPoint(svg, event.clientX, event.clientY));
+    commit(next);
+    setLayoutMode('custom');
+  };
+  const endDrag = (event: ReactPointerEvent<SVGGElement>): void => {
+    const drag = dragRef.current;
+    if (drag === null || drag.pointerId !== event.pointerId) return;
+    const svg = event.currentTarget.ownerSVGElement;
+    if (drag.moved && svg !== null) {
+      const next = new Map(positionsRef.current);
+      next.set(drag.nodeId, graphPoint(svg, event.clientX, event.clientY));
+      commit(next);
+    }
+    dragRef.current = null;
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    // A tap selects; it never opens. Opening is the inspector's own action, because a node is also
+    // how the drawing is rearranged — leaving the graph on the first click would make dragging
+    // start on a page the reader did not ask for.
+  };
+  const cancelDrag = (event: ReactPointerEvent<SVGGElement>): void => {
+    if (dragRef.current?.pointerId === event.pointerId) dragRef.current = null;
+  };
+  /** Arrow keys move a node, so the arrangement is reachable without a pointer. */
+  const nudge = (nodeId: string, dx: number, dy: number): void => {
+    cancelAnimation();
+    const current = positionsRef.current.get(nodeId);
+    if (current === undefined) return;
+    const next = new Map(positionsRef.current);
+    next.set(nodeId, clampGraphPosition({ x: current.x + dx, y: current.y + dy }));
+    commit(next);
+    setLayoutMode('custom');
+  };
+  const layoutLabel = translate(language, layoutMode === 'natural' ? 'graph.layoutNatural' : layoutMode === 'uniform' ? 'graph.layoutUniform' : 'graph.layoutCustom');
+  /**
+   * The node the inspector describes.
+   *
+   * The inspector is a separate column rather than a popover: reading a node and changing the
+   * drawing are the same task, so the two sit side by side and neither covers the other.
+   */
+  /**
+   * The node the inspector describes.
+   *
+   * The selection is resolved from `visible` on every render rather than held as a copy: a reload
+   * can replace the node objects, and a copy would leave the inspector describing a node the
+   * drawing no longer has. Resolving by key means a node that disappeared simply closes the
+   * inspector, the same way the reference implementation re-finds its selection after a refresh.
+   */
+  const [selectedKey, setSelectedKey] = useState<string | null>(focusId);
+  const selected = selectedKey === null ? null : visible.find(item => nodeKey(item) === selectedKey) ?? null;
+  const selectedIsEntity = selected?.kind === 'entity';
+  /** The node's readable text: an entity's name, or the memory body held by the page. */
+  const selectedText = selected === null
+    ? ''
+    : selected.kind === 'entity'
+      ? selected.label ?? selected.memoryId
+      : labels?.get(selected.memoryId) ?? selected.label ?? selected.memoryId;
+  const [preview, setPreview] = useState<UiGraphNode | null>(null);
+  /**
+   * Direct neighbours of the selection.
+   *
+   * Reading a node and seeing what it connects to are the same question, so the rest of the
+   * drawing recedes rather than staying equally loud. One hop only: a second hop would make
+   * almost everything relevant and the emphasis would stop meaning anything.
+   */
+  const neighbours = useMemo(() => {
+    if (selectedKey === null) return null;
+    const found = new Set<string>();
+    for (const edge of edges) {
+      if (edge.sourceMemoryId === selectedKey) found.add(edge.targetMemoryId);
+      else if (edge.targetMemoryId === selectedKey) found.add(edge.sourceMemoryId);
+    }
+    return found;
+  }, [edges, selectedKey]);
+  // How many of each kind are drawn: the footer states the composition, so a reader knows the
+  // drawing is a subset before counting dots.
+  const memoryCount = visible.filter(item => item.kind !== 'entity').length;
+  const entityCount = visible.length - memoryCount;
+
   return (
       <section className="mwui-pane">
         <div className="mwui-pane-header">
@@ -1206,59 +1574,228 @@ export function GraphSection(props: GraphProps): ReactNode {
           </button>
         </div>
         <div className="mwui-detail">
-          <div className="mwui-edit-hint" data-tone="muted">{translate(language, 'graphs.hint')}</div>
           {error === null ? null : <div className="mwui-inline-error" role="alert">{error}</div>}
           {graph === null ? (loading ? <div className="mwui-empty">{translate(language, 'graph.loading')}</div> : null) : (
-            <>
-              {graph.truncated ? <div className="mwui-edit-hint" data-tone="warn">{translate(language, 'graph.truncated')}</div> : null}
-              {/* Dots with no lines look broken rather than empty: say why there is nothing drawn
-                  between them, because catalogued relations come only from the review path. */}
-              {graph.nodes.length > 0 && layout !== null && layout.links.length === 0 ? (
-                <div className="mwui-edit-hint" data-tone="muted">{translate(language, 'graphs.noRelations')}</div>
-              ) : null}
-              {graph.nodes.length === 0
-                ? <div className="mwui-empty">{translate(language, 'graphs.empty')}</div>
-                : layout === null ? null : (
-                  <div className="mwui-graph-scroll">
-                    <svg
-                      className="mwui-graph"
-                      viewBox={`0 0 ${layout.width} ${layout.height}`}
-                      role="img"
-                      aria-label={translate(language, 'graphs.aria', { nodes: String(layout.nodes.length), links: String(layout.links.length) })}
-                    >
-                      {layout.links.map(link => (
-                        <line
-                          key={link.relationId}
-                          className="mwui-graph-link"
-                          data-kind={link.kind}
-                          x1={link.x1} y1={link.y1} x2={link.x2} y2={link.y2}
-                        />
-                      ))}
-                      {layout.nodes.map(item => (
-                        <g
-                          key={item.memoryId}
-                          className="mwui-graph-node"
-                          data-focus={item.memoryId === focusId ? 'true' : 'false'}
-                          data-isolated={item.hop > 0 && layout.isolated.includes(item.memoryId) ? 'true' : 'false'}
-                          data-retired={item.retired ? 'true' : 'false'}
-                          role="button"
-                          tabIndex={0}
-                          aria-label={`${translate(language, 'explore.open')} ${item.memoryId.slice(0, 8)}`}
-                          onClick={() => props.onOpen(item.memoryId)}
-                          onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') props.onOpen(item.memoryId); }}
+            graph.nodes.length === 0
+              ? <div className="mwui-empty">{translate(language, 'graphs.empty')}</div>
+              : (
+                <div className="mwui-graph-layout">
+                  <section className="mwui-graph-panel">
+                    {/* The toolbar states what the drawing is and what its colours mean; the footer
+                        says how much of the graph is on screen. Both read the same counts as the
+                        drawing, so the three never disagree. */}
+                    <div className="mwui-graph-toolbar">
+                      <div>
+                        <span className="mwui-live-dot" />
+                        {translate(language, 'graph.snapshot')}
+                        <small>{translate(language, 'graph.snapshotHint')}</small>
+                      </div>
+                      <div className="mwui-graph-legend">
+                        <span data-edge="Entity">{translate(language, 'graph.edgeEntity')}</span>
+                        <span data-edge="Supersedes">{translate(language, 'graph.edgeSupersedes')}</span>
+                        <span data-edge="Conflicts">{translate(language, 'graph.edgeConflicts')}</span>
+                        <span data-edge="RelatedTo">{translate(language, 'graph.edgeRelated')}</span>
+                      </div>
+                    </div>
+                    <div className="mwui-graph-viewport">
+                      <div className="mwui-graph-controls" role="toolbar" aria-label={translate(language, 'graph.layoutAria')}>
+                        <span role="status" aria-label={translate(language, 'graph.layoutStatus', { layout: layoutLabel })}><i />{translate(language, 'graph.draggable', { layout: layoutLabel })}</span>
+                        <button type="button" data-active={layoutMode === 'natural' || undefined} onClick={() => animateTo(naturalGraphPositions(visible, edges), 'natural')}>{translate(language, 'graph.naturalAction')}</button>
+                        <button type="button" data-active={layoutMode === 'uniform' || undefined} onClick={() => animateTo(uniformGraphPositions(visible), 'uniform')}>{translate(language, 'graph.uniformAction')}</button>
+                      </div>
+                      <div className="mwui-graph-wrap">
+                        <svg
+                          className="mwui-graph"
+                          viewBox={`0 0 ${GRAPH_WIDTH} ${GRAPH_HEIGHT}`}
+                          role="img"
+                          data-layout={layoutMode}
+                          data-density={visible.length <= 12 ? 'sparse' : 'dense'}
+                          aria-label={translate(language, 'graphs.aria', { nodes: String(graph.nodes.length), links: String(graph.edges.length) })}
                         >
-                          <circle cx={item.x} cy={item.y} r={item.radius} />
-                          <text x={item.x} y={item.y + item.radius + 11} textAnchor="middle">
-                            {item.category ?? item.memoryId.slice(0, 6)}
-                          </text>
-                        </g>
-                      ))}
-                    </svg>
-                  </div>
-                )}
-            </>
+                          <defs>
+                            <pattern id="mwui-grid" width="26" height="26" patternUnits="userSpaceOnUse">
+                              <path d="M 26 0 L 0 0 0 26" className="mwui-graph-grid-line" fill="none" />
+                            </pattern>
+                            {/* A selected node carries a soft glow so it stays findable in a dense drawing. */}
+                            <filter id="mwui-glow" x="-100%" y="-100%" width="300%" height="300%">
+                              <feGaussianBlur stdDeviation="4" result="blur" />
+                              <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
+                            </filter>
+                          </defs>
+                          <rect width={GRAPH_WIDTH} height={GRAPH_HEIGHT} className="mwui-graph-backdrop" />
+                          <rect width={GRAPH_WIDTH} height={GRAPH_HEIGHT} fill="url(#mwui-grid)" />
+                          {curved.map(({ edge, offset }, index) => {
+                            const source = positions.get(edge.sourceMemoryId) ?? natural.get(edge.sourceMemoryId) ?? { x: GRAPH_WIDTH / 2, y: GRAPH_HEIGHT / 2 };
+                            const target = positions.get(edge.targetMemoryId) ?? natural.get(edge.targetMemoryId) ?? { x: GRAPH_WIDTH / 2, y: GRAPH_HEIGHT / 2 };
+                            const dx = target.x - source.x;
+                            const dy = target.y - source.y;
+                            const distance = Math.max(1, Math.hypot(dx, dy));
+                            const direction = edge.sourceMemoryId.localeCompare(edge.targetMemoryId) <= 0 ? 1 : -1;
+                            const controlX = (source.x + target.x) / 2 - (dy / distance) * offset * direction;
+                            const controlY = (source.y + target.y) / 2 + (dx / distance) * offset * direction;
+                            // An edge stays loud only when it touches the selection; the rest of
+                            // the web dims with its nodes so the two never disagree.
+                            const touchesSelection = selectedKey !== null
+                              && (edge.sourceMemoryId === selectedKey || edge.targetMemoryId === selectedKey);
+                            const mutedEdge = selectedKey !== null && !touchesSelection;
+                            return (
+                              <path
+                                key={`${edge.relationId}-${index}`}
+                                d={`M ${source.x} ${source.y} Q ${controlX} ${controlY} ${target.x} ${target.y}`}
+                                className="mwui-graph-edge"
+                                data-edge={edge.kind}
+                                data-muted={mutedEdge || undefined}
+                              />
+                            );
+                          })}
+                          {visible.map((item, index) => {
+                            const key = nodeKey(item);
+                            const position = positions.get(key) ?? natural.get(key) ?? { x: GRAPH_WIDTH / 2, y: GRAPH_HEIGHT / 2 };
+                            const isSelected = selectedKey === key || focusId === key;
+                            const isEntity = item.kind === 'entity';
+                            // With a node selected, everything not connected to it recedes: the
+                            // emphasis is what makes the selection readable, not the highlight alone.
+                            const muted = neighbours !== null && !isSelected && !neighbours.has(key);
+                            // Labels crowd a dense drawing, so only every third node keeps one
+                            // unless the graph is small enough for all of them.
+                            const showLabel = isSelected || visible.length < 22 || index % 3 === 0;
+                            const text = (isEntity ? item.label ?? item.memoryId : labels?.get(item.memoryId) ?? item.label ?? item.memoryId.slice(0, 8)).replace(/\s+/gu, ' ');
+                            // A dense drawing needs short labels: a 19-character label at this scale is wider than the
+                            // gap between neighbouring nodes and overlaps the next one.
+                            const limit = isSelected ? 30 : visible.length <= 12 ? 22 : 16;
+                            return (
+                              <g
+                                key={key}
+                                className="mwui-graph-node"
+                                data-node-id={key}
+                                data-category={item.category ?? 'general'}
+                                data-kind={isEntity ? 'entity' : 'memory'}
+                                data-selected={isSelected || undefined}
+                                data-muted={muted || undefined}
+                                transform={`translate(${position.x} ${position.y})`}
+                                role="button"
+                                tabIndex={0}
+                                aria-label={`${isEntity ? translate(language, 'graph.kindEntity') : translate(language, 'graph.kindMemory')}: ${text}`}
+                                data-dragging={dragRef.current?.nodeId === key || undefined}
+                                onPointerDown={event => beginDrag(event, key)}
+                                onPointerMove={moveDrag}
+                                onPointerUp={endDrag}
+                                onPointerCancel={cancelDrag}
+                                onLostPointerCapture={cancelDrag}
+                                onClick={() => setSelectedKey(key)}
+                                onKeyDown={event => {
+                                  if (event.key === 'Enter' || event.key === ' ') setSelectedKey(key);
+                                  else if (event.key === 'ArrowLeft') { event.preventDefault(); nudge(key, -12, 0); }
+                                  else if (event.key === 'ArrowRight') { event.preventDefault(); nudge(key, 12, 0); }
+                                  else if (event.key === 'ArrowUp') { event.preventDefault(); nudge(key, 0, -12); }
+                                  else if (event.key === 'ArrowDown') { event.preventDefault(); nudge(key, 0, 12); }
+                                }}
+                              >
+                                {isEntity
+                                  ? <><path d={isSelected ? 'M 0 -18 L 18 0 L 0 18 L -18 0 Z' : 'M 0 -14 L 14 0 L 0 14 L -14 0 Z'} className="mwui-graph-halo" filter={isSelected ? 'url(#mwui-glow)' : undefined} /><circle r={isSelected ? 5 : 4} className="mwui-graph-core" /></>
+                                  : <><circle r={isSelected ? 17 : visible.length <= 12 ? 14 : 11} className="mwui-graph-halo" filter={isSelected ? 'url(#mwui-glow)' : undefined} /><circle r={isSelected ? 7 : visible.length <= 12 ? 6 : 4.5} className="mwui-graph-core" /></>}
+                                {showLabel && (
+                                  <text x={visible.length <= 12 ? 19 : 15} y="4" className="mwui-graph-label">
+                                    {text.length > limit ? `${text.slice(0, limit)}…` : text}
+                                  </text>
+                                )}
+                              </g>
+                            );
+                          })}
+                        </svg>
+                      </div>
+                    </div>
+                    {graph.edges.length === 0 ? (
+                      <div className="mwui-edit-hint" data-tone="muted">{translate(language, 'graphs.noRelations')}</div>
+                    ) : null}
+                    <div className="mwui-graph-footer">
+                      <span>
+                        {translate(language, 'graph.composition', { memories: String(memoryCount), entities: String(entityCount) })}
+                      </span>
+                      <span>
+                        {translate(language, 'graph.counts', { visible: String(memoryCount + entityCount), total: String(graph.nodes.length) })} · {translate(language, 'graph.edges', { count: String(graph.edges.length) })}
+                        {graph.truncated ? ` · ${translate(language, 'graph.truncated')}` : ''}
+                      </span>
+                    </div>
+                  </section>
+                  <aside className="mwui-graph-inspector" data-empty={selected === null || undefined}>
+                    {selected === null ? (
+                      <div className="mwui-inspector-empty">
+                        <span className="mwui-inspector-logo" aria-hidden="true">◇</span>
+                        <h3>{translate(language, 'graph.selectNode')}</h3>
+                        <p>{translate(language, 'graph.selectNodeHint')}</p>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="mwui-inspector-heading">
+                          <span>{translate(language, selectedIsEntity ? 'graph.inspectorEntity' : 'graph.inspectorMemory')}</span>
+                          <button type="button" onClick={() => setSelectedKey(null)} aria-label={translate(language, 'graph.closeInspector')}>×</button>
+                        </div>
+                        <div className="mwui-inspector-chips">
+                          <span className="mwui-category-chip">
+                            {translate(language, selectedIsEntity ? 'graph.kindEntity' : 'graph.kindMemory')}
+                          </span>
+                          {selected.category === undefined ? null : <span className="mwui-category-chip">{selected.category}</span>}
+                        </div>
+                        <div className="mwui-inspector-title-row">
+                          <h3 className="mwui-inspector-title">{selectedText}</h3>
+                          {/*
+                            * The title is clamped, so a long body appears cut off with no way to read
+                            * the rest. The eye opens the whole text rather than making the inspector
+                            * scroll: the column is narrow and the page behind it stays put.
+                            */}
+                          {selectedText.length > 140 ? (
+                            <button
+                              type="button"
+                              className="mwui-inspector-eye"
+                              aria-label={translate(language, 'graph.previewAria')}
+                              title={translate(language, 'graph.previewAria')}
+                              onClick={() => setPreview(selected)}
+                            >
+                              <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+                                <path d="M1 8s2.6-4.4 7-4.4S15 8 15 8s-2.6 4.4-7 4.4S1 8 1 8z" fill="none" stroke="currentColor" strokeWidth="1.5" />
+                                <circle cx="8" cy="8" r="2.1" fill="currentColor" />
+                              </svg>
+                            </button>
+                          ) : null}
+                        </div>
+                        <dl className="mwui-inspector-meta">
+                          {selectedIsEntity ? (
+                            <>
+                              <div><dt>{translate(language, 'graph.entityMentions')}</dt><dd>{String(selected.occurrenceCount ?? 0)}</dd></div>
+                              <div><dt>{translate(language, 'graph.entityKey')}</dt><dd><code>{selected.memoryId}</code></dd></div>
+                            </>
+                          ) : (
+                            <>
+                              <div><dt>{translate(language, 'graph.memoryId')}</dt><dd><code>{selected.memoryId}</code></dd></div>
+                              <div><dt>{translate(language, 'graph.state')}</dt><dd>{selected.state}</dd></div>
+                              {selected.category === undefined ? null : <div><dt>{translate(language, 'graph.category')}</dt><dd>{selected.category}</dd></div>}
+                            </>
+                          )}
+                        </dl>
+                        <div className="mwui-inspector-actions">
+                          {selectedIsEntity
+                            ? <button type="button" className="mwui-button" data-variant="primary" onClick={() => props.onExploreEntity?.(selectedText)}>{translate(language, 'graph.findEntity')}</button>
+                            : <button type="button" className="mwui-button" data-variant="primary" onClick={() => props.onExploreMemory?.(selectedText)}>{translate(language, 'graph.exploreMemory')}</button>}
+                          <button type="button" className="mwui-button" onClick={() => { void navigator.clipboard?.writeText(selected.memoryId); }}>{translate(language, 'graph.copyId')}</button>
+                        </div>
+                      </>
+                    )}
+                  </aside>
+                </div>
+              )
           )}
         </div>
+        {preview === null ? null : (
+          <Modal
+            title={translate(language, 'graph.previewTitle')}
+            subtitle={preview.category ?? translate(language, 'graph.inspectorMemory')}
+            onClose={() => setPreview(null)}
+            language={language}
+          >
+            <p className="mwui-preview-body">{labels?.get(preview.memoryId) ?? preview.label ?? preview.memoryId}</p>
+          </Modal>
+        )}
       </section>
   );
 }
@@ -1274,7 +1811,10 @@ export interface MemoryOverviewProps {
   focusId: string | null;
   language: Language;
   onReloadGraph(): void;
-  onOpen(memoryId: string): void;
+  /** See `GraphProps.onExploreEntity`: an entity node leads to the entity page, not to a memory. */
+  onExploreEntity?(entity: string): void;
+  /** See `GraphProps.onExploreMemory`: a memory node leads to a search around its text. */
+  onExploreMemory?(content: string): void;
 }
 
 /**
@@ -1290,6 +1830,8 @@ export function MemoryOverviewPanel(props: MemoryOverviewProps): ReactNode {
   const projects = new Set<string>();
   const categories = new Set<string>();
   for (const item of memories?.items ?? []) if (item.category !== undefined) categories.add(item.category);
+  // Labels come from the list the page already loaded; a memory the list has not read keeps its id.
+  const labels = new Map((memories?.items ?? []).map(item => [item.memoryId, item.content] as const));
   const nodes = graph === null ? null : graph.nodes.length;
   return (
     <div className="mwui-page">
@@ -1310,11 +1852,6 @@ export function MemoryOverviewPanel(props: MemoryOverviewProps): ReactNode {
           hint={translate(language, 'memory.overview.categoriesHint')}
         />
         <Card
-          label={translate(language, 'memory.overview.categories')}
-          value={String(categories.size)}
-          hint={translate(language, 'memory.overview.categoriesHint')}
-        />
-        <Card
           label={translate(language, 'memory.overview.nodes')}
           value={nodes === null ? (graphLoading ? translate(language, 'toolbar.loading') : '—') : String(nodes)}
           hint={translate(language, 'memory.overview.nodesHint')}
@@ -1326,8 +1863,10 @@ export function MemoryOverviewPanel(props: MemoryOverviewProps): ReactNode {
         error={graphError}
         language={language}
         focusId={focusId}
+        labels={labels}
         onReload={props.onReloadGraph}
-        onOpen={props.onOpen}
+        {...(props.onExploreEntity === undefined ? {} : { onExploreEntity: props.onExploreEntity })}
+        {...(props.onExploreMemory === undefined ? {} : { onExploreMemory: props.onExploreMemory })}
       />
     </div>
   );
@@ -1513,6 +2052,102 @@ export function CreateMemoryForm(props: CreateMemoryFormProps): ReactNode {
  * body text, while this ranks by the Provider's own similarity. Every hit is a memory this
  * machine published, so each one can be opened; Provider-only hits are counted, not listed.
  */
+/**
+ * A card summarizing one memory.
+ *
+ * The layout follows the upstream card: a badge row of the facts that identify the entry, the
+ * body as the primary text, then tags and entities as their own rows, then the actions. The body
+ * is shown whole rather than clamped: a memory is one statement, and an excerpt that hides the
+ * end of it is the part a reader most often needs. The card is a button because selecting is the
+ * primary action; the action row sits outside it so a click cannot do both.
+ */
+export function MemoryCard({ item, active, language, now, onSelect, onCopyId, onRelated, onWithdraw, extraBadges, onClone }: {
+  /**
+   * The fields a card draws. The list supplies an `entryVersion`; a search hit has no version and
+   * passes none, so the type states which fields are required rather than forcing a placeholder.
+   */
+  item: Omit<UiMemorySummary, 'entryVersion'> & { entryVersion?: number };
+  active: boolean;
+  language: Language;
+  now: number;
+  onSelect(id: string): void;
+  onCopyId(memoryId: string): Promise<boolean>;
+  /** Absent when this view cannot explore; the button is then not rendered at all. */
+  onRelated?: (content: string) => void;
+  /** Absent when the caller cannot withdraw; forgetting is never offered as a dead control. */
+  onWithdraw?: (memoryId: string) => void;
+  /** Facts only this view knows, such as a search score; shown after the identifying badges. */
+  extraBadges?: string[];
+  /** Start a new memory from this body. Absent when the caller cannot create. */
+  onClone?: (content: string) => void;
+}): JSX.Element {
+  // Copying is confirmed on the row that copied, so the button label never claims a different
+  // memory was copied.
+  const [copiedId, setCopiedId] = useState(false);
+  // Classification is shown only when the revision recorded it: an absent category is not
+  // "general", and labelling it as such would be inventing data.
+  const label = item.category === undefined
+    ? undefined
+    : translate(language, `category.${item.category}` as MessageKey);
+  // Every badge names a fact about this entry. Absent values are omitted, not filled with a dash.
+  const badges: string[] = [
+    label ?? '',
+    item.importance === undefined ? '' : translate(language, 'card.importance', { value: String(item.importance) }),
+  ].filter(entry => entry !== '');
+  return (
+    <li className="mwui-memcard-item">
+      <button type="button" className="mwui-memcard" data-active={active ? 'true' : 'false'} onClick={() => onSelect(item.memoryId)}>
+        <span className="mwui-memcard-badges">
+          {badges.map(badge => <span key={badge} className="mwui-chip-slim">{badge}</span>)}
+          {/* A search hit carries no entry version; only the list knows it. */}
+          {item.entryVersion === undefined
+            ? null
+            : <span className="mwui-chip-slim">{translate(language, 'detail.revision')} v{item.entryVersion}</span>}
+          {(extraBadges ?? []).map(badge => <span key={badge} className="mwui-chip-slim">{badge}</span>)}
+        </span>
+        <span className="mwui-memcard-content">{item.content}</span>
+        {item.tags === undefined || item.tags.length === 0 ? null : (
+          <span className="mwui-memcard-tags">{item.tags.map(tag => <span key={tag}>#{tag}</span>)}</span>
+        )}
+        {item.entities === undefined || item.entities.length === 0 ? null : (
+          <span className="mwui-memcard-tags" data-tone="entity">{item.entities.map(entity => <span key={entity}>{entity}</span>)}</span>
+        )}
+        <span className="mwui-memcard-meta">{relativeTime(item.publishedAt, now, language)}</span>
+      </button>
+      <div className="mwui-memcard-actions">
+        {onRelated === undefined ? null : (
+          <button type="button" className="mwui-button mwui-mini" onClick={() => onRelated(item.content)}>
+            {translate(language, 'card.related')}
+          </button>
+        )}
+        {onClone === undefined ? null : (
+          <button type="button" className="mwui-button mwui-mini" onClick={() => onClone(item.content)}>
+            {translate(language, 'card.clone')}
+          </button>
+        )}
+        <button
+          type="button"
+          className="mwui-button mwui-mini"
+          onClick={() => {
+            void onCopyId(item.memoryId).then(ok => {
+              if (!ok) return;
+              setCopiedId(true);
+              setTimeout(() => setCopiedId(false), 1200);
+            });
+          }}
+        >
+          {copiedId ? translate(language, 'detail.copied') : translate(language, 'detail.copyId')}
+        </button>
+        {onWithdraw === undefined ? null : (
+          <button type="button" className="mwui-button mwui-mini mwui-danger" onClick={() => onWithdraw(item.memoryId)}>
+            {translate(language, 'card.withdraw')}
+          </button>
+        )}
+      </div>
+    </li>
+  );
+}
+
 export interface ExploreProps {
   query: string;
   result: UiExplore | null;
@@ -1528,6 +2163,9 @@ export interface ExploreProps {
   onSearch(): void;
   onShowMore(): void;
   onOpen(memoryId: string): void;
+  /** Copy a result's id from the result itself. */
+  onCopyId(memoryId: string): Promise<boolean>;
+  onClone?(content: string): void;
 }
 
 export function ExplorePanel(props: ExploreProps): ReactNode {
@@ -1569,7 +2207,11 @@ export function ExplorePanel(props: ExploreProps): ReactNode {
             </select>
           </div>
           {error === null ? null : <div className="mwui-inline-error" role="alert">{error}</div>}
-          {result === null ? null : (
+          {/* Before the first search the page is one input; saying what a search does is what
+              turns the blank area below it into an answer rather than an empty page. */}
+          {result === null ? (
+            <div className="mwui-empty">{translate(language, 'explore.prompt')}</div>
+          ) : (
             <>
               {result.unregistered === 0 ? null : (
                 <div className="mwui-edit-hint" data-tone="warn">
@@ -1585,19 +2227,22 @@ export function ExplorePanel(props: ExploreProps): ReactNode {
                 : (
                   <ul className="mwui-list mwui-explore-list">
                     {result.hits.map(hit => (
-                      <li key={hit.memoryId} className="mwui-subrow">
-                        <button type="button" className="mwui-subrow-button" onClick={() => props.onOpen(hit.memoryId)}>
-                          <span className="mwui-subrow-main">{hit.content.split('\n')[0] || hit.memoryId}</span>
-                          <span className="mwui-chip-slim">{translate(language, `state.${hit.state}` as MessageKey)}</span>
-                          <span className="mwui-subrow-tail mwui-mono">{translate(language, 'explore.score')} {hit.score.toFixed(2)}</span>
-                        </button>
-                        <div className="mwui-relation-meta">
-                          <span className="mwui-relation-evidence">{hit.content}</span>
-                          <button type="button" className="mwui-button mwui-mini" onClick={() => props.onOpen(hit.memoryId)}>
-                            {translate(language, 'explore.open')}
-                          </button>
-                        </div>
-                      </li>
+                      <MemoryCard
+                        key={hit.memoryId}
+                        item={{
+                          memoryId: hit.memoryId, revisionId: hit.revisionId, providerMemoryId: hit.providerMemoryId,
+                          publishedAt: hit.publishedAt, content: hit.content,
+                          ...(hit.category === undefined ? {} : { category: hit.category }),
+                          ...(hit.tags === undefined ? {} : { tags: hit.tags }),
+                        }}
+                        active={false}
+                        language={language}
+                        now={Date.now()}
+                        onSelect={props.onOpen}
+                        onCopyId={props.onCopyId}
+                        {...(props.onClone === undefined ? {} : { onClone: props.onClone })}
+                        extraBadges={[`${translate(language, 'explore.score')} ${hit.score.toFixed(2)}`]}
+                      />
                     ))}
                   </ul>
                 )}

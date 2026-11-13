@@ -11,11 +11,11 @@ import {MemoryApplication} from '../../packages/core/application/src/index.ts';
 import { tempDir } from '../support/temp.ts';
 
 async function fixture(kind:'revise'|'supersede'='revise'){
-  await mkdir('work/tests',{recursive:true});const root=await tempDir('version-workflow', 'version-fault');const path=join(root,'governance.db');const repo=new SqliteCandidates(path);
-  const request=(key:string,content:string)=>RememberInput.parse({idempotencyKey:key,content,provenance:{source:'fixture',sourceReference:'version:test',evidence:['test'],verificationStatus:'unverified',confidence:0.5,applicability:'same scoped environment',limitations:'fixture',lastVerified:null}});
-  const old=repo.submit(request('version-base-001','original immutable version'));repo.review(old.id,'approve','operator','fixture',null);repo.acquire('base-owner',90000);repo.finish(repo.claim('base-owner')!,{id:'base-provider',action:'added'},false);repo.release('base-owner');const base=repo.get(old.id).publication!;
+  const root=await tempDir('version-workflow', 'version-fault');const path=join(root,'governance.db');const repo=new SqliteCandidates(path);
+  const request=(key:string,content:string)=>RememberInput.parse({idempotencyKey:key,content,provenance:{source:'fixture',sourceReference:'version:test'}});
+  const old=repo.submit(request('version-base-001','original immutable version'));repo.review(old.id,'approve','operator','fixture');repo.acquire('base-owner',90000);repo.finish(repo.claim('base-owner')!,{id:'base-provider',action:'added'},false);repo.release('base-owner');const base=repo.get(old.id).publication!;
   const input={...request('version-next-001','next immutable version'),change:{kind,targetMemoryId:base.memoryId,expectedRevisionId:base.revisionId,effectiveAt:new Date().toISOString(),reason:'reviewed evolution',evidence:['reviewed fixture']}};
-  const candidate=repo.submit(input);repo.review(candidate.id,'approve','operator','fixture',null);
+  const candidate=repo.submit(input);repo.review(candidate.id,'approve','operator','fixture');
   const memories=new Map([['base-provider',old.request.content]]);let writes=0;let linkCalls=0;const edges=new Set<string>();
   const provider:VersionProvider={
     async health(){return{};},async recall(){return{memories:[...memories].map(([id,content])=>({id,content}))};},
@@ -33,9 +33,9 @@ test('Durable reservation blocks competing approval and expires neither on relea
   const f=await fixture();
   try{
     const competing=f.repo.submit({...f.input,idempotencyKey:'version-competing-001'});
-    assert.throws(()=>f.repo.review(competing.id,'approve','operator','competing',null));
+    assert.throws(()=>f.repo.review(competing.id,'approve','operator','competing'));
     f.repo.close();const reopened=new SqliteCandidates(f.path);
-    try{assert.throws(()=>reopened.review(competing.id,'approve','operator','still competing',null));assert.equal(reopened.get(competing.id).reviews.length,0);}finally{reopened.close();}
+    try{assert.throws(()=>reopened.review(competing.id,'approve','operator','still competing'));assert.equal(reopened.get(competing.id).reviews.length,0);}finally{reopened.close();}
   }catch(error){try{f.repo.close();}catch{}throw error;}
 });
 test('Final receipt failure rolls back pointer and relation publication; forward retry avoids extra content/link',async()=>{
@@ -71,7 +71,7 @@ test('Changed baseline blocks dispatch and is held for human investigation rathe
 });
 test('Cancellation releases an unpublished reservation but is refused after an irreversible link',async()=>{
   const safe=await fixture();
-  try{assert.equal(safe.repo.cancelVersion(safe.candidate.id,'operator','confirmed stopped').status,'rejected');const replacement=safe.repo.submit({...safe.input,idempotencyKey:'after-cancel-001'});assert.equal(safe.repo.review(replacement.id,'approve','operator','replacement',null).status,'approved');}finally{safe.repo.close();}
+  try{assert.equal(safe.repo.cancelVersion(safe.candidate.id,'operator','confirmed stopped').status,'rejected');const replacement=safe.repo.submit({...safe.input,idempotencyKey:'after-cancel-001'});assert.equal(safe.repo.review(replacement.id,'approve','operator','replacement').status,'approved');}finally{safe.repo.close();}
   const unsafe=await fixture('supersede');
   try{const job=unsafe.claim('owner');const op=unsafe.repo.versionOperation(job);op.checkpoint.link='invoking';unsafe.repo.versionCheckpoint(job,op.checkpoint);unsafe.repo.fail(job,'PROVIDER_TIMEOUT',false);unsafe.repo.release('owner');assert.throws(()=>unsafe.repo.cancelVersion(unsafe.candidate.id,'operator','cannot undo link'));assert.equal(unsafe.repo.get(unsafe.candidate.id).status,'failed');}finally{unsafe.repo.close();}
 });
@@ -84,11 +84,11 @@ test('Approve interception covers unresolved conflict cases without relying on r
     assert.ok(f.repo.get(conflicted.id).conflictCaseId);
     const rival=f.repo.submit({...f.input,idempotencyKey:'rival-during-conflict-001'});
     // Rules-path human review records no semantic assessment: the review record alone carries no conflict evidence.
-    f.repo.review(rival.id,'human','rules','operator inspection',null);
+    f.repo.review(rival.id,'human','rules','operator inspection');
     const app=new MemoryApplication({...f.provider,async health(){return{ready:true,version:'0.2.13',capabilities:['health']};}},f.repo,f.repo);
     await assert.rejects(app.humanReview({candidateId:rival.id,decision:'approve',reason:'unrelated revision'},'operator'),(error:unknown)=>error instanceof MnemoWeaveError&&error.code==='REVIEW_REQUIRED');
     assert.equal(f.repo.get(rival.id).status,'needs_review');
-    f.repo.review(conflicted.id,'reject','operator','case withdrawn',null);
+    f.repo.review(conflicted.id,'reject','operator','case withdrawn');
     await app.humanReview({candidateId:rival.id,decision:'approve',reason:'case resolved'},'operator');
     assert.equal(f.repo.get(rival.id).status,'approved');
   }finally{f.repo.close();}

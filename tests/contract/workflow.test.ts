@@ -7,18 +7,15 @@ import { randomUUID } from 'node:crypto';
 import { SqliteCandidates } from '../../packages/infrastructure/governance/src/index.ts';
 import { MemoryWorkflow } from '../../packages/core/application/src/workflow.ts';
 import { MemoryApplication } from '../../packages/core/application/src/index.ts';
-import { RememberInput, SemanticAssessment } from '../../packages/core/contracts/src/index.ts';
+import { RememberInput } from '../../packages/core/contracts/src/index.ts';
 import type { WriteProvider, WorkflowRepository } from '../../packages/core/application/src/workflow-ports.ts';
 import { tempDir } from '../support/temp.ts';
 
-const checks = Object.fromEntries(['source', 'accuracy', 'reuse', 'scope', 'duplication', 'consistency'].map(key => [key, { result: 'pass', reason: 'Test fixture assessment' }]));
-const assessment = () => SemanticAssessment.parse({ checks, requiresHuman: false, conflict: 'none', summary: 'Test only; not real technical validation.' });
 const request = (key = 'workflow-test-001') => RememberInput.parse({
   idempotencyKey: key, content: `Workflow immutable ${key}`,
-  provenance: { source: 'contract-test', sourceReference: 'fixture:1', evidence: ['fixture'], verificationStatus: 'verified', confidence: 0.5, applicability: 'test only', limitations: 'not production knowledge', lastVerified: '2026-11-08T00:00:00Z' },
+  provenance: { source: 'contract-test', sourceReference: 'fixture:1'},
 });
 async function setup() {
-  await mkdir('work/tests', { recursive: true });
   const root = await tempDir('workflow', 'workflow');
   const path = join(root, 'governance.db');
   const repo = new SqliteCandidates(path);
@@ -49,7 +46,7 @@ test('a cleared candidate waits for a human, and approval enqueues the write ato
     assert.equal(t.writes(), 0, 'nothing is written before a person approves');
     assert.match(parked.reviews[0]?.reason ?? '', /does not call a model/);
 
-    t.repo.review(candidate.id, 'approve', 'operator', 'Reviewed by a person', null);
+    t.repo.review(candidate.id, 'approve', 'operator', 'Reviewed by a person');
     await new MemoryWorkflow(t.repo, t.provider).tick();
     const result = t.repo.get(candidate.id);
     assert.equal(result.status, 'persisted');
@@ -66,13 +63,14 @@ test('a cleared candidate waits for a human, and approval enqueues the write ato
   } finally { t.repo.close(); }
 });
 
-test('no candidate is ever approved automatically, whatever its scope or verification state', async () => {
-  for (const kind of ['plain', 'architecture', 'global', 'unverified']) {
+test('no candidate is ever approved automatically, whatever its classification', async () => {
+  for (const kind of ['plain', 'architecture', 'classified']) {
     const t = await setup();
     try {
       const input = request();
       if (kind === 'architecture') input.category = 'decision';
-      if (kind === 'unverified') input.provenance.verificationStatus = 'unverified';
+      // Classification is advisory: recording more of it never substitutes for a human decision.
+      if (kind === 'classified') { input.category = 'fact'; input.importance = 5; input.tags = ['reviewed']; }
       const candidate = t.repo.submit(input);
       await new MemoryWorkflow(t.repo, t.provider).tick();
       assert.equal(t.repo.get(candidate.id).status, 'needs_review', `${kind} must not be auto-approved`);
@@ -88,7 +86,7 @@ test('Exact duplicates are rejected without a second write', async () => {
     await new MemoryWorkflow(t.repo, t.provider).tick();
     assert.equal(t.repo.get(candidate.id).status, 'needs_review');
     // Approve the first so its body exists in the Provider.
-    t.repo.review(candidate.id, 'approve', 'operator', 'first copy', null);
+    t.repo.review(candidate.id, 'approve', 'operator', 'first copy');
     await new MemoryWorkflow(t.repo, t.provider).tick();
     assert.equal(t.writes(), 1);
 
@@ -99,12 +97,50 @@ test('Exact duplicates are rejected without a second write', async () => {
   } finally { t.repo.close(); }
 });
 
-test('Identical content with unknown or different applicability is not silently rejected as duplicate', async () => {
+test('Identical content whose source or classification is unknown is not silently rejected as duplicate', async () => {
   const t = await setup();
   try {
     const candidate = t.repo.submit(request()); t.memories.set('external-unknown', candidate.request.content);
     await new MemoryWorkflow(t.repo, t.provider).tick();
     assert.equal(t.repo.get(candidate.id).status, 'needs_review'); assert.equal(t.writes(), 0);
+  } finally { t.repo.close(); }
+});
+
+test('duplicate detection compares the body alone, matching how the Provider decides', async () => {
+  const t = await setup();
+  // `request()` embeds its key in the body so two submissions are distinguishable; a duplicate
+  // test needs one fixed body and only the submission identity varying.
+  const body = 'One fact, submitted twice.';
+  const withBody = (key: string, tags: string[] = []) => RememberInput.parse({
+    idempotencyKey: key, content: body, tags,
+    provenance: { source: 'contract-test', sourceReference: `fixture:${key}` },
+  });
+  try {
+    // Publish one memory through the real review and write path.
+    const first = t.repo.submit(withBody('dup-base-0001'));
+    t.repo.review(first.id, 'approve', 'operator', 'fixture');
+    t.repo.acquire('dup-owner', 90000);
+    const job = t.repo.claim('dup-owner')!;
+    const written = await t.provider.persistReviewed(t.repo.get(first.id).request.content, job.writeKey);
+    t.repo.finish(job, written, false);
+    t.repo.release('dup-owner');
+    const providerId = written.id;
+
+    // Same body, different idempotency key and a different sourceReference: the same fact.
+    const same = t.repo.submit(withBody('dup-same-0001'));
+    assert.equal(t.repo.isKnownDuplicate(same.id, [providerId]), true, 'an identical body is a duplicate');
+
+    // Same body but different tags: still the same fact. The Provider decides by body alone, and
+    // a comparison that included tags would make re-tagging count as new knowledge.
+    const retagged = t.repo.submit(withBody('dup-tags-0001', ['reclassified']));
+    assert.equal(t.repo.isKnownDuplicate(retagged.id, [providerId]), true, 'tags do not make a different fact');
+
+    // A different body is not a duplicate, whatever else matches.
+    const different = t.repo.submit(RememberInput.parse({
+      idempotencyKey: 'dup-other-0001', content: 'A different statement entirely.', tags: [],
+      provenance: { source: 'contract-test', sourceReference: 'fixture:dup-other-0001' },
+    }));
+    assert.equal(t.repo.isKnownDuplicate(different.id, [providerId]), false, 'a different body is new knowledge');
   } finally { t.repo.close(); }
 });
 
@@ -114,7 +150,7 @@ test('Review/outbox transaction failure leaves approval, task and outbox all unc
     const candidate = t.repo.submit(request());
     const inspect = new DatabaseSync(t.path);
     inspect.exec("CREATE TRIGGER fail_outbox BEFORE INSERT ON governance_outbox BEGIN SELECT RAISE(ABORT,'outbox failure'); END");
-    assert.throws(() => t.repo.review(candidate.id, 'approve', 'operator', 'fixture', null));
+    assert.throws(() => t.repo.review(candidate.id, 'approve', 'operator', 'fixture'));
     assert.equal(t.repo.get(candidate.id).status, 'pending_review');
     assert.equal(t.repo.get(candidate.id).reviews.length, 0);
     assert.equal(inspect.prepare('SELECT count(*) n FROM governance_tasks').get()!['n'], 0);
@@ -125,7 +161,7 @@ test('Review/outbox transaction failure leaves approval, task and outbox all unc
 test('Interrupted write checkpoint reconciles a commit after repository restart without reissuing write', async () => {
   const t = await setup();
   const candidate = t.repo.submit(request());
-  t.repo.review(candidate.id, 'approve', 'operator', 'fixture', null);
+  t.repo.review(candidate.id, 'approve', 'operator', 'fixture');
   assert.equal(t.repo.acquire('old-worker', 90000), true);
   const job = t.repo.claim('old-worker')!;
   t.repo.writing(job);
@@ -145,7 +181,7 @@ test('Unknown outcome with no matched memory is held for explicit retry, not rep
   const t = await setup();
   try {
     const candidate = t.repo.submit(request());
-    t.repo.review(candidate.id, 'approve', 'operator', 'fixture', null);
+    t.repo.review(candidate.id, 'approve', 'operator', 'fixture');
     assert.equal(t.repo.acquire('abandoned', 90000), true);
     t.repo.writing(t.repo.claim('abandoned')!); t.repo.release('abandoned');
     await new MemoryWorkflow(t.repo, t.provider).tick();
@@ -160,7 +196,7 @@ test('Unknown outcome with no matched memory is held for explicit retry, not rep
 test('Lease fences stale workers and serializes provider dispatch across repository connections', async () => {
   const t = await setup(); const other = new SqliteCandidates(t.path);
   try {
-    const candidate = t.repo.submit(request()); t.repo.review(candidate.id, 'approve', 'operator', 'fixture', null);
+    const candidate = t.repo.submit(request()); t.repo.review(candidate.id, 'approve', 'operator', 'fixture');
     assert.equal(t.repo.acquire('first', 90000), true); const stale = t.repo.claim('first')!;
     assert.equal(other.acquire('second', 90000), false);
     const inject = new DatabaseSync(t.path); inject.exec('UPDATE governance_workflow_lock SET until_ms=0'); inject.close();
@@ -174,23 +210,23 @@ test('Lease fences stale workers and serializes provider dispatch across reposit
 test('Amend preserves original input and records both sides; provider binding prevents wrong-store resume', async () => {
   const t = await setup();
   try {
-    const original = t.repo.submit(request()); t.repo.review(original.id, 'human', 'rules', 'needs clarification', null);
+    const original = t.repo.submit(request()); t.repo.review(original.id, 'human', 'rules', 'needs clarification');
     const replacement = t.repo.amend(original.id, { ...request('workflow-amended-001'), content: 'Clarified scope and evidence' }, 'operator', 'corrected scope');
     assert.equal(t.repo.get(original.id).request.content, original.request.content);
     assert.equal(t.repo.get(original.id).status, 'rejected'); assert.equal(replacement.status, 'pending_review');
     assert.ok(replacement.reviews.length > 0);
     t.repo.bindProvider('store-A'); assert.throws(() => t.repo.bindProvider('store-B'));
+    // A store created at the current version has no migration to snapshot; the backup rule
+    // applies to an existing database being upgraded, which `governance.test.ts` covers.
     const backups = (await readdir(t.root)).filter(name => name.includes('.pre-v2.'));
-    assert.equal(backups.length, 1);
-    const backup = new DatabaseSync(join(t.root, backups[0]!), { readOnly: true });
-    try { assert.equal(backup.prepare('PRAGMA user_version').get()!['user_version'], 1); } finally { backup.close(); }
+    assert.equal(backups.length, 0);
   } finally { t.repo.close(); }
 });
 test('A pre-write Provider outage retries the same durable task without duplicate dispatch', async () => {
   const t = await setup();
   try {
     const candidate = t.repo.submit(request());
-    t.repo.review(candidate.id, 'approve', 'operator', 'fixture', null);
+    t.repo.review(candidate.id, 'approve', 'operator', 'fixture');
     let healthCalls = 0;
     const provider: WriteProvider = { ...t.provider, async health() { if (++healthCalls === 1) throw new Error('pre-write outage'); return {}; } };
     const workflow = new MemoryWorkflow(t.repo, provider);
@@ -211,7 +247,7 @@ test('Non-model recoverable failures keep retrying with capped backoff and alert
   const t = await setup();
   try {
     const candidate = t.repo.submit(request());
-    t.repo.review(candidate.id, 'approve', 'operator', 'fixture', null);
+    t.repo.review(candidate.id, 'approve', 'operator', 'fixture');
     const provider: WriteProvider = { ...t.provider, async health() { throw new Error('persistent outage'); } };
     const workflow = new MemoryWorkflow(t.repo, provider);
     const stderr: string[] = [];
@@ -263,7 +299,7 @@ test('several candidates are reviewed in one tick without calling a model', asyn
     assert.equal(t.repo.get(second.id).status, 'needs_review');
     assert.equal(t.writes(), 0);
 
-    for (const id of [first.id, second.id]) t.repo.review(id, 'approve', 'operator', 'parallel fixture', null);
+    for (const id of [first.id, second.id]) t.repo.review(id, 'approve', 'operator', 'parallel fixture');
     await workflow.tick();
     await workflow.tick();
     assert.equal(t.repo.get(first.id).status, 'persisted');
@@ -273,7 +309,6 @@ test('several candidates are reviewed in one tick without calling a model', asyn
 });
 
 test('A v1 database with real candidate data upgrades, backs up, and preserves legacy idempotency', async () => {
-  await mkdir('work/tests', { recursive: true });
   const root = await tempDir('workflow', 'migration'); const path = join(root, 'governance.db');
   const legacy = new DatabaseSync(path);
   legacy.exec(`CREATE TABLE governance_candidates(id TEXT PRIMARY KEY,idempotency_key TEXT NOT NULL UNIQUE,request_hash TEXT NOT NULL,request_json TEXT NOT NULL,status TEXT NOT NULL CHECK(status='pending_review'),submitted_at TEXT NOT NULL) STRICT;
@@ -316,7 +351,7 @@ test('an approved write drains even while another candidate awaits review', asyn
   const t = await setup();
   try {
     const ready = t.repo.submit(request('workflow-priority-ready'));
-    t.repo.review(ready.id, 'approve', 'fixture-operator', 'fixture', null);
+    t.repo.review(ready.id, 'approve', 'fixture-operator', 'fixture');
     const pending = t.repo.submit(request('workflow-priority-pending'));
     const workflow = new MemoryWorkflow(t.repo, t.provider);
     await workflow.tick();

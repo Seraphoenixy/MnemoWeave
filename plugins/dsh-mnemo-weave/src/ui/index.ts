@@ -70,6 +70,15 @@ export function resolveConfig(config: unknown, env: NodeJS.ProcessEnv = process.
   };
 }
 
+/**
+ * The build this Host half was composed from.
+ *
+ * The Host is loaded when DSH starts; the page fetches `client.js` when it loads. A rebuild
+ * without a restart leaves the page newer than the Host, so the value travels to the page and is
+ * compared there. That turns "the panel is empty" into "the Host is running a different build".
+ */
+export const BUILD: string = typeof __MNEMOWEAVE_BUILD__ === 'string' ? __MNEMOWEAVE_BUILD__ : 'dev';
+
 function warn(message: string): void {
   process.stderr.write(`${JSON.stringify({ event: 'mnemoweave_ui_plugin', level: 'warn', message })}\n`);
 }
@@ -177,6 +186,7 @@ export function apply(ctx: HostContext, config?: unknown): void {
   const source = new MemorySource({
     client, serverUrl: resolved.serverUrl, hasToken: true, ensureServer: ensure,
     sources: { ...resolved.description.sources },
+    hostBuild: BUILD,
   });
   let getAgents: (() => unknown) | undefined;
   ctx.inject?.(['agents'], agentContext => {

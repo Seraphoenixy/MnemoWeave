@@ -9,6 +9,7 @@ import { configure } from '../../apps/server/src/config.ts';
 import { createHttpServer } from '../../packages/protocols/http/src/index.ts';
 import { MnemoWeaveError } from '../../packages/core/contracts/src/index.ts';
 import { mnemonBinary } from './mnemon-binary.ts';
+import { tempDir } from '../support/temp.ts';
 
 /**
  * 档案提炼：a draft fixes the source version, the confirmation publishes that fixed text, and a
@@ -21,7 +22,7 @@ const HOST = 'distill-probe';
 const WORKSPACE = '11111111-1111-4111-8111-111111111111';
 
 test('a distilled draft publishes its fixed text and refuses a stale source', { timeout: 120_000 }, async () => {
-  const dir = resolve('work', 'archive-distill', randomUUID());
+  const dir = await tempDir('archive-distillation', 'archive-distill');
   mkdirSync(join(dir, 'provider'), { recursive: true });
   mkdirSync(join(dir, 'state'), { recursive: true });
   const app = configure({

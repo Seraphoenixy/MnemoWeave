@@ -11,13 +11,11 @@ const DAY_MS = 86_400_000;
 const request = (key: string, content: string): RememberRequest => ({
   idempotencyKey: key, content, tags: [],
   provenance: {
-    source: 'blob-test', sourceReference: `fixture:${key}`, evidence: ['fixture'], verificationStatus: 'verified',
-    confidence: 0.5, applicability: 'isolated blob fixture', limitations: 'not production knowledge', lastVerified: null,
+    source: 'blob-test', sourceReference: `fixture:${key}`,
   },
 });
 
 async function fixture() {
-  await mkdir('work/tests', { recursive: true });
   const root = await tempDir('blob-store', 'blobs');
   return { root, repo: new SqliteCandidates(join(root, 'governance.db')) };
 }
@@ -47,7 +45,7 @@ test('Retention clearing removes the candidate blob with its metadata', async ()
   const { root, repo } = await fixture();
   try {
     const candidate = repo.submit(request('blob-retention-001', `Retention body ${'y'.repeat(5000)}`));
-    repo.review(candidate.id, 'reject', 'local-operator', 'fixture rejection', null);
+    repo.review(candidate.id, 'reject', 'local-operator', 'fixture rejection');
     assert.equal(readdirSync(join(root, 'blobs')).length, 1);
     repo.sweepRetention(new Date(Date.now() + 31 * DAY_MS));
     assert.equal(repo.get(candidate.id).bodyCleared, true);

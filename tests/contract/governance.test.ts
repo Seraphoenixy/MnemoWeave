@@ -10,10 +10,9 @@ import { tempDir } from '../support/temp.ts';
 
 const fixture = (key = 'candidate-key-001') => RememberInput.parse({
   idempotencyKey: key, content: 'Immutable candidate content, not yet approved.',
-  provenance: { source: 'test', sourceReference: 'fixture:1', evidence: ['a deterministic test'], verificationStatus: 'unverified', confidence: 0.5, applicability: 'isolated fixture', limitations: 'not production knowledge', lastVerified: null },
+  provenance: { source: 'test', sourceReference: 'fixture:1'},
 });
 test('Candidate and submission receipt persist atomically with stable idempotency', async () => {
-  await mkdir('work/tests', { recursive: true });
   const path = join(await tempDir('governance', 'governance'), 'state.db');
   const repo = new SqliteCandidates(path);
   const first = repo.submit(fixture());
@@ -31,7 +30,6 @@ test('Candidate and submission receipt persist atomically with stable idempotenc
   } finally { inspect.close(); }
 });
 test('Failed receipt insertion rolls back candidate insertion', async () => {
-  await mkdir('work/tests', { recursive: true });
   const path = join(await tempDir('governance', 'rollback'), 'state.db');
   const repo = new SqliteCandidates(path);
   const inject = new DatabaseSync(path);
@@ -43,7 +41,6 @@ test('Failed receipt insertion rolls back candidate insertion', async () => {
   repo.close(); inject.close();
 });
 test('schema v23 is the workspace model: no owner on a memory, workspaces and streams on the rest', async () => {
-  await mkdir('work/tests', { recursive: true });
   const path = join(await tempDir('governance', 'schema22'), 'governance.db');
   const repo = new SqliteCandidates(path);
   repo.close();
@@ -87,7 +84,6 @@ test('schema v23 is the workspace model: no owner on a memory, workspaces and st
   }
 });
 test('a v21 store loses the memory owner column and keeps the attribution as a backup', async () => {
-  await mkdir('work/tests', { recursive: true });
   const path = join(await tempDir('governance', 'schema21'), 'governance.db');
   const created = new SqliteCandidates(path);
   created.close();
@@ -115,7 +111,6 @@ test('a v21 store loses the memory owner column and keeps the attribution as a b
   }
 });
 test('v21 archive migration requires a project mapping and preserves the version history', async () => {
-  await mkdir('work/tests', { recursive: true });
   const path = join(await tempDir('governance', 'schema21-archive'), 'governance.db');
   const source = new SqliteCandidates(path);
   const entryId = '22222222-2222-4222-8222-222222222222';
@@ -157,7 +152,6 @@ test('v21 archive migration requires a project mapping and preserves the version
   } finally { migrated.close(); }
 });
 test('snapshot stages hide changes until the cursor and projection commit together', async () => {
-  await mkdir('work/tests', { recursive: true });
   const path = join(await tempDir('governance', 'snapshot-stage'), 'governance.db');
   const repo = new SqliteCandidates(path);
   const at = '2026-11-10T00:00:00.000Z';
@@ -180,7 +174,6 @@ test('snapshot stages hide changes until the cursor and projection commit togeth
   } finally { repo.close(); }
 });
 test('diagnostic jobs are single-flight and a killed run is marked interrupted', async () => {
-  await mkdir('work/tests', { recursive: true });
   const path = join(await tempDir('governance', 'jobs'), 'governance.db');
   let repo = new SqliteCandidates(path);
   const job = repo.memory.beginDiagnosticJob('embedding-backfill');
@@ -198,7 +191,6 @@ test('diagnostic jobs are single-flight and a killed run is marked interrupted',
   } finally { repo.close(); }
 });
 test('idle-review runs are single-flight and refuse late items after finishing', async () => {
-  await mkdir('work/tests', { recursive: true });
   const path = join(await tempDir('governance', 'runs'), 'governance.db');
   let repo = new SqliteCandidates(path);
   const run = repo.events.beginIdleRun('host-1', 's-1');
@@ -222,7 +214,6 @@ test('idle-review runs are single-flight and refuse late items after finishing',
   } finally { repo.close(); }
 });
 test('Rejected existing databases preserve their journal mode, data and version', async () => {
-  await mkdir('work/tests', { recursive: true });
   for (const version of [0, 1, 2]) {
     const path = join(await tempDir('governance', 'ownership'), 'existing.db');
     const original = new DatabaseSync(path);
@@ -241,7 +232,6 @@ test('Rejected existing databases preserve their journal mode, data and version'
 });
 
 test('a partially failed idle-review run keeps finished actions and releases the rest', async () => {
-  await mkdir('work/tests', { recursive: true });
   const path = join(await tempDir('governance', 'idle-retry'), 'governance.db');
   const repo = new SqliteCandidates(path);
   try {
@@ -276,7 +266,6 @@ test('a partially failed idle-review run keeps finished actions and releases the
 });
 
 test('the user\'s own turn text is kept as review evidence and expires with the turn bookkeeping', async () => {
-  await mkdir('work/tests', { recursive: true });
   const path = join(await tempDir('governance', 'turn-messages'), 'governance.db');
   const repo = new SqliteCandidates(path);
   try {
@@ -307,7 +296,6 @@ test('the user\'s own turn text is kept as review evidence and expires with the 
 });
 
 test('an idle-review action must name the open run and may not write a formal memory', async () => {
-  await mkdir('work/tests', { recursive: true });
   const path = join(await tempDir('governance', 'idle-run-bound'), 'governance.db');
   const repo = new SqliteCandidates(path);
   try {

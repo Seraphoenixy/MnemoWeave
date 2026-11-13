@@ -29,7 +29,6 @@ const detail = (overrides: Partial<UiMemoryDetail> = {}): UiMemoryDetail => ({
   currentRevisionId: '22222222-2222-4222-8222-222222222222',
   isCurrent: true,
   providerMemoryId: 'provider-1',
-  applicability: 'release',
   state: 'active',
   content: 'x',
   publishedAt: '2026-11-09T02:00:00.000Z',
@@ -111,11 +110,11 @@ test('the list summary counts what the Server returned', () => {
 
 test('detail metadata names the viewed revision, not the live one', () => {
   const meta = detailMeta(detail(), 'en');
-  // The shared collection has no owner field: the detail names the revision, its state,
-  // applicability and publication time only.
-  assert.deepEqual(meta.map(item => item.key), ['state', 'revision', 'currentness', 'applicability', 'published']);
+  // The shared collection has no owner field: the detail names the revision, its state and
+  // publication time only.
+  assert.deepEqual(meta.map(item => item.key), ['state', 'revision', 'currentness', 'published']);
   assert.deepEqual(meta.slice(0, 3).map(item => item.value), ['Active', '#2', 'Current revision']);
-  assert.equal(meta[4]?.value, formatDateTime('2026-11-09T02:00:00.000Z'));
+  assert.equal(meta[3]?.value, formatDateTime('2026-11-09T02:00:00.000Z'));
 
   assert.equal(detailMeta(detail({ state: 'superseded' }), 'zh')[0]?.value, '已被取代');
   assert.equal(detailMeta(detail({ revisions: [] }), 'en')[1]?.value, '—');
@@ -226,4 +225,20 @@ test('the neighbourhood walk stops at the requested depth and reports each memor
 
   // A memory that is not in the graph has no neighbourhood rather than a confusing one.
   assert.deepEqual(neighbourhood(graph, 'missing', 2), []);
+});
+
+test('the card renders every string it shows in both languages', () => {
+  // `translate` returns the dictionary entry, and a missing key is `undefined`, which React
+  // renders as nothing at all. The card was extended with a badge row and an action row, so pin
+  // that each of its keys resolves in both languages rather than only in the one that was typed
+  // while writing it.
+  const keys = ['card.related', 'card.clone', 'card.withdraw', 'card.importance', 'detail.copyId', 'category.fact', 'detail.revision'] as const;
+  for (const key of keys) {
+    for (const language of ['zh', 'en'] as const) {
+      const text = translate(language, key, { value: '3' });
+      assert.equal(typeof text, 'string', `${key} is defined in ${language}`);
+      assert.notEqual(text.trim(), '', `${key} is not blank in ${language}`);
+      assert.doesNotMatch(text, /\{value\}/, `${key} interpolates its parameter in ${language}`);
+    }
+  }
 });

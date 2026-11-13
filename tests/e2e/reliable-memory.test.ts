@@ -20,7 +20,6 @@ import { tempDir } from '../support/temp.ts';
  * submission, review, the real Mnemon write, receipts, restart durability and crash recovery.
  */
 async function fixture() {
-  await mkdir('work/e2e', { recursive: true });
   const root = await tempDir('reliable-memory', 'reliable');
   const env = {
     MNEMON_BINARY: mnemonBinary(), MNEMON_DATA_DIR: join(root, 'provider'), MNEMON_STORE: 'milestone',
@@ -29,7 +28,7 @@ async function fixture() {
   };
   const input = (name: string) => RememberInput.parse({
     idempotencyKey: `milestone-${name}`, content: `MnemoWeave milestone ${name}: test-only scoped engineering knowledge.`,
-    provenance: { source: 'local-fixture', sourceReference: `test:${name}`, evidence: ['automated fixture evidence'], verificationStatus: 'verified', confidence: 0.5, applicability: 'test fixture on Node24 Windows only', limitations: 'No real technical conclusion', lastVerified: '2026-11-08T00:00:00Z' },
+    provenance: { source: 'local-fixture', sourceReference: `test:${name}`},
   });
   return { root, env, input, close: async () => undefined };
 }

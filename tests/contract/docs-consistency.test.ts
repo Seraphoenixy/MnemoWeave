@@ -6,6 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { join, resolve } from 'node:path';
 import { openapi } from '../../packages/core/contracts/src/index.ts';
 import { SqliteCandidates } from '../../packages/infrastructure/governance/src/index.ts';
+import { tempDir } from '../support/temp.ts';
 
 /**
  * Documentation is part of the contract here, so it is checked like code.
@@ -17,9 +18,8 @@ import { SqliteCandidates } from '../../packages/infrastructure/governance/src/i
 
 const read = (path: string): string => readFileSync(resolve(path), 'utf8');
 
-test('the schema version the docs call current is the one the code creates', () => {
-  const root = resolve('work', `docs-schema-${randomUUID()}`);
-  mkdirSync(root, { recursive: true });
+test('the schema version the docs call current is the one the code creates', async () => {
+  const root = await tempDir('docs-consistency', 'docs-schema');
   const path = join(root, 'governance.db');
   // Creating a fresh store runs the whole migration chain, so its version is the real answer.
   const repo = new SqliteCandidates(path);

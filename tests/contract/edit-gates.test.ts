@@ -8,6 +8,7 @@ import { SqliteCandidates } from '../../packages/infrastructure/governance/src/i
 import { MnemonCliProvider } from '../../packages/providers/mnemon/src/index.ts';
 import { RememberInput } from '../../packages/core/contracts/src/index.ts';
 import { mnemonBinary } from '../e2e/mnemon-binary.ts';
+import { tempDir } from '../support/temp.ts';
 
 /**
  * The three gates the edit page depends on, checked against the real Server rather than a stub:
@@ -18,7 +19,7 @@ import { mnemonBinary } from '../e2e/mnemon-binary.ts';
  */
 
 async function withServer(run: (app: ReturnType<typeof configure>, seeded: { memoryId: string }) => Promise<void>): Promise<void> {
-  const root = resolve('work', 'edit-gates', randomUUID());
+  const root = await tempDir('edit-gates', 'edit-gates');
   mkdirSync(join(root, 'provider'), { recursive: true });
   mkdirSync(join(root, 'state'), { recursive: true });
   const repo = new SqliteCandidates(resolve(join(root, 'state', 'governance.db')));
@@ -26,8 +27,7 @@ async function withServer(run: (app: ReturnType<typeof configure>, seeded: { mem
   const request = RememberInput.parse({
     idempotencyKey: 'gate-seed', content: '初始正文。', tags: [],
     provenance: {
-      source: 'local-user', sourceReference: 'gate:1', evidence: ['gate'], verificationStatus: 'verified',
-      confidence: 1, applicability: 'global', limitations: '无（验收固定值）', lastVerified: '2026-11-10T00:00:00.000Z',
+      source: 'local-user', sourceReference: 'gate:1',
     },
   });
   const candidate = repo.submit(request);

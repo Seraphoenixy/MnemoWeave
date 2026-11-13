@@ -1,112 +1,88 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { layoutGraph, linkLabel } from '../../plugins/dsh-mnemo-weave/src/client/graph-layout.ts';
-import type { UiGraph, UiGraphEdge } from '../../plugins/dsh-mnemo-weave/src/shared/contract.ts';
+import { GRAPH_HEIGHT, GRAPH_WIDTH, clampGraphPosition, linkLabel, naturalGraphPositions, uniformGraphPositions } from '../../plugins/dsh-mnemo-weave/src/client/graph-layout.ts';
+import type { UiGraphEdge, UiGraphNode } from '../../plugins/dsh-mnemo-weave/src/shared/contract.ts';
 
 /**
- * The graph layout has to be a pure function of the graph.
+ * The layout has to be a pure function of the graph.
  *
- * A force simulation would look alive but settle differently every render, so the same graph would
- * appear to change between visits and nothing about it could be asserted. These tests pin the
- * properties a reader relies on: stable coordinates, rings by hop, and everything inside bounds.
+ * The reference implementation relaxes a seeded arrangement with a force pass instead of placing
+ * nodes on rings. That reads far better on a dense graph — connected memories end up near each
+ * other — but a force pass is normally run-to-run random. These tests pin the properties that keep
+ * it usable: the same input produces the same drawing, everything stays inside the canvas, and a
+ * connected pair sits closer together than an unconnected one.
  */
 
-const edge = (id: string, source: string, target: string, kind: 'Supersedes' | 'RelatedTo' = 'RelatedTo'): UiGraphEdge => ({
+const edge = (id: string, source: string, target: string, kind: 'Supersedes' | 'RelatedTo' | 'Conflicts' | 'Entity' = 'RelatedTo'): UiGraphEdge => ({
   relationId: id, kind, sourceMemoryId: source, targetMemoryId: target, reason: `why ${id}`, effectiveAt: '2026-11-10T00:00:00.000Z',
 });
 
-const node = (memoryId: string, importance?: number, category?: string) => ({
-  memoryId, projectId: null, state: 'active' as const, publishedAt: '2026-11-10T00:00:00.000Z',
-  ...(importance === undefined ? {} : { importance }),
+const node = (memoryId: string, category?: string): UiGraphNode => ({
+  memoryId, state: 'active' as const, publishedAt: '2026-11-10T00:00:00.000Z',
   ...(category === undefined ? {} : { category }),
 });
 
-function graph(nodes: string[], edges: UiGraphEdge[], extra: { importance?: Record<string, number>; category?: Record<string, string> } = {}): UiGraph {
-  return {
-    nodes: nodes.map(id => node(id, extra.importance?.[id], extra.category?.[id])),
-    edges,
-    truncated: false,
-  };
-}
-
 test('the same graph lays out identically twice', () => {
-  const input = graph(['a', 'b', 'c', 'd'], [edge('e1', 'a', 'b'), edge('e2', 'b', 'c'), edge('e3', 'c', 'd')]);
-  const first = layoutGraph(input);
-  const second = layoutGraph(input);
-  assert.deepEqual(second, first, 'no randomness: two runs produce the same drawing');
+  const nodes = [node('a'), node('b'), node('c'), node('d')];
+  const edges = [edge('e1', 'a', 'b'), edge('e2', 'b', 'c'), edge('e3', 'c', 'd')];
+  const first = naturalGraphPositions(nodes, edges);
+  const second = naturalGraphPositions(nodes, edges);
+  // No randomness in the seed or the relaxation: a graph must not appear to rearrange itself
+  // between visits.
+  assert.deepEqual([...second], [...first]);
 });
 
-test('nodes sit on rings by hop distance from the most connected node', () => {
-  // b is touched by two edges and is therefore the centre.
-  const input = graph(['a', 'b', 'c'], [edge('e1', 'b', 'a'), edge('e2', 'b', 'c')]);
-  const layout = layoutGraph(input);
-  const byId = new Map(layout.nodes.map(item => [item.memoryId, item]));
-  assert.equal(byId.get('b')?.hop, 0, 'the most connected node is the centre');
-  assert.equal(byId.get('a')?.hop, 1);
-  assert.equal(byId.get('c')?.hop, 1);
-  // Both direct neighbours are the same distance from the centre, opposite each other.
-  const centre = byId.get('b')!;
-  const a = byId.get('a')!;
-  const c = byId.get('c')!;
-  assert.equal(Math.round(Math.hypot(a.x - centre.x, a.y - centre.y)), Math.round(Math.hypot(c.x - centre.x, c.y - centre.y)));
-});
-
-test('every coordinate is finite and inside the reported bounds', () => {
-  const input = graph(['a', 'b', 'c', 'd', 'e'], [edge('e1', 'a', 'b'), edge('e2', 'a', 'c'), edge('e3', 'a', 'd'), edge('e4', 'd', 'e')], {
-    importance: { a: 5, b: 1 },
-  });
-  const layout = layoutGraph(input);
-  for (const item of layout.nodes) {
-    assert.ok(Number.isFinite(item.x) && Number.isFinite(item.y), `finite coordinates for ${item.memoryId}`);
-    assert.ok(item.x >= 0 && item.x <= layout.width, 'x stays inside the viewBox');
-    assert.ok(item.y >= 0 && item.y <= layout.height, 'y stays inside the viewBox');
-    assert.ok(item.radius > 0, 'a node always has a drawable radius');
+test('every position is finite and inside the canvas', () => {
+  const nodes = [node('a', 'decision'), node('b', 'decision'), node('c', 'fact'), node('d', 'fact'), node('e')];
+  const edges = [edge('e1', 'a', 'b'), edge('e2', 'a', 'c'), edge('e3', 'a', 'd'), edge('e4', 'd', 'e')];
+  const positions = naturalGraphPositions(nodes, edges);
+  for (const [id, position] of positions) {
+    assert.ok(Number.isFinite(position.x) && Number.isFinite(position.y), `finite coordinates for ${id}`);
+    assert.ok(position.x >= 0 && position.x <= GRAPH_WIDTH, `x inside the canvas for ${id}`);
+    assert.ok(position.y >= 0 && position.y <= GRAPH_HEIGHT, `y inside the canvas for ${id}`);
   }
-  // A recorded importance sizes the node; an absent one is not treated as the smallest.
-  const byId = new Map(layout.nodes.map(item => [item.memoryId, item]));
-  assert.ok(byId.get('a')!.radius > byId.get('b')!.radius, 'higher importance draws a bigger node');
-  assert.equal(byId.get('c')!.radius, byId.get('e')!.radius, 'nodes without importance share the default size');
 });
 
-test('an isolated memory is drawn apart instead of being placed at the centre', () => {
-  const input = graph(['a', 'b', 'lonely'], [edge('e1', 'a', 'b')]);
-  const layout = layoutGraph(input);
-  assert.deepEqual(layout.isolated, ['lonely'], 'a node with no relation is reported');
-  const lonely = layout.nodes.find(item => item.memoryId === 'lonely')!;
-  assert.ok(lonely.hop >= 1, 'it does not claim to be the centre');
+test('clamping keeps a dragged node on the canvas', () => {
+  assert.deepEqual(clampGraphPosition({ x: -500, y: -500 }), { x: 58, y: 58 });
+  assert.deepEqual(clampGraphPosition({ x: 50_000, y: 50_000 }), { x: GRAPH_WIDTH - 58, y: GRAPH_HEIGHT - 58 });
+  const inside = { x: 400, y: 300 };
+  assert.deepEqual(clampGraphPosition(inside), inside, 'a position already inside is unchanged');
 });
 
-test('links carry both endpoints and only drawable relations survive', () => {
-  const input = graph(['a', 'b'], [edge('e1', 'a', 'b', 'Supersedes'), edge('self', 'a', 'a'), edge('dangling', 'a', 'missing')]);
-  const layout = layoutGraph(input);
-  assert.deepEqual(layout.links.map(link => link.relationId), ['e1'], 'self loops and dangling edges are not drawn');
-  const link = layout.links[0]!;
-  assert.ok(Number.isFinite(link.x1) && Number.isFinite(link.y1) && Number.isFinite(link.x2) && Number.isFinite(link.y2));
-  assert.equal(linkLabel(link), 'supersedes');
-  assert.equal(linkLabel({ kind: 'RelatedTo' }), '', 'a plain relation is not labelled as a supersede');
+test('the uniform layout fills the canvas without overlapping cells', () => {
+  const nodes = [node('a'), node('b'), node('c'), node('d'), node('e')];
+  const positions = uniformGraphPositions(nodes);
+  assert.equal(positions.size, nodes.length);
+  const places = [...positions.values()].map(position => `${Math.round(position.x)},${Math.round(position.y)}`);
+  assert.equal(new Set(places).size, nodes.length, 'no two nodes share a cell');
+  for (const position of positions.values()) {
+    assert.ok(position.x > 0 && position.x < GRAPH_WIDTH);
+    assert.ok(position.y > 0 && position.y < GRAPH_HEIGHT);
+  }
 });
 
-test('an empty graph reports a drawable empty canvas', () => {
-  const layout = layoutGraph({ nodes: [], edges: [], truncated: false });
-  assert.deepEqual(layout.nodes, []);
-  assert.deepEqual(layout.links, []);
-  assert.ok(layout.width > 0 && layout.height > 0, 'the viewBox is still usable');
-});
-
-test('a retired node is marked apart from the memories still served', () => {
-  // A supersede edge points at a memory that is no longer active; the drawing has to show it as
-  // history rather than as a current memory.
-  const input = {
-    nodes: [
-      { memoryId: 'a', projectId: null, state: 'active' as const, publishedAt: '2026-11-10T00:00:00.000Z' },
-      { memoryId: 'b', projectId: null, state: 'superseded' as const, publishedAt: '2026-11-09T00:00:00.000Z' },
-    ],
-    edges: [edge('e1', 'a', 'b', 'Supersedes')],
-    truncated: false,
+test('a connected pair ends up closer than an unconnected one', () => {
+  // This is the property rings could not express and the reason for the force pass: the drawing
+  // has to show what belongs together.
+  const nodes = [node('a', 'fact'), node('b', 'fact'), node('lonely', 'fact')];
+  const positions = naturalGraphPositions(nodes, [edge('e1', 'a', 'b')]);
+  const distance = (left: string, right: string): number => {
+    const first = positions.get(left)!;
+    const second = positions.get(right)!;
+    return Math.hypot(first.x - second.x, first.y - second.y);
   };
-  const layout = layoutGraph(input);
-  const byId = new Map(layout.nodes.map(item => [item.memoryId, item]));
-  assert.equal(byId.get('a')?.retired, false);
-  assert.equal(byId.get('b')?.retired, true, 'a superseded memory is drawn as retired');
-  assert.equal(layout.links.length, 1, 'the edge to the retired memory is still drawn');
+  assert.ok(distance('a', 'b') < distance('a', 'lonely'), 'linked memories are drawn nearer than unrelated ones');
+});
+
+test('an empty graph produces no positions rather than throwing', () => {
+  assert.equal(naturalGraphPositions([], []).size, 0);
+  assert.equal(uniformGraphPositions([]).size, 0);
+});
+
+test('an entity edge is labelled but a plain relation is not called a supersede', () => {
+  assert.equal(linkLabel({ kind: 'Supersedes' }), 'supersedes');
+  assert.equal(linkLabel({ kind: 'Conflicts' }), 'conflicts');
+  assert.equal(linkLabel({ kind: 'RelatedTo' }), '', 'a plain relation is not labelled as a supersede');
+  assert.equal(linkLabel({ kind: 'Entity' }), '', 'a shared entity is not a decision about content');
 });

@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { isAbsolute } from 'node:path';
 import { z } from 'zod';
 import { MnemoWeaveError } from '../../../core/contracts/src/index.ts';
-import type { Health, ProviderEmbeddingStatusRecord, RecallRequest, RecallResult } from '../../../core/contracts/src/index.ts';
+import type { Health, ProviderEmbeddingStatusRecord, ProviderGraphRecord, ProviderStatsRecord, RecallRequest, RecallResult } from '../../../core/contracts/src/index.ts';
 import type { MemoryProvider } from '../../../core/application/src/index.ts';
 
 export type Runner = (args: string[]) => Promise<string>;
@@ -20,7 +20,84 @@ export function createRunner(binary: string, timeout = 15000, maxBuffer = 2 * 10
     });
   });
 }
-const NativeRecall = z.object({ results: z.array(z.object({ id: z.string().min(1), content: z.string(), score: z.number().finite(), superseded: z.boolean().optional() })) });
+const NativeInsightRow = z.object({
+  id: z.string().min(1), content: z.string(), score: z.number().finite().optional(), superseded: z.boolean().optional(),
+  category: z.string().optional(), importance: z.number().int().optional(),
+  tags: z.array(z.string()).optional(), entities: z.array(z.string()).optional(),
+  source: z.string().optional(), confidence: z.string().optional(),
+}).passthrough();
+/**
+ * `recall` wraps its rows in `{results}`, while `search` returns a bare array. Both are official
+ * shapes, so one decoder accepts either rather than the caller having to know which command ran.
+ */
+const NativeRecallRows = z.union([
+  z.object({ results: z.array(NativeInsightRow) }),
+  z.array(NativeInsightRow).transform(rows => ({ results: rows })),
+]);
+const NativeRecall = NativeRecallRows;
+/**
+ * The whole-store read returns a bare array, while a limited read wraps it in `{results}`. Both
+ * shapes appear in the CLI, so the decode accepts either instead of failing on one.
+ */
+const NativeAllInsights = z.union([
+  z.array(NativeInsightRow),
+  z.object({ results: z.array(NativeInsightRow) }).transform(value => value.results),
+]);
+/**
+ * `status` is the Provider's own accounting. `top_entities` is the frequency table it maintains,
+ * which is why the entity view reads it instead of recounting a page.
+ */
+const NativeStatus = z.object({
+  total_insights: z.number().int().nonnegative(),
+  deleted_insights: z.number().int().nonnegative().optional(),
+  edge_count: z.number().int().nonnegative().optional(),
+  by_category: z.record(z.string(), z.number().int().nonnegative()).optional(),
+  top_entities: z.array(z.object({ entity: z.string().min(1), count: z.number().int().nonnegative() })).optional(),
+}).passthrough();
+/**
+ * How many edges one graph read may return.
+ *
+ * The official export has no cursor, so a store large enough to exceed this is reported as
+ * truncated rather than silently cut: a picture that is missing edges must say so.
+ */
+const PROVIDER_GRAPH_EDGE_LIMIT = 2000;
+/**
+ * Parse the DOT export `mnemon viz --format dot` writes.
+ *
+ * Only the two statement shapes that carry meaning are read: a node line and an edge line. Labels
+ * are unescaped from the quoted form and the rest of the attributes are ignored, because the
+ * caller draws its own styles and only needs to know what connects to what.
+ */
+function parseDotGraph(dot: string, edgeLimit: number): { nodes: { id: string; label: string }[]; edges: { sourceId: string; targetId: string; label: string }[]; truncated: boolean } {
+  const nodes = new Map<string, string>();
+  const edges: { sourceId: string; targetId: string; label: string }[] = [];
+  let truncated = false;
+  const unquote = (value: string): string => value.replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+  for (const rawLine of dot.split('\n')) {
+    const line = rawLine.trim();
+    if (line === '' || line.startsWith('digraph') || line === '{' || line === '}') continue;
+    // `"a" -> "b" [label="entity", ...]`
+    const edge = /^"((?:[^"\\]|\\.)*)"\s*->\s*"((?:[^"\\]|\\.)*)"\s*(?:\[(.*)\])?;?$/.exec(line);
+    if (edge !== null) {
+      if (edges.length >= edgeLimit) { truncated = true; continue; }
+      const attributes = edge[3] ?? '';
+      const labelMatch = /label="((?:[^"\\]|\\.)*)"/.exec(attributes);
+      edges.push({
+        sourceId: unquote(edge[1]!), targetId: unquote(edge[2]!),
+        label: labelMatch === null ? '' : unquote(labelMatch[1]!),
+      });
+      continue;
+    }
+    // `"id" [label="...", fillcolor="..."];`
+    const node = /^"((?:[^"\\]|\\.)*)"\s*(?:\[(.*)\])?;?$/.exec(line);
+    if (node !== null) {
+      const attributes = node[2] ?? '';
+      const labelMatch = /label="((?:[^"\\]|\\.)*)"/.exec(attributes);
+      nodes.set(unquote(node[1]!), labelMatch === null ? '' : unquote(labelMatch[1]!));
+    }
+  }
+  return { nodes: [...nodes].map(([id, label]) => ({ id, label })), edges, truncated };
+}
 const NativeRemember = z.discriminatedUnion('action', [
   z.object({ id: z.string().min(1), action: z.literal('added') }),
   z.object({ id: z.string().min(1), action: z.literal('skipped'), replaced_id: z.string().min(1) }),
@@ -168,8 +245,63 @@ export class MnemonCliProvider implements MemoryProvider {
   }
   recall(request: RecallRequest): Promise<RecallResult> {
     return this.serial(async () => {
-      const result = decode(NativeRecall, await this.checkedRead(['recall', '--limit', String(request.limit), '--', request.query]));
-      return { memories: result.results.map(({ id, content, score, superseded }) => ({ id, content, score, ...(superseded === undefined ? {} : { superseded }) })) };
+      // Three retrieval modes answer differently, so the caller's choice is honoured rather than
+      // approximated: `search` scores tokens, `recall --basic` is SQL LIKE, plain `recall` is the
+      // intent-aware ranking.
+      const args = request.mode === 'keyword'
+        ? ['search', '--limit', String(request.limit)]
+        : request.mode === 'basic'
+          ? ['recall', '--basic', '--limit', String(request.limit)]
+          : ['recall', '--limit', String(request.limit)];
+      if (request.mode !== 'keyword') {
+        if (request.category !== undefined) args.push('--cat', request.category);
+        if (request.source !== undefined) args.push('--source', request.source);
+      }
+      args.push('--', request.query);
+      const result = decode(NativeRecall, await this.checkedRead(args));
+      // Everything the Provider reported is carried through. Dropping classification here would
+      // force every caller to re-filter a page it did not ask for.
+      return { memories: result.results.map(row => ({ ...row })) };
+    });
+  }
+  /**
+   * Every memory the Provider holds.
+   *
+   * Read-only and unbounded on purpose: this is what the library contains, and a page of it would
+   * let a caller mistake "not on this page" for "not in the store". The cap is the output buffer,
+   * which surfaces as a real error instead of a silently short list.
+   */
+  listAll(): Promise<NonNullable<RecallResult['memories']>> {
+    return this.serial(async () => {
+      const rows = decode(NativeAllInsights, await this.checkedRead(['recall', '', '--basic', '--limit', '100000']));
+      return rows.map(row => ({ ...row }));
+    });
+  }
+  /** The Provider's own accounting, including the entity frequency table it maintains. */
+  stats(): Promise<ProviderStatsRecord> {
+    return this.serial(async () => {
+      const status = decode(NativeStatus, await this.checkedRead(['status']));
+      return {
+        totalInsights: status.total_insights,
+        deletedInsights: status.deleted_insights ?? 0,
+        edgeCount: status.edge_count ?? 0,
+        byCategory: status.by_category ?? {},
+        topEntities: (status.top_entities ?? []).map(entry => ({ entity: entry.entity, count: entry.count })),
+      };
+    });
+  }
+  /**
+   * The Provider's own relation graph.
+   *
+   * `viz` is the official export, so these are the edges the store actually holds rather than the
+   * ones this Server happened to write. DOT is parsed instead of the HTML payload: its lines are a
+   * stable shape, while the HTML carries a generated vis.js dataset.
+   */
+  graph(): Promise<ProviderGraphRecord> {
+    return this.serial(async () => {
+      const dot = await this.checkedRead(['viz', '--format', 'dot']);
+      const parsed = parseDotGraph(dot, PROVIDER_GRAPH_EDGE_LIMIT);
+      return parsed;
     });
   }
   /** Bounded official CLI lookup; absence alone never authorizes retrying an uncertain write. */
@@ -220,25 +352,47 @@ export class MnemonCliProvider implements MemoryProvider {
     return this.serial(async () => {
       const stillMissing = missing.filter(id => !this.bodyCache.has(id));
       const queue = [...stillMissing];
+      /**
+       * The first call on a fresh adapter must not be one of several at once. Until a call has
+       * succeeded the adapter does not know the store exists, so reads run without `--readonly`
+       * and the CLI takes a write lock to migrate the store first. Measured with four of them in
+       * flight against a store the process had not opened yet: 20 of 27 reads failed with
+       * `SQLITE_BUSY`, and a failed body is silently absent from the batch, so the page showed a
+       * short list instead of an error. One serial read settles the store and every later read
+       * uses the read-only snapshot path.
+       */
+      if (!this.storeOpened && queue.length > 0) {
+        const first = queue.shift()!;
+        await this.readOne(first);
+      }
       const worker = async (): Promise<void> => {
         for (;;) {
           const id = queue.shift();
           if (id === undefined) return;
-          try {
-            const result = decode(NativeMemory, await this.checkedRead(['show', '--', id]));
-            if (result.id === id) this.rememberBody(result.id, result.content);
-          } catch {
-            // A body that cannot be read is reported by readMemory on the retry path; the batch
-            // stays partial so one bad row does not hide the rest of the page.
-          }
+          await this.readOne(id);
         }
       };
       await Promise.all(Array.from({ length: Math.min(concurrency, queue.length) }, worker));
+      // A batch may still lose a row to a transient error; one serial retry separates a genuinely
+      // unreadable id from contention, so a page never shrinks without saying so.
+      for (const id of ids) {
+        if (this.bodyCache.has(id)) continue;
+        await this.readOne(id);
+      }
       return ids.flatMap(id => {
         const content = this.bodyCache.get(id);
         return content === undefined ? [] : [{ id, content }];
       });
     });
+  }
+  /** One body read; a failure leaves the id uncached so the caller can decide what it means. */
+  private async readOne(id: string): Promise<void> {
+    try {
+      const result = decode(NativeMemory, await this.checkedRead(['show', '--', id]));
+      if (result.id === id) this.rememberBody(result.id, result.content);
+    } catch {
+      // Reported by the caller, which knows whether a short page is acceptable.
+    }
   }
   /** Internal relation projection only; approval and publication are owned by the workflow. */
   linkSupersedes(sourceId: string, targetId: string, metadata: { operationId: string; reason: string; effectiveAt: string }): Promise<{ sourceId: string; targetId: string; edgeType: 'supersedes' }> {

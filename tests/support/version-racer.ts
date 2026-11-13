@@ -13,11 +13,11 @@ try {
   const input = RememberInput.parse({
     idempotencyKey: candidateKey, content: 'Racing second generation content.',
     tags: [],
-    provenance: { source: 'version-racer', sourceReference: 'fixture:race', evidence: ['fixture'], verificationStatus: 'verified', confidence: 0.8, applicability: 'hardening fixture', limitations: 'test only', lastVerified: '2026-11-08T00:00:00.000Z' },
+    provenance: { source: 'version-racer', sourceReference: 'fixture:race'},
     change: { kind: 'revise', targetMemoryId: baseMemoryId, expectedRevisionId: baseRevisionId, effectiveAt: new Date().toISOString(), reason: 'racing revision', evidence: ['racer'] },
   });
   const candidate = repo.submit(input);
-  repo.review(candidate.id, 'approve', 'racer', 'reservation race', null);
+  repo.review(candidate.id, 'approve', 'racer', 'reservation race');
   process.stdout.write(`${JSON.stringify({ pid: process.pid, outcome: 'reserved' })}\n`);
   process.exit(0);
 } catch (error) {

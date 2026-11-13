@@ -8,6 +8,7 @@ import { SqliteCandidates } from '../../packages/infrastructure/governance/src/i
 import { MnemonCliProvider, createRunner } from '../../packages/providers/mnemon/src/index.ts';
 import { RememberInput } from '../../packages/core/contracts/src/index.ts';
 import { mnemonBinary } from '../e2e/mnemon-binary.ts';
+import { tempDir } from '../support/temp.ts';
 
 /**
  * Browsing must reach every project and must not lose or duplicate rows while paging.
@@ -44,8 +45,7 @@ async function seed(
     const request = RememberInput.parse({
       idempotencyKey: `browse-${label}-${index}`, content, tags: [],
       provenance: {
-        source: 'local-user', sourceReference: `browse:${index}`, evidence: ['browse'], verificationStatus: 'verified',
-        confidence: 1, applicability: 'shared collection', limitations: '无（验收固定值）', lastVerified: '2026-11-10T00:00:00.000Z',
+        source: 'local-user', sourceReference: `browse:${index}`,
       },
     });
     const candidate = repo.submit(request);
@@ -64,8 +64,7 @@ async function seed(
     const request = RememberInput.parse({
       idempotencyKey: `browse-synced-${index}`, content, tags: [],
       provenance: {
-        source: 'sync', sourceReference: `browse:synced:${index}`, evidence: ['sync'], verificationStatus: 'verified',
-        confidence: 1, applicability: 'global', limitations: '无（验收固定值）', lastVerified: '2026-11-10T00:00:00.000Z',
+        source: 'sync', sourceReference: `browse:synced:${index}`,
       },
     });
     const written = await persist(content, `candidate:${randomUUID()}`);
@@ -86,7 +85,7 @@ async function seed(
 }
 
 test('paging covers every row exactly once, even when candidates share a timestamp', async () => {
-  const root = resolve('work', 'browse-paging', randomUUID());
+  const root = await tempDir('memory-browse', 'browse-paging');
   const { app } = await seed(root, { global: 12, alpha: 9, beta: 6 });
   try {
     const seen: string[] = [];
@@ -106,7 +105,7 @@ test('paging covers every row exactly once, even when candidates share a timesta
 });
 
 test('the list is one shared collection with no owner field or project filter', async () => {
-  const root = resolve('work', 'browse-scope', randomUUID());
+  const root = await tempDir('memory-browse', 'browse-scope');
   const { app } = await seed(root, { global: 3, alpha: 2, beta: 1 });
   try {
     // One collection: every published memory appears, and no item carries an owner.
@@ -124,7 +123,7 @@ test('the list is one shared collection with no owner field or project filter', 
 });
 
 test('a query that skips a whole page still advances instead of stalling', async () => {
-  const root = resolve('work', 'browse-query', randomUUID());
+  const root = await tempDir('memory-browse', 'browse-query');
   const { app } = await seed(root, { global: 10, alpha: 0, beta: 0 });
   try {
     // Only two rows match; with limit 3 the first page may scan past many non-matching rows.
@@ -137,7 +136,7 @@ test('a query that skips a whole page still advances instead of stalling', async
 });
 
 test('a page boundary survives rows being withdrawn between pages', async () => {
-  const root = resolve('work', 'browse-mutation', randomUUID());
+  const root = await tempDir('memory-browse', 'browse-mutation');
   const { app } = await seed(root, { global: 9, alpha: 0, beta: 0 });
   try {
     const first = await app.client!.memories({ limit: 4 });
@@ -167,7 +166,7 @@ test('a page boundary survives rows being withdrawn between pages', async () => 
 });
 
 test('a keyset cursor never re-includes a row it already returned', async () => {
-  const root = resolve('work', 'browse-read-failure', randomUUID());
+  const root = await tempDir('memory-browse', 'browse-read-failure');
   const { app } = await seed(root, { global: 5, alpha: 0, beta: 0 });
   try {
     const first = await app.client!.memories({ limit: 3 });
@@ -182,43 +181,54 @@ test('a keyset cursor never re-includes a row it already returned', async () => 
 });
 
 test('a category filter narrows the set and reports the categories that exist', async () => {
-  const root = resolve('work', 'browse-category', randomUUID());
+  const root = await tempDir('memory-browse', 'browse-category');
   const { app } = await seed(root, { global: 3, alpha: 2, beta: 0 });
   try {
-    // The seed publishes without classification, so every memory's category is unknown. A
-    // category filter must not match them and must not invent "general".
+    /**
+     * The index follows the Provider's own accounting.
+     *
+     * A memory stored without a chosen classification is held as `general`, and the Provider
+     * counts it that way in `by_category`. The index reports what the store holds rather than
+     * re-deriving "unrecorded" from this Server's own catalog, so `general` appears.
+     */
     const unfiltered = await app.client!.memories({ limit: 200 });
     assert.equal(unfiltered.items.length, 5);
-    assert.equal(unfiltered.categories?.length ?? 0, 0, 'no category was recorded, so none is offered');
-    assert.ok(unfiltered.items.every(item => item.category === undefined), 'no category is invented');
+    assert.deepEqual(unfiltered.categories, [{ value: 'general', count: 5 }], 'the Provider classes unclassified rows as general');
+    assert.ok(unfiltered.items.every(item => item.category === 'general'), 'the Provider supplies the default category');
 
+    // A category nothing was stored under still matches nothing.
     const filtered = await app.client!.memories({ limit: 200, category: 'decision' });
-    assert.equal(filtered.items.length, 0, 'an unknown category matches nothing');
+    assert.equal(filtered.items.length, 0, 'an unused category matches nothing');
+
+    // The default category is filterable like any other.
+    const general = await app.client!.memories({ limit: 200, category: 'general' });
+    assert.equal(general.items.length, 5);
   } finally { await app.close(); }
 });
 
 test('a synced classification is offered in the index and filters the list', async () => {
-  const root = resolve('work', 'browse-category-synced', randomUUID());
+  const root = await tempDir('memory-browse', 'browse-category-synced');
   const { app } = await seed(root, { global: 2, alpha: 0, beta: 0, categorized: [{ category: 'decision', importance: 4 }, { category: 'fact', importance: 2 }] });
   try {
     const all = await app.client!.memories({ limit: 200 });
     assert.equal(all.items.length, 4);
-    // The index lists the categories that exist, with counts, before any filter is applied.
-    assert.deepEqual(all.categories, [{ value: 'decision', count: 1 }, { value: 'fact', count: 1 }]);
+    // The index lists what the store holds. Two rows were written without a chosen category, so
+    // the Provider holds them as `general` and counts them there.
+    assert.deepEqual(all.categories, [{ value: 'decision', count: 1 }, { value: 'fact', count: 1 }, { value: 'general', count: 2 }]);
     assert.equal(all.items.filter(item => item.category === 'decision').length, 1);
-    assert.equal(all.items.filter(item => item.category === undefined).length, 2, 'unclassified stays unclassified');
+    assert.equal(all.items.filter(item => item.category === 'general').length, 2, 'unclassified rows are held as general');
 
     const decisions = await app.client!.memories({ limit: 200, category: 'decision' });
     assert.equal(decisions.items.length, 1);
     assert.equal(decisions.items[0]?.category, 'decision');
     assert.equal(decisions.items[0]?.importance, 4);
     // The index does not shrink with the filter, so the picker can switch back.
-    assert.deepEqual(decisions.categories, [{ value: 'decision', count: 1 }, { value: 'fact', count: 1 }]);
+    assert.deepEqual(decisions.categories, [{ value: 'decision', count: 1 }, { value: 'fact', count: 1 }, { value: 'general', count: 2 }]);
   } finally { await app.close(); }
 });
 
 test('each order pages every row exactly once, and a cursor cannot cross orders', async () => {
-  const root = resolve('work', 'browse-sort', randomUUID());
+  const root = await tempDir('memory-browse', 'browse-sort');
   const { app } = await seed(root, { global: 3, alpha: 2, beta: 0, categorized: [{ category: 'decision', importance: 5 }, { category: 'fact', importance: 1 }, { category: 'insight', importance: 3 }] });
   try {
     for (const sort of ['newest', 'oldest', 'importance'] as const) {
@@ -234,11 +244,14 @@ test('each order pages every row exactly once, and a cursor cannot cross orders'
       assert.equal(new Set(seen).size, 8, `${sort} must not repeat a row across pages`);
     }
 
-    // The orders really do differ: importance descends, and unrecorded importance sorts last.
+    // The orders really do differ: importance descends. A row stored without a chosen importance
+    // is held by the Provider as its default (3), so it ranks among the middle values rather than
+    // being pushed to the end as unrecorded.
     const byImportance = await app.client!.memories({ limit: 200, sort: 'importance' });
     const ranks = byImportance.items.map(item => item.importance ?? -1);
     assert.deepEqual(ranks, [...ranks].sort((left, right) => right - left), 'higher importance comes first');
-    assert.equal(byImportance.items.at(-1)?.importance, undefined, 'an unrecorded importance sorts last rather than as 0');
+    assert.ok(byImportance.items.every(item => typeof item.importance === 'number'), 'the Provider supplies its default importance');
+    assert.ok(byImportance.items.at(-1)!.importance! <= byImportance.items[0]!.importance!, 'the order descends');
 
     // A cursor issued for one order is refused by another, instead of silently skipping rows.
     const first = await app.client!.memories({ limit: 2, sort: 'newest' });
@@ -251,7 +264,7 @@ test('each order pages every row exactly once, and a cursor cannot cross orders'
 });
 
 test('an entity filter matches case-insensitively and lists recorded spellings', async () => {
-  const root = resolve('work', 'browse-entity', randomUUID());
+  const root = await tempDir('memory-browse', 'browse-entity');
   const { app } = await seed(root, {
     global: 1, alpha: 0, beta: 0,
     categorized: [{ category: 'decision', importance: 4, entities: ['MnemoWeave', 'DSH'] }, { category: 'fact', importance: 2, entities: ['dsh'] }],
@@ -273,7 +286,7 @@ test('an entity filter matches case-insensitively and lists recorded spellings',
 });
 
 test('an unknown cursor shape is rejected instead of silently restarting', async () => {
-  const root = resolve('work', 'browse-cursor', randomUUID());
+  const root = await tempDir('memory-browse', 'browse-cursor');
   const { app } = await seed(root, { global: 1, alpha: 0, beta: 0 });
   try {
     // The RPC surface validates the same way the HTTP route does.
