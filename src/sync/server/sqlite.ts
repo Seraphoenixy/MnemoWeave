@@ -159,6 +159,8 @@ export class SqliteSyncStore implements SyncStore {
     const statement = this.db.prepare('SELECT 1 FROM sync_blobs WHERE scope = ? AND digest = ?')
     let missing = 0
     for (const change of changes) {
+      // A delete publishes no manifest; only a put can name files to check.
+      if (change.operation !== 'put') continue
       const files = (change.value as { files?: unknown } | undefined)?.files
       if (!Array.isArray(files)) continue
       for (const file of files) {
