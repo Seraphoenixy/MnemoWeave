@@ -5,7 +5,7 @@ import type { ComposableMemoryTurn } from '../../core/turns.ts'
 import type { HostAgent, HostSession } from '../support/dsh.ts'
 import { findSessionEvent, sessionEvents, sessionLength } from '../session/session-events.ts'
 import { agentScope, type MnemonAgentRuntimeSource, type MnemonRuntimeGraph } from './runtime.ts'
-import { inspectMemoryView, modelMemoryWake } from '../surface/view-presentation.ts'
+import { inspectMemoryView, modelMemoryWake, workingRulesSystemText } from '../surface/view-presentation.ts'
 import type { MemoryViewInspection } from '../contracts/view-protocol.ts'
 
 /** Host-owned authority captured before a child activation starts executing. */
@@ -104,6 +104,12 @@ export class AgentMemoryTurn {
   modelWake() {
     const pinned = this.pinned
     return pinned === undefined ? undefined : modelMemoryWake(pinned.graph, pinned.context, this.includeRuntime)
+  }
+
+  workingRules() {
+    const pinned = this.pinned
+    return pinned === undefined || !this.includeRuntime || !pinned.graph.config.lifecycleEnabled
+      ? undefined : workingRulesSystemText(pinned.graph, pinned.context)
   }
 
   /** Why the current turn has no View, when memory could not be composed for it. */

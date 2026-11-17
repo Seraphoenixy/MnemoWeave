@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { JsonValue } from './contracts.ts'
 import type { MemoryMutationCompletion } from 'dsh-mnemo-weave/contracts'
-import { memoryInputInteger as integer } from 'dsh-mnemo-weave/extension-sdk'
+import { memoryInputInteger as integer, withMemoryStorageLock } from 'dsh-mnemo-weave/extension-sdk'
 import type { ResolvedMemorySpacesConfig as ResolvedConfig } from './config.ts'
 import { MemorySpaceRegistry, validateMemorySpaceId } from './memory-spaces.ts'
 import { MnemonCliError, type MnemonRunner } from './runner.ts'
@@ -1304,10 +1304,48 @@ export class MemorySpacesService {
 
   async remember(request: RememberRequest, signal?: AbortSignal): Promise<JsonValue> {
     this.assertWritable()
+    if (request.replacesId !== undefined) {
+      // Use a distinct queue: Native's individual commands acquire the data-root lock.
+      return withMemoryStorageLock(join(this.runner.effectiveDataDir(), 'state', 'insight-revisions'), () => this.reviseInsight(request, signal))
+    }
     const prepared = this.prepareRemember(request)
     const result = await this.providerFor(prepared.body).remember(prepared.body, prepared.request, signal)
     this.activateAfterWrite(prepared.body, mutationResultCommitted(result))
     return this.annotateResult(result, prepared.body)
+  }
+
+  private async reviseInsight(request: RememberRequest, signal?: AbortSignal): Promise<JsonValue> {
+    signal?.throwIfAborted()
+    const body = this.readSpace(request.memoryBodyId)
+    const provider = this.providerFor(body)
+    const capabilities = body.provider.capabilities
+    if (capabilities.writeMode !== 'exact' || !capabilities.remember || !capabilities.forget || capabilities.deletionMode !== 'soft'
+      || provider.get === undefined || provider.forget === undefined || provider.rememberMany === undefined) {
+      return this.annotateResult({ action: 'skipped', reason: 'revision-unsupported' }, body)
+    }
+    const previousId = required(request.replacesId ?? '', 'replacesId', 2_000)
+    const previous = await provider.get(body, previousId, signal)
+    if (previous === undefined) return this.annotateResult({ action: 'skipped', reason: 'old-insight-unavailable' }, body)
+    const { replacesId: _replacesId, ...next } = request
+    const prepared = this.prepareRemember({ ...next, memoryBodyId: body.id })
+    if (this.isNativeSpace(body) && prepared.request.content.length > 8_000) {
+      return this.annotateResult({ action: 'skipped', reason: 'replacement-too-large', previousId }, body)
+    }
+    if (previous.content === prepared.request.content) return this.annotateResult({ action: 'skipped', reason: 'equivalent-insight', id: previousId }, body)
+    const [written] = await provider.rememberMany(body, [prepared.request], signal)
+    const value = record(written)
+    const id = typeof value?.id === 'string' ? value.id : undefined
+    if (id === undefined || id === previousId || (!mutationResultCommitted(written) && value?.action !== 'skipped')) {
+      return this.annotateResult({ action: 'partial', reason: 'replacement-unconfirmed', previousId, ...(id === undefined ? {} : { id }) }, body)
+    }
+    try {
+      const replacement = await provider.get(body, id, signal)
+      if (replacement?.content === prepared.request.content) {
+        const retired = await provider.forget(body, previousId, signal)
+        if (mutationResultCommitted(retired)) return this.annotateResult({ action: 'updated', id, previousId }, body)
+      }
+    } catch { /* Keep the replacement when retirement cannot be confirmed. */ }
+    return this.annotateResult({ action: 'partial', reason: 'retirement-unconfirmed', previousId, id }, body)
   }
 
   /**

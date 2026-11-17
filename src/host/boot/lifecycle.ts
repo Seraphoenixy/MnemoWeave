@@ -109,14 +109,6 @@ interface PromptAssemblyContext {
   signal?: AbortSignal
 }
 
-/**
- * Whether an event is a durable user message this plugin produced.
- */
-function isOwnUserMessageEvent(event: HostSessionEvent | undefined): boolean {
-  if (event?.type !== 'user/message') return false
-  return isMnemonMessageSource(event.data.source)
-}
-
 function eventTurn(event: HostSessionEvent): number | undefined {
   return typeof event.data.turn === 'number' ? event.data.turn : undefined
 }
@@ -125,24 +117,22 @@ function eventTurn(event: HostSessionEvent): number | undefined {
 class LifecycleLogProjection {
   private readonly cursor = new SessionEventCursor()
   memoryToolCalls = 0
-  readonly assistantCharacters = new Map<number, number>()
 
   read(session: HostAgent['session']): this {
     this.cursor.consume(session, event => {
       if (event.type === 'tool/call' && typeof event.data.name === 'string' && /^mnemon?_/u.test(event.data.name)) this.memoryToolCalls++
-      const turn = eventTurn(event)
-      if (turn !== undefined && event.type === 'assistant/message') this.assistantCharacters.set(turn, (this.assistantCharacters.get(turn) ?? 0) + assistantEventTextLength(event))
-    }, () => { this.memoryToolCalls = 0; this.assistantCharacters.clear() })
+    }, () => { this.memoryToolCalls = 0 })
     return this
   }
 }
 
-const REVIEW_SUBSTANTIVE_USER_CHARACTERS = 320
-const REVIEW_SUBSTANTIVE_ASSISTANT_CHARACTERS = 600
 const EXPLICIT_MEMORY_CANDIDATE = [
   /(?:记住|记下来|保存到记忆|写入记忆|长期记录)/u,
+  /(?:保存|记录|更新|撤回|删除|加入|写入).{0,24}(?:工作准则|工作区资料|工作区档案|正式记忆)/u,
+  /(?:以后|今后|从现在起).{0,24}(?:都要|必须|一律|不要|务必|默认)/u,
   /\b(?:please\s+)?remember\b/iu,
-  /\b(?:save|store|write|record|persist)\b.{0,32}\b(?:memory|memories)\b/iu,
+  /\b(?:save|store|write|record|persist|update|remove)\b.{0,40}\b(?:memory|memories|working rules|workspace (?:record|document|material))\b/iu,
+  /\b(?:from now on|going forward|in future sessions)\b/iu,
 ]
 const NO_MEMORY_MAINTENANCE = [
   /(?:不要|不必|无需|请勿|禁止|别)(?:再|主动|自动|在后台|替我)?(?:记住|记忆)/u,
@@ -165,25 +155,27 @@ function matchesAny(value: string, patterns: readonly RegExp[]): boolean {
   return patterns.some(pattern => pattern.test(value))
 }
 
-function assistantEventTextLength(event: HostSessionEvent): number {
-  if (event.type !== 'assistant/message') return 0
-  const message = event.data.message as { content?: Array<{ type?: unknown; text?: unknown }> } | undefined
-  if (!Array.isArray(message?.content)) return 0
-  return message.content
-    .filter(block => block.type === 'text' && typeof block.text === 'string')
-    .map(block => String(block.text).trim().length)
-    .reduce((total, length) => total + length, 0)
-}
-
-function completedToolActivity(events: Iterable<HostSessionEvent>, turn: number): { count: number; names: Set<string> } {
+function completedToolActivity(events: Iterable<HostSessionEvent>, turn: number): { count: number; names: Set<string>; recoveredFailure: boolean } {
   let count = 0
+  let failed = false
+  let recoveredFailure = false
   const names = new Set<string>()
+  const calls = new Map<string, string>()
   for (const event of events) {
     if (eventTurn(event) !== turn) continue
-    if (event.type === 'tool/result') count++
-    if (event.type === 'tool/call' && typeof event.data.name === 'string') names.add(event.data.name)
+    if (event.type === 'tool/call' && typeof event.data.name === 'string') {
+      names.add(event.data.name)
+      if (typeof event.data.callId === 'string') calls.set(event.data.callId, event.data.name)
+    }
+    if (event.type !== 'tool/result') continue
+    count++
+    const message = event.data.message as { source?: { callId?: string }; toolCallId?: string; isError?: boolean; content?: Array<{ isError?: boolean }> } | undefined
+    const name = calls.get(message?.source?.callId ?? message?.toolCallId ?? '')
+    if (name === undefined || /^mnemon?_/u.test(name)) continue
+    if (event.data.error !== undefined || message?.isError === true || message?.content?.some(block => block.isError === true)) failed = true
+    else if (failed) recoveredFailure = true
   }
-  return { count, names }
+  return { count, names, recoveredFailure }
 }
 
 /** Join the text content of an `assistant/message` event whose message id matches. */
@@ -203,24 +195,9 @@ function assistantMessageText(events: Iterable<HostSessionEvent>, messageId: str
   return null
 }
 
-function guidedReminder(config: ResolvedConfig, view?: import('../../core/contracts/view.ts').ComposableMemoryView): { text: string; read: boolean; write: boolean } | undefined {
-  const guidance = view?.guidance
-  const read = config.recallMode === 'guided' && (view?.routes.length ?? 0) > 0
-  const write = config.writeEnabled && config.writebackMode === 'guided' && view?.actionOffers.some(offer => offer.authority === undefined) === true
-  const chosen = read && write ? guidance?.reminders?.both : read ? guidance?.reminders?.read : write ? guidance?.reminders?.write : undefined
-  if (chosen !== undefined) return { text: chosen, read, write }
-  const instructions = [
-    ...(read ? ['Use the offered memory read tools only when relevant evidence is missing.'] : []),
-    ...(write ? ['Use the offered memory write tools only for an intended memory change. Require a write receipt.'] : []),
-  ]
-  if (instructions.length === 0) return undefined
-  return { text: '[dsh-mnemo-weave] ' + instructions.join(' ') + ' Use only named memory tools available in the current View. Otherwise use none.', read, write }
-}
-
 class MnemonAgentLifecycle {
   private primePending = true
   private startSource: LifecycleAgentSnapshot['startSource']
-  private readonly guidedTurns = new Set<number>()
   private pendingSnapshot: PendingMemorySnapshot | undefined
   private readonly memoryActivity = new TurnActivityProjection()
   private readonly log = new LifecycleLogProjection()
@@ -230,6 +207,7 @@ class MnemonAgentLifecycle {
     toolCallCount: number
     toolNames: Set<string>
     explicitCandidate: boolean
+    recoveredFailure: boolean
     noMaintenance: boolean
   }>()
   private idleReviewTimer: ReturnType<typeof setTimeout> | undefined
@@ -312,7 +290,7 @@ class MnemonAgentLifecycle {
       status: this.agent.status,
       startSource: this.startSource,
       primePending: this.primePending,
-      guidedTurns: this.guidedTurns.size,
+      guidedTurns: 0,
       memoryToolCalls: this.log.read(this.agent.session).memoryToolCalls,
       idleReviewPending: this.idleReviewTimer !== undefined,
       reviewRunning: this.reviewRunning,
@@ -359,25 +337,6 @@ class MnemonAgentLifecycle {
     return modelMemoryWake(pinned.graph, pinned.context)
   }
 
-  /**
-   * Whether the reminder is still visible to the model.
-   *
-   * Read from the surface rather than an Agent-scoped flag, because a rewind
-   * is a surface replacement inside the same live Agent: DSH does not recreate
-   * the Agent, so a flag would stay set and the reminder would never return.
-   * The durable event log cannot answer this either, since it is append-only
-   * and still contains the discarded message.
-   *
-   * Scanning forward is cheap: the reminder sits near the head of the surface,
-   * so the loop exits after a few nodes even on a long session.
-   */
-  private cueAlreadyVisible(): boolean {
-    for (const seq of this.agent.session.surface.nodes) {
-      if (isOwnUserMessageEvent(this.agent.session.eventAt(seq))) return true
-    }
-    return false
-  }
-
   private async preStep(payload: PreStepPayload, next: () => Promise<HostPreStepDecision>): Promise<HostPreStepDecision> {
     this.pendingSnapshot = undefined
     if (payload.step === 1) this.cancelIdleReview(true)
@@ -407,24 +366,12 @@ class MnemonAgentLifecycle {
       return decision
     }
     if (decision.messages.length === 0) return decision
-    // Appended last; normal additions preserve the preceding request prefix.
-    const snapshot = update.message
-    const withSnapshot = (messages: HostUserMessage[]): HostUserMessage[] =>
-      snapshot === undefined ? messages : [...messages, snapshot]
-
     if (this.primePending) {
       this.primePending = false
       this.counters.primes += 1
       this.mark('prime')
     }
-    if (this.cueAlreadyVisible()) return { kind: 'enter', messages: withSnapshot(decision.messages) }
-    const reminder = guidedReminder(this.config, this.memoryTurn?.current?.context.view)
-    if (reminder === undefined) return { kind: 'enter', messages: withSnapshot(decision.messages) }
-    this.guidedTurns.add(payload.turn)
-    if (reminder.read) this.counters.recallCues += 1
-    if (reminder.write) this.counters.writebackCues += 1
-    this.mark(reminder.read ? 'recall' : 'writeback')
-    return { kind: 'enter', messages: withSnapshot([...decision.messages, createPluginMessage(reminder.text, 'instructions')]) }
+    return update.message === undefined ? decision : { kind: 'enter', messages: [...decision.messages, update.message] }
   }
 
   private async assemblePrompt(assembly: PromptAssembly, context: PromptAssemblyContext, next: () => Promise<PromptAssembly>): Promise<PromptAssembly> {
@@ -436,7 +383,7 @@ class MnemonAgentLifecycle {
     if (context.signal?.aborted === true || openAgentTurn(this.agent) !== turn) return next()
     await this.memoryTurn?.begin(turn, context.signal)
     const assembled = await next()
-    return applyMemoryViewGuidance(assembled, this.memoryTurn?.current?.context.view, this.config.routingGuidance)
+    return applyMemoryViewGuidance(assembled, this.memoryTurn?.current?.context.view, this.config.routingGuidance, this.memoryTurn?.workingRules())
   }
 
   private releaseView(turn?: number): void {
@@ -451,7 +398,12 @@ class MnemonAgentLifecycle {
     const tools = completedToolActivity(sessionTurnEvents(this.agent.session, payload.turn), payload.turn)
     activity.toolCallCount = tools.count
     activity.toolNames = tools.names
-    if (!this.reviewActivity().eligible || !this.reviewAdmitted(payload.turn)) return
+    activity.recoveredFailure = tools.recoveredFailure
+    if (!this.reviewAdmitted(payload.turn)) return
+    if (!this.coordinator.canReview(this.agent)) {
+      this.coordinator.recordReviewSkip(this.agent, 'no-writable-target', payload.turn)
+      return
+    }
     // turn-stopping runs after step/end. Consume only admission captured in
     // this turn's real step; neither this hook nor the idle timer runs tools.
     const admission = this.reviewAdmission
@@ -460,7 +412,7 @@ class MnemonAgentLifecycle {
 
   private async prepareReviewAccess(payload: TurnStoppingPayload & { step: number }): Promise<void> {
     this.recordComposedTurn(payload.turn)
-    if (payload.signal.aborted || !this.restoreWatermark() || !this.idleReviewAllowed() || this.turnActivity.get(payload.turn)?.noMaintenance) return
+    if (payload.signal.aborted || !this.restoreWatermark() || !this.idleReviewAllowed() || !this.coordinator.canReview(this.agent) || this.turnActivity.get(payload.turn)?.noMaintenance) return
     const policy = this.reviewPolicy()
     // A transient failure on the first request must not poison the whole turn.
     // Retry at most once, in a later real step (never on a transport retry or
@@ -541,7 +493,7 @@ class MnemonAgentLifecycle {
   private scheduleIdleReview(turn: number): void {
     this.cancelIdleReview(true)
     if (!this.restoreWatermark() || !this.idleReviewAllowed()) return
-    if (!this.reviewActivity().eligible || !this.reviewAdmitted(turn)) return
+    if (!this.reviewAdmitted(turn)) return
     const epoch = this.reviewEpoch
     const policy = this.reviewPolicy()
     this.idleReviewTimer = setTimeout(() => {
@@ -553,7 +505,7 @@ class MnemonAgentLifecycle {
       }
       if (this.agent.status !== 'idle') return
       const completed = findSessionEvent(this.agent.session, event => event.type === 'turn/end' && eventTurn(event) === turn) !== undefined
-      if (!completed || !this.reviewActivity().eligible || !this.reviewAdmitted(turn)) return
+      if (!completed || !this.reviewAdmitted(turn)) return
       void this.runIdleReview()
     }, Math.min(2_147_483_647, Math.max(this.config.idleReviewMs, (this.lastReviewAttemptAt ?? -Infinity) + this.config.idleReview.minIntervalMs - Date.now())))
   }
@@ -650,11 +602,12 @@ class MnemonAgentLifecycle {
       && this.config.idleReview.enabled && (reserved || this.idleReviewAttempts < this.config.idleReview.maxPerSession)
       && idleReviewBlockReason(this.agent, this.config.idleReview.agentTeams) === undefined
       && this.strategyDrivesIdleReview()
-      && this.coordinator.canReview(this.agent)
   }
 
   private async runIdleReview(): Promise<void> {
     if (!contextIsActive(this.agent.ctx)) return
+    const completed = findSessionEvent(this.agent.session, event => event.type === 'turn/end')
+    if (completed === undefined) return
     const controller = new AbortController()
     const triggeredScore = this.reviewActivity().score
     const epoch = this.reviewEpoch
@@ -694,8 +647,13 @@ class MnemonAgentLifecycle {
           controller.abort(new Error('Automatic idle review admission changed'))
         }
         controller.signal.throwIfAborted()
-      })
+      }, this.lastReviewedSequence, this.reviewCommits,
+      [...this.turnActivity.values()].some(activity => !activity.noMaintenance && activity.explicitCandidate))
       if (controller.signal.aborted) return
+      if (result.delegated) {
+        this.lastReviewedSequence = completed.seq
+        this.reviewCommits.clear()
+      }
       this.lastReviewAt = new Date().toISOString()
       this.lastReviewAction = result.action
       this.lastReviewScore = triggeredScore
@@ -722,6 +680,9 @@ class MnemonAgentLifecycle {
     }
   }
 
+  private lastReviewedSequence: number | undefined
+  private readonly reviewCommits = new Set<string>()
+
   private cancelIdleReview(abortRunning: boolean): void {
     this.reviewEpoch += 1
     if (this.idleReviewTimer !== undefined) clearTimeout(this.idleReviewTimer)
@@ -738,6 +699,7 @@ class MnemonAgentLifecycle {
         toolCallCount: 0,
         toolNames: new Set(),
         explicitCandidate: false,
+        recoveredFailure: false,
         noMaintenance: false,
       }
       this.turnActivity.set(turn, activity)
@@ -760,24 +722,8 @@ class MnemonAgentLifecycle {
   /** Cheap Host signals decide whether an eligible checkpoint is worth an LLM call. */
   private reviewAdmitted(currentTurn: number): boolean {
     if (this.turnActivity.get(currentTurn)?.noMaintenance === true) return false
-    const turns = new Set([...this.turnActivity.entries()]
-      .filter(([, activity]) => !activity.noMaintenance)
-      .map(([turn]) => turn))
-    let totalUserTextLength = 0
-    let explicitCandidate = false
-    let completedNonMemoryTool = false
-    for (const activity of this.turnActivity.values()) {
-      if (activity.noMaintenance) continue
-      totalUserTextLength += activity.userTextLength
-      explicitCandidate ||= activity.explicitCandidate
-      completedNonMemoryTool ||= activity.toolCallCount > 0 && [...activity.toolNames].some(name => !/^mnemon?_/u.test(name))
-    }
-    const characters = this.log.read(this.agent.session).assistantCharacters
-    const assistantTextLength = [...turns].reduce((total, turn) => total + (characters.get(turn) ?? 0), 0)
-    return explicitCandidate
-      || totalUserTextLength >= REVIEW_SUBSTANTIVE_USER_CHARACTERS
-      || assistantTextLength >= REVIEW_SUBSTANTIVE_ASSISTANT_CHARACTERS
-      || completedNonMemoryTool
+    return [...this.turnActivity.values()].some(activity =>
+      !activity.noMaintenance && (activity.explicitCandidate || activity.recoveredFailure))
   }
 
   private reviewActivity(): ReviewActivityScore {
@@ -1554,7 +1500,7 @@ export class MnemonLifecycle {
           if (context.agent !== undefined && context.agent !== agent) return next()
           const turn = openAgentTurn(agent)
           if (turn !== undefined) await memory.begin(turn, context.signal)
-          return applyMemoryViewGuidance(await next(), memory.current?.context.view, this.config.routingGuidance)
+          return applyMemoryViewGuidance(await next(), memory.current?.context.view, this.config.routingGuidance, memory.workingRules())
         }) as never))
         stops.push(agent.ctx.on('agent/pre-step', (async (payload: PreStepPayload, next: () => Promise<HostPreStepDecision>) => {
           const decision = await next()

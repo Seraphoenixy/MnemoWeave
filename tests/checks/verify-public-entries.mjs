@@ -5,9 +5,9 @@ import { existsSync, readFileSync } from 'node:fs'
 import { dirname, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import ts from 'typescript'
-import { localeExport, readPackageLocales } from './package-locales.mjs'
+import { localeExport, readPackageLocales } from '../support/package-locales.mjs'
 
-const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const excluded = new Set(['./client', './package.json'])
 const privateNames = new Set([
   'MemoryRuntime', 'MemoryContributionRegistry', 'MemoryContributionSnapshot',

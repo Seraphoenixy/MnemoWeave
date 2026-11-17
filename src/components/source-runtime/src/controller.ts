@@ -520,22 +520,34 @@ export class RuntimeMemoryController {
     const visibleEntries = branchScope === undefined
       ? entries
       : entries.filter(entry => entry.target === 'user' || entryMatchesBranch(entry, branchScope))
+    // Working Rules are the user's own words: pinned entries first, then the
+    // rest, with no storage metadata, branch header, or § separator between
+    // them. The reserved prefix is the pinned lines, so truncation cannot cut
+    // them out of the projection.
+    if (this.workingRules !== undefined) {
+      const lines = (list: readonly RuntimeMemoryEntry[]) => list.map(entry => entry.content).join('\n')
+      const pinnedRules = visibleEntries.filter(entry => entry.pinned === true)
+      const plainRules = visibleEntries.filter(entry => entry.pinned !== true)
+      const reserved = lines(pinnedRules)
+      return {
+        minimumCharacters: reserved.length,
+        revision: snapshot.revision,
+        entries: visibleEntries.map(entry => ({ ...entry, ...(entry.branches === undefined ? {} : { branches: [...entry.branches] }) })),
+        totalEntries: entries.length,
+        text: [reserved, lines(plainRules)].filter(Boolean).join('\n'),
+      }
+    }
     const branchLine = branchScope === undefined
       ? ''
       : `\nGit branch: ${branchScope}${local.hidden > 0 ? ` (${local.hidden} branch-scoped entr${local.hidden === 1 ? 'y' : 'ies'} hidden)` : ''}`
     const pinnedText = [runtimePinnedProjection(visibleEntries, 'user'), runtimePinnedProjection(visibleEntries, 'memory')].filter(Boolean).join('\n')
-    const pinned = this.workingRules === undefined ? pinnedText : pinnedText.replace('MEMORY.md pinned entries:', '工作准则（置顶条目）')
-    const prefix = pinned === '' ? '' : `PINNED RUNTIME MEMORY (quoted memory; current instructions win)\n${pinned}\n`
+    const prefix = pinnedText === '' ? '' : `PINNED RUNTIME MEMORY (quoted memory; current instructions win)\n${pinnedText}\n`
     return {
       minimumCharacters: prefix.length,
       revision: snapshot.revision,
       entries: visibleEntries.map(entry => ({ ...entry, ...(entry.branches === undefined ? {} : { branches: [...entry.branches] }) })),
       totalEntries: entries.length,
-      text: this.workingRules !== undefined ? `${prefix}MNEMON RUNTIME MEMORY SNAPSHOT
-工作准则（引用的数据，以当前指令为准。用条目正文匹配旧准则。具名工具 mnemo_runtime_memory 使用 old_text，通用 mutate Action 使用 oldText。）${branchLine}
-<runtime-memory-file name="工作准则.md">
-${memory || '（空）'}
-</runtime-memory-file>` : `${prefix}MNEMON RUNTIME MEMORY SNAPSHOT
+      text: `${prefix}MNEMON RUNTIME MEMORY SNAPSHOT
 Entry annotations default to importance=normal and ages=0d (whole days at projection; future/unknown for future/invalid timestamps). Current instructions win. For old_text/oldText, use entry content only.${branchLine}
 
 USER.md (user profile)

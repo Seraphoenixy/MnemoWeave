@@ -3,7 +3,7 @@ import { openAgentTurn } from '../engine/agent-memory-turn.ts'
 import { activityStoreForAgent, recordSubagentActivity } from '../review/activity-history.ts'
 import { sessionEvents } from '../session/session-events.ts'
 import { collectSubagentTokenUsage } from './subagent-token-usage.ts'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import type { HostAgent, HostPreStepDecision, HostSubagentResult, HostSubagentRun, HostSubagentsService, HostUserMessage, ToolDefinition, ToolExecution } from "../support/dsh.ts"
 import type { DocumentMutation, DocumentSearchResult, DocumentSnapshot, DocumentView } from 'dsh-mnemo-weave/source-documents/contracts'
 import type { RuntimeMemoryMutation, RuntimeMemoryMutationResult, RuntimeMemorySnapshot } from 'dsh-mnemo-weave/source-runtime/contracts'
@@ -19,7 +19,7 @@ import { emptyDocumentSnapshot, foreignMachines, parseReconcileResult, pendingOp
 import { DEFAULT_MEMORY_VIEW_BUDGET, type ComposableMemoryView, type MemoryEvidence, type MemoryJsonValue, type MemoryMutationReceipt, type MemoryOperationScope, type MemorySourceManagementRequest, type MemorySourceManagementResult } from '../../core/contracts/index.ts'
 import { agentScope, type MnemonAgentRuntimeSource, type MnemonRuntimeGraph } from '../engine/runtime.ts'
 import type { ComposableMemoryTurn } from '../../core/turns.ts'
-import { idleReviewBlockReason, reviewLayerPolicy, startGuardedChild, startGuardedReview, type ReviewToolHost } from '../review/review-tools.ts'
+import { idleReviewBlockReason, reviewDocumentPolicy, startGuardedChild, startGuardedReview, type ReviewToolHost } from '../review/review-tools.ts'
 import { reviewCheckpoint } from '../review/review-checkpoint.ts'
 import { startWithContinuationTurns } from '../boot/continuation-turn.ts'
 import { assertAgentMemoryIncluded } from '../support/workspace-exclusion.ts'
@@ -87,7 +87,8 @@ const WRITE_TOOLS: MemoryToolName[] = [
 const AUTONOMOUS_WRITE_TOOLS: MemoryToolName[] = [...READ_TOOLS, 'mnemo_remember', 'mnemo_link']
 const EXPLICIT_WRITE_TOOLS = WRITE_TOOLS
 const DOCUMENT_READ_TOOLS: MemoryToolName[] = ['mnemo_document_search']
-const REVIEW_TOOLS: MemoryToolName[] = [...DOCUMENT_READ_TOOLS, 'mnemo_runtime_memory', 'mnemo_document_manage']
+const REVIEW_READ_TOOLS: ReadonlySet<string> = new Set([...DOCUMENT_READ_TOOLS, 'mnemo_memory_bodies', 'mnemo_recall'])
+const REVIEW_TOOLS: MemoryToolName[] = [...DOCUMENT_READ_TOOLS, 'mnemo_memory_bodies', 'mnemo_recall', 'mnemo_remember', 'mnemo_runtime_memory', 'mnemo_document_manage']
 const RESULT_TOOL_NAME = 'mnemo_subagent_result'
 /** How many finished delegated children stay refused memory tools if DSH resumes one. */
 const FINISHED_CHILDREN = 1_000
@@ -229,6 +230,28 @@ function targetProblem(spaces: MemorySpaceCatalog['items'], target: string, acti
 }
 
 /** Whether a write receipt put the memory in its space, or handed it to a Provider that confirms later. */
+function reviewMutationKey(name: string | undefined, args: unknown): string | undefined {
+  if (!isTool(name, 'mnemo_remember', 'mnemo_runtime_memory', 'mnemo_document_manage')) return undefined
+  const input = optionalObject(args)
+  if (input === undefined) return undefined
+  const fields = ['action', 'id', 'title', 'old_text', 'content', 'description', 'sourcePaths', 'branches', 'replacesId']
+  const payload = fields.map(field => {
+    const value = input[field]
+    return typeof value === 'string' ? value.trim() : value ?? null
+  })
+  return createHash('sha256').update(JSON.stringify([name, payload])).digest('hex')
+}
+
+function rememberedSpaces(receipts: readonly CapturedToolReceipt[], committedOnly: boolean): string[] {
+  return [...new Set(receipts.flatMap(receipt => {
+    if (!isTool(receipt.name, 'mnemo_remember')) return []
+    const value = optionalObject(receipt.value)
+    if (typeof value?.memoryBodyId !== 'string') return []
+    const saved = committedOnly ? mutationResultCommitted(value) : writeLanded(value)
+    return saved ? [value.memoryBodyId] : []
+  }))]
+}
+
 function writeLanded(value: Record<string, unknown>): boolean {
   if (mutationResultCommitted(value)) return true
   const state = [value.action, value.status, value.state].find((entry): entry is string => typeof entry === 'string')?.trim().toLocaleLowerCase()
@@ -427,9 +450,38 @@ export class MnemonSubagentCoordinator {
 
   /** Both model aliases and generic Routes execute the selected Strategy, not Host-local quotas. */
   async documentQuery(parent: HostAgent, input: unknown, signal: AbortSignal): Promise<unknown> {
+    const requested = optionalObject(input)
+    const workspaceId = typeof requested?.workspaceId === 'string' ? requested.workspaceId.trim() : ''
+    const origin = this.turnAuthority(parent, true)
+    if (origin === undefined || this.explicitDocumentSearches.has(origin.context)) throw new Error('Only one explicit workspace document search is allowed per turn.')
+    if (workspaceId !== '') {
+      assertAgentMemoryIncluded(this.runtimeSource, parent)
+      if (isSubagent(parent)) throw new Error('A delegated task can only search documents in its own workspace.')
+      if (this.localDocumentSearches.has(origin.context)) throw new Error('This turn already searched its current workspace.')
+      const view = origin.context.view
+      const instances = origin.graph.memoryComposition.generation(view.runtimeGeneration)?.sourceInstances()
+      if (!view.routes.some(route => route.sourceRouteId === 'search' && instances?.some(instance =>
+        instance.sourceInstanceKey === route.sourceInstanceKey && instance.sourceTypeId === 'documents'))) {
+        throw new Error('Document search is unavailable in this turn’s View.')
+      }
+      const target = this.runtimeSource.route?.({ workspaceId })
+      if (target?.selectedWorkspace === undefined || target.participation.excluded) throw new Error('The selected workspace is unavailable for memory search.')
+      assertParticipation(target.graph.config, 'documents', 'search', 'automatic')
+      this.explicitDocumentSearches.add(origin.context)
+      const scope = { storage: target.graph.config.storageScope, workspaceId: target.selectedWorkspace.path }
+      const result = await target.graph.source('documents', scope).read<DocumentSearchResult>('search', {
+        query: requested?.query ?? '', includeArchived: requested?.includeArchived === true,
+        limit: Math.min(4, Math.max(1, Number(requested?.limit) || 4)), currentWorkspaceOnly: true,
+      }, signal)
+      return { ...result, workspaceId, results: result.results.map(({ content, ...document }) => ({ ...document, content: content.slice(0, 2_600) })) }
+    }
+    this.localDocumentSearches.add(origin.context)
     const evidence = await this.readRoute(parent, 'documents', 'search', input, signal, true)
     return evidence.output ?? evidence
   }
+
+  private readonly explicitDocumentSearches = new WeakSet<ComposableMemoryTurn>()
+  private readonly localDocumentSearches = new WeakSet<ComposableMemoryTurn>()
 
   async recall(parent: HostAgent, request: SearchRequest, signal: AbortSignal, options: { requirePinnedView?: boolean } = {}): Promise<RecallResult> {
     const evidence = await this.readRoute(parent, 'memory-spaces', 'recall', request, signal, options.requirePinnedView === true)
@@ -766,7 +818,7 @@ export class MnemonSubagentCoordinator {
   private documentWorkflow(): DocumentWorkflowHost {
     return {
       runtimeSource: this.runtimeSource, counters: this.counters, turnAuthority: this.turnAuthority.bind(this),
-      sourceFor: this.sourceFor.bind(this), writableSourceFor: this.writableSourceFor.bind(this), delegate: this.delegate.bind(this),
+      sourceFor: this.sourceFor.bind(this), writableSourceFor: this.writableSourceFor.bind(this),
     }
   }
 
@@ -774,6 +826,23 @@ export class MnemonSubagentCoordinator {
    * One tool-less structured run for skill evolution: a review, a draft, a
    * backtest step or a case derivation. The child sees only the prompt.
    */
+  async skillEvidence(parent: HostAgent, topic: string, signal: AbortSignal): Promise<unknown> {
+    const graph = this.runtimeSource.forAgent(parent)
+    const config = graph.config
+    const readable = (type: string) => allowsParticipation(config, type, 'read', 'automatic')
+    const tasks = await Promise.allSettled([
+      readable('runtime') ? this.sourceFor(parent, 'runtime').read<RuntimeMemorySnapshot>('snapshot', null, signal)
+        .then(snapshot => snapshot.entries.filter(entry => !entry.branches?.length).slice(0, 30).map(entry => entry.content.slice(0, 500))) : undefined,
+      topic !== '' && readable('documents') ? this.readRoute(parent, 'documents', 'search', { query: topic, limit: 4 }, signal, false)
+        .then(evidence => evidence.items.map(item => ({ id: item.id, text: item.text.slice(0, 1_200) }))) : undefined,
+      topic !== '' && readable('memory-spaces') ? this.recall(parent, { query: topic, limit: 5 }, signal)
+        .then(evidence => evidence.results.map(item => ({ id: item.id, text: item.content.slice(0, 800) }))) : undefined,
+    ])
+    signal.throwIfAborted()
+    const values = tasks.map(result => result.status === 'fulfilled' ? result.value : undefined)
+    return { workingRules: values[0], documents: values[1], memories: values[2] }
+  }
+
   async skillTask(parent: HostAgent, label: string, prompt: string, schema: Record<string, unknown>, persona: string, signal: AbortSignal, route?: ModelRoute, maxTokens?: number): Promise<{ provider: string; runId: string; structured: unknown }> {
     const { provider, runId, result } = await this.delegate(parent, 'skill', label, prompt, [], schema, signal, 'spawn', persona, undefined, undefined, route, undefined, maxTokens)
     return { provider, runId, structured: result.structured }
@@ -812,18 +881,18 @@ export class MnemonSubagentCoordinator {
 ${naturalRequest(request, target === undefined ? REQUEST_LABELS : TARGETED_WRITE_LABELS)}`
     const persona = operation === 'supervised-writeback' ? SUPERVISED_WRITE_PERSONA : autonomous ? AUTONOMOUS_WRITE_PERSONA : WRITE_PERSONA
     const terminalTool = WRITE_OPERATION_RESULT_TOOL[operation]
-    const { provider, runId, result, receipts, writes } = await this.delegate(
+    const { provider, runId, result, receipts, writes } = await this.runMemoryWriter(
       parent,
       'write',
       `Mnemon ${operation}`,
       prompt,
       autonomous ? AUTONOMOUS_WRITE_TOOLS : EXPLICIT_WRITE_TOOLS,
-      WRITE_SCHEMA,
       signal,
       'spawn',
       persona,
-      terminalTool === undefined ? undefined : { terminalTools: [terminalTool] },
+      terminalTool === undefined ? [] : [terminalTool],
       inactive === undefined ? undefined : spaceWriteGuard(target, inactive),
+      undefined, undefined, operation === 'supervised-writeback' ? 'manual-save' : undefined,
     )
     const value = object(result.structured)
     const observed = terminalTool === undefined ? undefined : recoverStructuredResult({ terminalTools: [terminalTool] }, receipts)
@@ -837,8 +906,7 @@ ${naturalRequest(request, target === undefined ? REQUEST_LABELS : TARGETED_WRITE
       const entry = optionalObject(receipt.value)
       return typeof entry?.memoryBodyId === 'string' ? entry.memoryBodyId : undefined
     }
-    const landed = [...new Set(writes.filter(receipt => isTool(receipt.name, 'mnemo_remember') && writeLanded(optionalObject(receipt.value) ?? {}))
-      .flatMap(receipt => spaceOf(receipt) ?? []))]
+    const landed = rememberedSpaces(writes, false)
     const activated = [...new Set(writes.filter(receipt => mutationResultCommitted(receipt.value)).flatMap(receipt => spaceOf(receipt) ?? [])
       .filter(id => inactive!.has(id)))]
     // Read from the same write receipts, so a vector-less write inside a failed Code Mode program counts too (#388).
@@ -868,7 +936,7 @@ ${naturalRequest(request, target === undefined ? REQUEST_LABELS : TARGETED_WRITE
 
   /** Cheap scheduler admission: no model task when every review write target is unavailable. */
   canReview(parent: HostAgent): boolean {
-    return this.reviewTools(parent).some(tool => tool !== 'mnemo_document_search')
+    return this.reviewTools(parent).some(tool => !REVIEW_READ_TOOLS.has(tool))
   }
 
   /** Automatic review admission; explicit user-requested reviews are unchanged. */
@@ -889,21 +957,34 @@ ${naturalRequest(request, target === undefined ? REQUEST_LABELS : TARGETED_WRITE
     const config = this.runtimeSource.config
     if (!config.writeEnabled) return []
     return this.availableTools(parent, REVIEW_TOOLS).filter(tool => {
-      if (tool === 'mnemo_document_search') return true
+      if (REVIEW_READ_TOOLS.has(tool)) return allowsParticipation(config, memoryTool(tool)!.sourceTypeId!, 'read', 'automatic')
       const type = memoryTool(tool)!.sourceTypeId!
       return (tool !== 'mnemo_runtime_memory' || config.idleReview.runtimeMemory) && allowsParticipation(config, type, 'write', 'automatic')
     })
   }
 
-  async review(parent: HostAgent, signal: AbortSignal, admission?: () => void): Promise<DelegatedWriteResult | { delegated: false; action: 'skipped'; summary: string; documentIds: string[] }> {
+  recordReviewSkip(parent: HostAgent, reason: 'no-writable-target' | 'agent-team' | 'fork-unavailable', turn = openAgentTurn(parent)): void {
+    try {
+      const graph = this.runtimeSource.forAgent(parent)
+      recordSubagentActivity(activityStoreForAgent(graph.directory, parent, graph.workspaceRoot), parent, turn, randomUUID(), undefined, {
+        operation: 'review', trigger: 'automatic-distillation', outcome: 'skipped', skipReason: reason, durationMs: 0, committedWrites: 0,
+      })
+    } catch { console.error('MnemoWeave could not collect skipped distillation activity') }
+  }
+
+  async review(parent: HostAgent, signal: AbortSignal, admission?: () => void, afterSequence?: number, committed = new Set<string>(), explicitCandidate = true): Promise<DelegatedWriteResult | { delegated: false; action: 'skipped'; summary: string; documentIds: string[] }> {
     const config = this.runtimeSource.config.idleReview
-    if (idleReviewBlockReason(parent, config.agentTeams) !== undefined) return { delegated: false, action: 'skipped', summary: 'Idle review is paused by the Agent Teams compatibility setting.', documentIds: [] }
-    const skipped = { delegated: false as const, action: 'skipped' as const, summary: 'Idle review has no applicable writable Source target.', documentIds: [] }
-    if (!this.canReview(parent)) return skipped
+    const skip = (reason: Parameters<MnemonSubagentCoordinator['recordReviewSkip']>[1], summary: string) => {
+      this.recordReviewSkip(parent, reason)
+      return { delegated: false as const, action: 'skipped' as const, summary, documentIds: [] }
+    }
+    const noTarget = () => skip('no-writable-target', 'Session distillation has no applicable writable Source target.')
+    if (idleReviewBlockReason(parent, config.agentTeams) !== undefined) return skip('agent-team', 'Session distillation is paused by the Agent Teams compatibility setting.')
+    if (!this.canReview(parent)) return noTarget()
     let preferred = config.provider
     if (preferred === 'fork') {
       try { this.provider('fork') } catch (error) {
-        if (config.fallback === 'skip') return { delegated: false, action: 'skipped', summary: 'Fork provider unavailable; idle review skipped.', documentIds: [] }
+        if (config.fallback === 'skip') return skip('fork-unavailable', 'Fork provider unavailable.')
         preferred = 'spawn'
       }
     }
@@ -912,19 +993,34 @@ ${naturalRequest(request, target === undefined ? REQUEST_LABELS : TARGETED_WRITE
       if (admission !== undefined) { execution.signal.throwIfAborted(); admission() }
       const view = execution.context.view
       const instances = execution.graph.memoryComposition.generation(view.runtimeGeneration)!.sourceInstances()
-      const tools = this.reviewTools(parent).filter(tool => {
-        if (tool === 'mnemo_document_search') return view.routes.some(route => route.sourceRouteId === 'search'
-          && instances.some(instance => instance.sourceInstanceKey === route.sourceInstanceKey && instance.sourceTypeId === 'documents'))
+      let tools = this.reviewTools(parent).filter(tool => {
+        if (!explicitCandidate && (tool === 'mnemo_runtime_memory' || tool === 'mnemo_document_manage')) return false
         const entry = memoryTool(tool)!
+        if (REVIEW_READ_TOOLS.has(tool)) return view.routes.some(route => route.sourceRouteId === entry.operation
+          && instances.some(instance => instance.sourceInstanceKey === route.sourceInstanceKey && instance.sourceTypeId === entry.sourceTypeId))
         return view.actionOffers.some(offer => offer.authority === undefined && offer.sourceActionId === entry.operation
           && instances.some(instance => instance.sourceInstanceKey === offer.sourceInstanceKey && instance.sourceTypeId === entry.sourceTypeId))
       })
-      const writers = tools.filter(tool => tool !== 'mnemo_document_search')
-      if (writers.length === 0) return skipped
-      const prompt = preferred === 'fork' ? 'Extract and save durable workspace knowledge or an explicit standing rule from the inherited checkpoint.' : reviewCheckpoint(parent.session, config.maxContextChars)
+      const inactive = new Set<string>()
+      if (tools.includes('mnemo_remember')) {
+        const spaces = await this.spaceDirectory(parent, execution.signal)
+        for (const space of spaces) if (!space.active) inactive.add(space.id)
+        if (!spaces.some(space => space.active && space.providerEnabled !== false && space.provider.capabilities.remember)) {
+          tools = tools.filter(tool => tool !== 'mnemo_remember')
+        }
+      }
+      const writers = tools.filter(tool => !REVIEW_READ_TOOLS.has(tool))
+      if (writers.length === 0) return noTarget()
+      const prompt = reviewCheckpoint(parent.session, config.maxContextChars, afterSequence)
       const base = reviewPersona(tools)
-      const persona = preferred === 'fork' ? base : base.replaceAll('inherited', 'supplied bounded')
-      const { provider, runId, result } = await this.delegate(parent, 'review', 'Mnemon idle checkpoint review', prompt, tools, WRITE_SCHEMA, execution.signal, preferred, persona, { terminalTools: writers }, undefined, undefined, admission)
+      const persona = base.replaceAll('inherited', 'supplied bounded')
+      const spaceGuard = spaceWriteGuard(undefined, inactive)
+      const guard = (tool: ToolExecution) => {
+        const key = reviewMutationKey(tool.name, tool.arguments)
+        return key !== undefined && committed.has(key) ? 'This mutation was already committed. Continue with any remaining independent candidates.' : spaceGuard(tool)
+      }
+      const { provider, runId, result } = await this.runMemoryWriter(parent, 'review', 'Mnemon session distillation', prompt,
+        tools, execution.signal, preferred, persona, writers, guard, admission, committed, 'automatic-distillation')
       const value = object(result.structured)
       return {
         delegated: true,
@@ -936,6 +1032,13 @@ ${naturalRequest(request, target === undefined ? REQUEST_LABELS : TARGETED_WRITE
         documentIds: strings(value.documentIds),
       }
     } finally { execution.release() }
+  }
+
+  private runMemoryWriter(parent: HostAgent, trigger: 'write' | 'review', label: string, prompt: string, tools: string[],
+    signal: AbortSignal, provider: 'spawn' | 'fork', persona: string, terminalTools: readonly string[],
+    guard?: (execution: ToolExecution) => string | undefined, admission?: () => void, committed?: Set<string>, activityTrigger?: 'manual-save' | 'automatic-distillation') {
+    return this.delegate(parent, trigger, label, prompt, tools, WRITE_SCHEMA, signal, provider, persona,
+      terminalTools.length === 0 ? undefined : { terminalTools }, guard, undefined, admission, undefined, committed, activityTrigger)
   }
 
   private async delegate(
@@ -953,6 +1056,8 @@ ${naturalRequest(request, target === undefined ? REQUEST_LABELS : TARGETED_WRITE
     route?: ModelRoute,
     admission?: () => void,
     skillMaxTokens?: number,
+    reviewCommits?: Set<string>,
+    activityTrigger?: 'manual-save' | 'automatic-distillation',
   ): Promise<{ provider: string; runId: string; result: HostSubagentResult; receipts: CapturedToolReceipt[]; writes: CapturedToolReceipt[] }> {
     if (this.disposed) throw new Error('dsh-mnemo-weave subagent coordinator is disposed')
     assertAgentMemoryIncluded(this.runtimeSource, parent)
@@ -998,6 +1103,10 @@ ${naturalRequest(request, target === undefined ? REQUEST_LABELS : TARGETED_WRITE
         // if its outer Code Mode execution or the reviewer later fails/aborts.
         if (operation === 'review' && execution.agent?.id === reviewChildId && execution.name !== undefined
           && recoverableTools.has(execution.name) && result.isError !== true && Object.hasOwn(result, 'value')) {
+          if (mutationResultCommitted(result.value)) {
+            const key = reviewMutationKey(execution.name, execution.arguments)
+            if (key !== undefined) reviewCommits?.add(key)
+          }
           reviewReceipts.push({ agentId: execution.agent!.id, name: execution.name, arguments: execution.arguments, value: result.value })
         }
         // A Memory Space write holds once its Source answers, whatever the Code Mode program
@@ -1093,7 +1202,7 @@ This is the only completion channel for this run. Do not finish with a plain-tex
         }, host)
       })
       run = operation === 'review'
-        ? await startGuardedReview(this.resultRuntime, parent, [...tools, resultToolName], start, child => { reviewChildId = child.id }, reviewLayerPolicy())
+        ? await startGuardedReview(this.resultRuntime, parent, [...tools, resultToolName], start, child => { reviewChildId = child.id }, execution => reviewDocumentPolicy(execution) ?? guard?.(execution))
         // A DSH without Agent ownership or scoped tool guards runs the child as before.
         : guard !== undefined ? await startGuardedChild(this.resultRuntime, parent, start, guard, { purpose: operation, optional: true })
         : await start()
@@ -1121,7 +1230,7 @@ This is the only completion channel for this run. Do not finish with a plain-tex
         structured = {
           ...value,
           action: last?.action ?? 'skipped',
-          memoryBodyIds: [],
+          memoryBodyIds: rememberedSpaces(reviewReceipts, true),
           documentIds: [...new Set(receipts.flatMap(receipt => receipt.documentId === undefined ? [] : [receipt.documentId]))],
         }
       }
@@ -1168,9 +1277,13 @@ This is the only completion channel for this run. Do not finish with a plain-tex
       try {
         const receipts = operation === 'review' ? reviewReceipts : operation === 'write' ? writeReceipts : committedReceipts
         const runId = run?.id ?? reviewChildId
+        const skippedWrite = activityTrigger !== undefined && optionalObject(completed?.result.structured)?.action === 'skipped'
+          && cleanupFailure === undefined && !receipts.some(receipt => receipt.agentId === runId && mutationResultCommitted(receipt.value))
         recordSubagentActivity(activityStoreForAgent(parentGraph.directory, parent, parentGraph.workspaceRoot), parent, parentTurn, requestId, child?.id ?? run?.id, {
           operation, durationMs: elapsed,
-          outcome: failure === undefined && cleanupFailure === undefined && completed !== undefined ? 'completed' : signal.aborted ? 'cancelled' : 'failed',
+          ...(activityTrigger === undefined ? {} : { trigger: activityTrigger }),
+          outcome: failure === undefined && cleanupFailure === undefined && completed !== undefined ? (skippedWrite ? 'skipped' : 'completed') : signal.aborted ? 'cancelled' : 'failed',
+          ...(skippedWrite ? { skipReason: 'no-qualifying-write' } : {}),
           committedWrites: receipts.filter(receipt => receipt.agentId === runId
             && memoryTool(receipt.name)?.kind === 'write' && mutationResultCommitted(receipt.value)).length,
           ...(usage === undefined ? {} : { usage }),

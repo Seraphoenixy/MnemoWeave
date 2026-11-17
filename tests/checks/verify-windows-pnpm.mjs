@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { findMnemonCommand, resolveMnemonInvocation } from '../src/components/source-memory-spaces/src/native-cli.ts'
+import { findMnemonCommand, resolveMnemonInvocation } from '../../src/components/source-memory-spaces/src/native-cli.ts'
 
 // Install synthetic packages with the actual pnpm used by CI. This exercises
 // generated Windows shims and virtual-store links without a vendor account,

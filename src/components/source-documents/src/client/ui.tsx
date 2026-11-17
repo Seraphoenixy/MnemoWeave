@@ -16,7 +16,8 @@ export function documentsPageClient(management: MnemonSourceManagementClient): D
     mutateDocument: input => input.action === 'delete'
       ? client.mutate('delete', { id: input.id, ...(input.fileRevision === undefined ? {} : { fileRevision: input.fileRevision }) }, true)
       : client.canAssist('mutate') ? client.assist('mutate', { ...input }, true) : client.mutate('mutate', { ...input }, true),
-    archiveDocument: id => client.canAssist('archive') ? client.assist('archive', { id }, true) : client.mutate('archive', { id }, true),
+    archiveDocument: id => client.mutate('archive', { id }, true),
+    claimDocument: id => client.mutate('claim', { id }, true),
     // Keep the revision shown by the confirmation, even if another read has
     // refreshed the shared page client while the dialog was open.
     deleteDocument: async (id, expectedRevision, fileRevision) => (await management.mutate('delete', { id, fileRevision }, { confirmed: true, expectedRevision })).value as unknown as DocumentMutationResult,

@@ -55,6 +55,12 @@ function normalizeLine(value: string | undefined, field: string, maximum: number
   return normalized
 }
 
+function createDocumentContent(content: string, paths: readonly string[]): string {
+  if (content.trim() !== '') return normalizeContent(content, true)!
+  if (paths.length === 0) throw new Error('A workspace reference requires at least one source path.')
+  return normalizeContent(paths.map(path => '- ' + JSON.stringify(path)).join('\n'), true)!
+}
+
 function normalizeContent(value: string | undefined, required: boolean): string | undefined {
   if (value === undefined && !required) return undefined
   const normalized = value?.replace(/\0/gu, '').trim() ?? ''
@@ -227,13 +233,14 @@ export class DocumentController {
       if (request.action === 'create') {
         const now = this.now().toISOString()
         const title = normalizeLine(request.title, 'document title', 160, true)
-        const content = normalizeContent(request.content, true)!
+        const sourcePaths = this.normalizeSourcePaths(request.sourcePaths ?? [])
+        const content = createDocumentContent(request.content, sourcePaths)
         const id = crypto.randomUUID()
         const record: DocumentRecord = {
           id, title,
           description: normalizeLine(request.description, 'document description', 600, false),
           status: 'active', filename: `${slug(title)}-${id.slice(0, 8)}.md`, relativePath: '', workspaceRoot: this.workspaceRoot,
-          sourcePaths: this.normalizeSourcePaths(request.sourcePaths ?? []), sessionIds: unique(request.sessionIds ?? [], 20),
+          sourcePaths, sessionIds: unique(request.sessionIds ?? [], 20),
           createdAt: now, updatedAt: now, lastAccessedAt: now, revision: 1,
           contentHash: hash(content), sizeBytes: 0, memoryBodyIds: [],
         }
@@ -281,6 +288,10 @@ export class DocumentController {
           const title = view.title.normalize('NFKC').toLocaleLowerCase()
           const description = view.description.normalize('NFKC').toLocaleLowerCase()
           const content = view.content.normalize('NFKC').toLocaleLowerCase()
+          const path = view.relativePath.normalize('NFKC').toLocaleLowerCase().replace(/^\.mnemon\//u, '')
+          const exactReference = includeArchived && normalized !== '' && (
+            path === normalized.replace(/^\.mnemon\//u, '') || view.contentHash === normalized)
+          if (exactReference) return { result: { ...view, score: 30 }, tokenMatches: requiredTokenMatches }
           let score = normalized === '' ? 1 : title.includes(normalized) ? 12 : description.includes(normalized) ? 7 : content.includes(normalized) ? 4 : 0
           let tokenMatches = 0
           for (const token of tokens) {
@@ -317,6 +328,35 @@ export class DocumentController {
 
   deleteDocument(id: string, expectedRevision: string, fileRevision: string): Promise<DocumentMutationResult> {
     return this.mutate({ action: 'delete', id, fileRevision }, expectedRevision)
+  }
+
+  claimDocument(id: string, expectedRevision: string): Promise<DocumentMutationResult> {
+    const operation = this.queue.then(() => this.withLock((): DocumentMutationResult => {
+      const index = this.readIndex()
+      if (this.revisionOf(index) !== expectedRevision) throw new DocumentConflictError()
+      const current = this.requireDocument(index, id)
+      if (current.workspaceRoot !== undefined) throw new Error('This document already belongs to a workspace.')
+      const content = this.readBody(current)
+      const updated: DocumentRecord = {
+        ...current, workspaceRoot: this.workspaceRoot, revision: current.revision + 1, updatedAt: this.now().toISOString(),
+      }
+      const rendered = renderDocument(updated, content)
+      updated.sizeBytes = Buffer.byteLength(rendered, 'utf8')
+      const path = this.pathFor(current)
+      const original = readFileSync(path)
+      this.atomicWrite(path, rendered)
+      try {
+        index.documents = index.documents.map(record => record.id === id ? updated : record)
+        this.persistIndex(index)
+      } catch (error) {
+        this.atomicWrite(path, original)
+        throw error
+      }
+      this.excerpts.delete(path)
+      return { success: true, action: 'updated', document: { ...updated, content, fileRevision: hash(rendered) }, snapshot: this.snapshotUnlocked(index) }
+    }))
+    this.queue = operation.catch(() => undefined)
+    return operation
   }
 
   archive(id: string, expectedRevision: number, details: { summary: string; memoryBodyIds: string[] }): Promise<DocumentMutationResult> {
@@ -393,14 +433,15 @@ export class DocumentController {
     if (request.action === 'create') {
       const title = normalizeLine(request.title, 'document title', 160, true)
       const description = normalizeLine(request.description, 'document description', 600, false)
-      const content = normalizeContent(request.content, true)!
+      const sourcePaths = this.normalizeSourcePaths(request.sourcePaths ?? [])
+      const content = createDocumentContent(request.content, sourcePaths)
       const id = crypto.randomUUID()
       const filename = `${slug(title)}-${id.slice(0, 8)}.md`
       const record: DocumentRecord = {
         id, title, description, status: 'active', filename,
         relativePath: this.relativeManagedPath('active', filename),
         workspaceRoot: this.workspaceRoot,
-        sourcePaths: this.normalizeSourcePaths(request.sourcePaths ?? []),
+        sourcePaths,
         sessionIds: unique(request.sessionIds ?? [], 20),
         createdAt: now, updatedAt: now, lastAccessedAt: now, revision: 1,
         contentHash: hash(content), sizeBytes: 0, memoryBodyIds: [],

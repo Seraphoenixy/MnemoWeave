@@ -2,7 +2,7 @@ node_modules/
 coverage/
 /dist/
 /plugins/*/dist/
-/scripts/fixtures/plugin-consumer/dist/
+/tests/fixtures/plugin-consumer/dist/
 # Build output from older checkouts.
 /lib/
 /plugins/*/lib/

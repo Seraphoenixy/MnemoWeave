@@ -15,6 +15,16 @@ export class GlobalSyncConflict extends SnapshotConflict {
   constructor(token: string, readonly target: string) { super(token) }
 }
 
+/** Counts never come out as `1 ranges`; the record is read by a person. */
+function plural(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? '' : 's'}`
+}
+
+/** One line per idle group instead of one per scope, so the lines that matter stay in the record. */
+function logUnchanged(label: string, noun: string, count: number, elapsedMs: number): void {
+  diagnostics.info('sync', `${label}: ${plural(count, noun)} unchanged`, `${elapsedMs} ms`)
+}
+
 export async function syncAllMemory(
   runtime: LiveMnemonRuntime,
   endpoint: SyncEndpoint,
@@ -37,18 +47,26 @@ export async function syncAllMemory(
   }
 
   const rules = openWorkingRules(root.directory)
-  const snapshots = new Map<string, { target: string; replica: Pick<SnapshotSync, 'sync'>; afterPull?: () => Promise<void> }>()
+  const snapshots = new Map<string, { target: string; replica: Pick<SnapshotSync, 'sync'>; afterPull?: () => Promise<void>; merge?: boolean }>()
   snapshots.set('working-rules', { target: 'working-rules', replica: rules.connectSync({ ...remote, scope: 'working-rules' }) })
   const syncedRoots = new Set<string>()
-  const addPack = (scope: string, target: string, graph: typeof root) => {
+  const addPack = (scope: string, target: string, graph: typeof root, merge: boolean) => {
     const directory = resolve(graph.directory)
     if (syncedRoots.has(directory)) return
     syncedRoots.add(directory)
     snapshots.set(scope, {
       target,
+      ...(merge ? { merge } : {}),
       replica: localSnapshotSync({ ...remote, scope }, directory, {
         capture: () => graph.packs.captureWorkspaceSync(),
         apply: (bytes, matches) => graph.packs.replaceWorkspaceSync(bytes, matches),
+        // A workspace scope is the same workspace on both machines under
+        // different local paths, so the two copies are unions rather than
+        // alternatives. The global scope keeps whole-snapshot replacement: one
+        // store shared by every workspace has no per-machine identity to map.
+        ...(merge ? {
+          merge: (bytes, matches) => graph.packs.mergeWorkspaceSync(bytes, matches, graph.workspaceRoot),
+        } : {}),
         assemble: entries => graph.packs.assembleWorkspaceSync(entries),
       }),
       afterPull: async () => {
@@ -58,8 +76,8 @@ export async function syncAllMemory(
       },
     })
   }
-  if (!workspaceStorage) addPack('global-memory', 'global-memory', root)
-  else for (const [name, project] of projects) addPack('workspace-' + name, project.title, project.graph)
+  if (!workspaceStorage) addPack('global-memory', 'global-memory', root, false)
+  else for (const [name, project] of projects) addPack('workspace-' + name, project.title, project.graph, true)
 
   // Bind the confirmation to this server and stream before submitting the existing
   // per-snapshot token, which fences both local and remote edits.
@@ -76,6 +94,10 @@ export async function syncAllMemory(
 
   let pulled = 0
   let pushed = 0
+  // A scope that copied nothing is counted, not logged: one line per unchanged
+  // scope would push the lines that matter out of the Host's 200-line record.
+  let idleRanges = 0
+  let idleRangeMs = 0
   const ordered = [...snapshots].sort(([a], [b]) => Number(b === confirmed?.[0]) - Number(a === confirmed?.[0]))
   for (const [scope, entry] of ordered) {
     const prefix = prefixes.get(scope)!
@@ -86,15 +108,23 @@ export async function syncAllMemory(
     try {
       const result = await entry.replica.sync({
         ...resolution,
+        ...(entry.merge === true ? { merge: true } : {}),
         ...(options.signal === undefined ? {} : { signal: options.signal }),
         ...(run === undefined ? {} : { transfer: progress => run.transfer(progress.done, progress.total) }),
       })
-      if (result.action === 'pulled') {
+      if (result.action === 'pulled' || result.action === 'merged') {
         pulled++
+        // A merge changes the local store either way, so a pulled Memory Spaces
+        // layer is reloaded after it as well.
         await entry.afterPull?.()
       }
-      if (result.action === 'pushed') pushed++
-      diagnostics.info('sync', `${entry.target}: ${result.action}`, `${Date.now() - started} ms`)
+      if (result.action === 'pushed' || result.action === 'merged') pushed++
+      if (result.action === 'unchanged') {
+        idleRanges++
+        idleRangeMs += Date.now() - started
+      } else {
+        diagnostics.info('sync', `${entry.target}: ${result.action}`, `${Date.now() - started} ms`)
+      }
     } catch (error) {
       // Name the scope that failed; the run's own failure line says why.
       diagnostics.failure('sync', `${entry.target}: failed`, error)
@@ -104,6 +134,12 @@ export async function syncAllMemory(
   }
   let activityPulled = 0
   let activityPushed = 0
+  // Activity lines name the workspace a scope belongs to rather than repeating
+  // its hashed key, which is all a scope carries.
+  const activityNames = new Map([[WORKING_RULES_ACTIVITY_SCOPE, 'working rules'] as const, ...[...projects].map(([name, project]) =>
+    [activityScope(name), project.title] as const)])
+  let idleActivities = 0
+  let idleActivityMs = 0
   for (const [scope, store] of activities) {
     run?.step('activity')
     const started = Date.now()
@@ -111,11 +147,18 @@ export async function syncAllMemory(
       const result = await connectActivitySync({ ...remote, scope }, store)(options.signal)
       activityPulled += result.pulled
       activityPushed += result.pushed
-      diagnostics.info('sync', `${scope}: pulled ${result.pulled}, pushed ${result.pushed}`, `${Date.now() - started} ms`)
+      if (result.pulled === 0 && result.pushed === 0) {
+        idleActivities++
+        idleActivityMs += Date.now() - started
+      } else {
+        diagnostics.info('sync', `${activityNames.get(scope) ?? scope}: pulled ${result.pulled}, pushed ${result.pushed}`, `${Date.now() - started} ms`)
+      }
     } catch (error) {
-      diagnostics.failure('sync', `${scope}: failed`, error)
+      diagnostics.failure('sync', `${activityNames.get(scope) ?? scope}: failed`, error)
       throw error
     }
   }
+  if (idleRanges > 0) logUnchanged('memory', 'range', idleRanges, idleRangeMs)
+  if (idleActivities > 0) logUnchanged('activity', 'scope', idleActivities, idleActivityMs)
   return { pulled, pushed, activityPulled, activityPushed }
 }

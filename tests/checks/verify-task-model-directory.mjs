@@ -4,10 +4,10 @@ import { realpathSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
 import { performance } from 'node:perf_hooks'
 import assert from 'node:assert/strict'
-import { MnemonLifecycle } from '../src/host/boot/lifecycle.ts'
-import { resolveConfig } from '../src/host/configuration/config.ts'
+import { MnemonLifecycle } from '../../src/host/boot/lifecycle.ts'
+import { resolveConfig } from '../../src/host/configuration/config.ts'
 
-if (!process.argv[2]) throw new Error('Usage: node --experimental-transform-types scripts/verify-task-model-directory.mjs DSH_PACKAGE_JSON [OUTPUT_JSON]')
+if (!process.argv[2]) throw new Error('Usage: node --experimental-transform-types tests/checks/verify-task-model-directory.mjs DSH_PACKAGE_JSON [OUTPUT_JSON]')
 const host = createRequire(realpathSync(process.argv[2]))
 const { Context } = await import(host.resolve('@deepseek-ai/cordis'))
 const { default: LlmRuntime } = await import(host.resolve('@deepseek-ai/dsh-llm'))

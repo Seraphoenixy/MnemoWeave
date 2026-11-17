@@ -166,17 +166,19 @@
     }
   },
   "scripts": {
-    "verify:windows-pnpm": "node --experimental-strip-types scripts/verify-windows-pnpm.mjs",
+    "verify:windows-pnpm": "node --experimental-strip-types tests/checks/verify-windows-pnpm.mjs",
     "build": "tsdown && tsc -p tsconfig.types.json && node scripts/link-bundle-declarations.mjs && node scripts/copy-component-assets.mjs",
     "prepublishOnly": "pnpm run verify",
     "lint:package": "publint --strict && attw --pack . --profile esm-only --quiet",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "verify:build": "node scripts/verify-deterministic-build.mjs",
-    "verify:headless": "node scripts/verify-headless-profile.mjs",
-    "verify:sync": "node --experimental-transform-types scripts/verify-sync.mjs",
-    "verify:package": "node scripts/verify-package-contents.mjs && node scripts/verify-public-entries.mjs && pnpm run lint:package",
-    "verify:docs": "node scripts/verify-docs.mjs",
-    "verify": "pnpm run verify:docs && pnpm run typecheck && pnpm run verify:build && pnpm run verify:headless && pnpm run verify:sync && pnpm run verify:package"
+    "test": "node --experimental-transform-types --test \"tests/unit/*.test.mjs\"",
+    "test:integration": "node --experimental-transform-types --test \"tests/integration/*.test.mjs\"",
+    "verify:build": "node tests/checks/verify-deterministic-build.mjs",
+    "verify:headless": "node tests/checks/verify-headless-profile.mjs",
+    "verify:sync": "node --experimental-transform-types --test \"tests/integration/*.test.mjs\"",
+    "verify:package": "node tests/checks/verify-package-contents.mjs && node tests/checks/verify-public-entries.mjs && pnpm run lint:package",
+    "verify:docs": "node tests/checks/verify-docs.mjs",
+    "verify": "pnpm run verify:docs && pnpm run typecheck && pnpm run test && pnpm run verify:build && pnpm run verify:headless && pnpm run verify:sync && pnpm run verify:package"
   },
   "dependencies": {
     "@deepseek-ai/cosmokit": "^1.8.5",

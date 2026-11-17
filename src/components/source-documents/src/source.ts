@@ -1,3 +1,4 @@
+import { resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { MemoryEvidenceItem, MemoryJsonValue, MemoryReadGrant, MemorySourceDefinition } from 'dsh-mnemo-weave/contracts'
 import { COMPOSABLE_MEMORY_API_VERSION } from 'dsh-mnemo-weave/contracts'
@@ -40,7 +41,7 @@ function documentMutation(value: MemoryJsonValue, allowedIds?: readonly string[]
     mutation = {
       action,
       title: text(input.title, 'title', 160)!,
-      content: text(input.content, 'content', 1_000_000)!,
+      content: text(input.content, 'content', 1_000_000, false) ?? '',
       ...(text(input.description, 'description', 600, false) === undefined ? {} : { description: text(input.description, 'description', 600, false)! }),
       ...(input.sourcePaths === undefined ? {} : { sourcePaths: stringArray(input.sourcePaths, 'sourcePaths') ?? [] }),
       ...(input.sessionIds === undefined ? {} : { sessionIds: stringArray(input.sessionIds, 'sessionIds', 20) ?? [] }),
@@ -111,7 +112,7 @@ export function createDocumentsMemorySource(config: Config = {}): MemorySourceDe
       description: 'Create one new workspace Document without updating or archiving existing documents. Capacity exhaustion rejects the write.',
       capability: 'write',
       inputSchema: {
-        type: 'object', required: ['title', 'content'], additionalProperties: false,
+        type: 'object', required: ['title'], additionalProperties: false,
         properties: CREATE_PROPERTIES,
       },
     }],
@@ -123,7 +124,12 @@ export function createDocumentsMemorySource(config: Config = {}): MemorySourceDe
   create(context) {
     const effective = documentsSourceConfig({ ...context.configuration, ...configured }, context.sourceInstanceKey)
     const documents = new DocumentManager(effective.limitBytes, undefined, () => effective.dataDir)
-    const snapshot = (workspaceId: string | undefined) => workspaceId === undefined ? undefined : documents.forWorkspace(workspaceId).catalog()
+    const snapshot = (workspaceId: string) => {
+      const catalog = documents.forWorkspace(workspaceId).catalog()
+      const root = resolve(workspaceId)
+      return { ...catalog, documents: catalog.documents.filter(document =>
+        document.workspaceRoot !== undefined && resolve(document.workspaceRoot) === root) }
+    }
     const prepared = new WeakMap<object, NonNullable<ReturnType<typeof snapshot>>>()
     // Source- and execution-local successful writes, not a broader read grant.
     // Weak keys avoid retaining completed turns; View ids and grant ids can repeat.
@@ -139,7 +145,7 @@ export function createDocumentsMemorySource(config: Config = {}): MemorySourceDe
           sourceInstanceKey: context.sourceInstanceKey, sourceTypeId: 'documents', role: 'narrative', availability: 'ready',
           revision: documents.forWorkspace(root).revision(), capabilities: ['status', 'project', 'search', 'read', 'write'], routeIds: ['search'], actionIds: ['manage', 'create'],
         }
-        const current = snapshot(root)!
+        const current = snapshot(root)
         prepared.set(request.scope, current)
         const active = current.documents.filter(document => document.status === 'active' && document.healthy)
         return {
@@ -151,7 +157,7 @@ export function createDocumentsMemorySource(config: Config = {}): MemorySourceDe
       project(request) {
         const root = workspace(request.scope)
         if (root === undefined) return { fragments: [] }
-        const current = prepared.get(request.scope) ?? snapshot(root)!
+        const current = prepared.get(request.scope) ?? snapshot(root)
         prepared.delete(request.scope)
         if (current.revision !== request.expectedRevision) throw new Error('Documents projection revision changed during composition')
         const active = current.documents.filter(document => document.status === 'active' && document.healthy).sort((a, b) => a.id.localeCompare(b.id))
@@ -241,6 +247,7 @@ export function createDocumentsMemorySource(config: Config = {}): MemorySourceDe
             case 'capacity-plan': value = controller.capacityPlan(documentMutation(request.input)); break
             case 'search': value = await controller.search(text(input.query, 'query', 2_000, false) ?? '', {
               includeArchived: input.includeArchived === true,
+              ...(input.currentWorkspaceOnly === true ? { allowedIds: snapshot(root).documents.map(document => document.id) } : {}),
               ...(input.limit === undefined ? {} : { limit: Math.min(100, Math.max(1, Number(input.limit) || 50)) }),
             }); break
             default: throw new Error('unsupported Documents management read operation: ' + request.operation)
@@ -248,6 +255,7 @@ export function createDocumentsMemorySource(config: Config = {}): MemorySourceDe
         } else {
           if (request.confirmed !== true) throw new Error('Documents management mutation requires explicit confirmation')
           if (request.operation === 'mutate') value = await controller.mutate(documentMutation(request.input), request.expectedRevision)
+          else if (request.operation === 'claim') value = await controller.claimDocument(text(input.id, 'id', 300)!, text(request.expectedRevision, 'expectedRevision', 100)!)
           else if (request.operation === 'delete') value = await controller.deleteDocument(text(input.id, 'id', 300)!, text(request.expectedRevision, 'expectedRevision', 100)!, text(input.fileRevision, 'fileRevision', 100)!)
           else if (request.operation === 'archive') {
             const document = controller.get(text(input.id, 'id', 300)!)

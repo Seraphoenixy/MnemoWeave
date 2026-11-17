@@ -249,6 +249,7 @@ async function manageMemorySpaces(service: MemorySpacesService, request: MemoryS
     }
     case 'remember': return managementResult(service, await service.remember({
       content: text(input.content, 'content', 100_000)!,
+      ...(input.replacesId === undefined ? {} : { replacesId: text(input.replacesId, 'replacesId', 2_000)! }),
       ...(text(input.category, 'category', 30, false) === undefined ? {} : { category: text(input.category, 'category', 30, false)! as Category }),
       ...(typeof input.importance !== 'number' ? {} : { importance: input.importance }),
       ...(stringArray(input.tags, 'tags', 100) === undefined ? {} : { tags: stringArray(input.tags, 'tags', 100)! }),
@@ -367,7 +368,7 @@ export function createMemorySpacesSource(providerSnapshot: MemorySpaceProviderSn
           type: 'object', required: ['content'], additionalProperties: false,
           properties: {
             content: { type: 'string' }, category: { type: 'string' }, importance: { type: 'number' }, tags: { type: 'array' },
-            entities: { type: 'array' }, source: { type: 'string' }, memoryBodyId: { type: 'string' },
+            entities: { type: 'array' }, source: { type: 'string' }, memoryBodyId: { type: 'string' }, replacesId: { type: 'string' },
           },
         },
       },
@@ -651,8 +652,13 @@ export function createMemorySpacesSource(providerSnapshot: MemorySpaceProviderSn
           const source = text(input.source, 'source', 30, false) as Source | undefined
           if (category !== undefined && !CATEGORY_SET.has(category)) throw new Error(`unsupported category: ${category}`)
           if (source !== undefined && !SOURCE_SET.has(source)) throw new Error(`unsupported source: ${source}`)
+          const replacesId = text(input.replacesId, 'replacesId', 2_000, false)
+          if (replacesId !== undefined && (!allowedBodies.includes(bodyId) || await admittedOwner(replacesId) !== bodyId)) {
+            throw new Error('A revision requires a known insight in the same active Memory Space.')
+          }
           result = await service.remember({
             content: text(input.content, 'content', 100_000)!,
+            ...(replacesId === undefined ? {} : { replacesId }),
             ...(category === undefined ? {} : { category }), ...(source === undefined ? {} : { source }),
             ...(typeof input.importance !== 'number' ? {} : { importance: input.importance }),
             ...(input.tags === undefined ? {} : { tags: stringArray(input.tags, 'tags') ?? [] }),

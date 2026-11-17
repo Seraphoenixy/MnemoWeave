@@ -65,6 +65,9 @@ jobs:
       - name: Check documentation links and public plugin catalog
         run: pnpm run verify:docs
 
+      - name: Run unit tests
+        run: pnpm run test
+
       - name: Verify deterministic root build
         run: pnpm run verify:build
       - name: Verify standalone sync server and PAKE on Linux
@@ -89,7 +92,7 @@ jobs:
           package-manager-cache: false
 
       - name: Import every public entry on Node.js 20
-        run: node scripts/verify-public-entries.mjs
+        run: node tests/checks/verify-public-entries.mjs
 
   # Exercise supported DSH release candidates from npm.
   verify-installed-dsh:
@@ -134,4 +137,4 @@ jobs:
           --parallel run build
 
       - name: Verify delayed first-party model discovery
-        run: node --experimental-transform-types scripts/verify-task-model-directory.mjs "$RUNNER_TEMP/dsh/lib/node_modules/@deepseek-ai/dsh/package.json"
+        run: node --experimental-transform-types tests/checks/verify-task-model-directory.mjs "$RUNNER_TEMP/dsh/lib/node_modules/@deepseek-ai/dsh/package.json"

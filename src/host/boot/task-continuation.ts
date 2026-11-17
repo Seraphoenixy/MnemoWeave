@@ -68,7 +68,7 @@ export class TaskContinuation {
         const assembly = await next()
         if (context.agent !== undefined && context.agent !== this.agent) return assembly
         const pin = this.memory.current
-        return applyMemoryViewGuidance(assembly, pin?.context.view, pin?.graph.config.routingGuidance)
+        return applyMemoryViewGuidance(assembly, pin?.context.view, pin?.graph.config.routingGuidance, this.memory.workingRules())
       }) as never))
       this.stops.push(this.agent.ctx.on('session/event', ((session: HostSession, event: HostSessionEvent) => {
         if (session === this.agent.session && event.type === 'turn/end' && event.data.turn === this.authorizedTurn) this.end()

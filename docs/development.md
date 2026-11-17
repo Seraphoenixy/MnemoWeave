@@ -12,14 +12,18 @@
 |---|---|
 | `pnpm typecheck` | 检查根包和仓库内 TypeScript 引用 |
 | `pnpm build` | 构建根包。构建全部组件再运行 `pnpm -r build` |
+| `pnpm test` | 运行 `tests/unit`：单模块行为的用例，不起服务或宿主 |
+| `pnpm test:integration` | 运行 `tests/integration`：真实同步服务、Host 与 Pack 的组合用例 |
 | `pnpm verify:docs` | 校验本地 Markdown 链接及锚点 |
 | `pnpm verify:build` | 校验根包构建可复现 |
 | `pnpm verify:headless` | 使用隔离 DSH profile 检查插件启停和工具 |
 | `pnpm verify:sync` | 构建后验证独立同步服务、PAKE 握手和 MCP 跨进程同步 |
 | `pnpm verify:package` | 检查打包文件和公开入口 |
-| `pnpm verify` | 依次运行文档、类型、构建、Headless、同步和打包验证 |
+| `pnpm verify` | 依次运行文档、类型、单元测试、构建、Headless、同步和打包验证 |
 
-仓库不再维护回归测试套件，验证依赖可复现的产物与真实宿主检查，详见[验证方式](development.md#verification-验证方式)。
+测试与仓库自身的校验闸门都放在 `tests/`：`unit/` 放单模块用例，`integration/` 放组合用例，`checks/` 放需要包管理器、已构建产物或已安装 DSH 的闸门，`support/` 放共用夹具。`scripts/` 只保留产出构建产物的工具。用例使用 Node 内置的 `node:test`，通过 `--experimental-transform-types` 直接引用 `src/` 下的 TypeScript 模块，不额外安装测试框架。详见 [tests/README.md](../tests/README.md)（英文）。
+
+每个用例自行收尾：在 `finally` 中停止它启动的服务并删除临时目录，因此一个失败的用例不会给下一个留下监听端口或子进程。
 
 ## 扩展开发
 
@@ -67,7 +71,8 @@ src/
     protocol.ts  服务端与客户端共用的同步协议
     server/      HTTP 请求处理、存储接口、SQLite 实现
     client/      快照协调、远端接口、HTTP 客户端、本地状态文件
-scripts/         reproducible build, artifacts and Headless checks
+scripts/         build-time tooling: bundle declarations, component assets
+tests/           unit, integration and check cases (see tests/README.md)
 cordis.patch.yml   default Starter composition
 ```
 
@@ -75,7 +80,7 @@ cordis.patch.yml   default Starter composition
 
 不再保留私有工作区包、控制器转发文件、业务 binding 或 compatibility 目录。兼容指用户配置、数据与使用流程，不是延续历史内部符号。[兼容登记表](extensions.md)列出为此保留的代码、保留原因，以及每一项可以移除的条件。
 
-历史背景见 [上游设计记录](https://github.com/omdsh-dev/dsh-mnemon/tree/main/docs/plans)。[scripts/README.md](../scripts/README.md)（英文）列出每个脚本与夹具，以及它们的输入和环境变量。
+历史背景见 [上游设计记录](https://github.com/omdsh-dev/dsh-mnemon/tree/main/docs/plans)。[tests/README.md](../tests/README.md)（英文）列出每个用例、闸门与夹具，以及它们的输入和环境变量。
 
 插件 Client 测试需要根包的公开浏览器制品时，先构建根包：
 
@@ -91,10 +96,12 @@ pnpm --filter dsh-mnemo-weave-source-runtime verify
 
 ### 验证方式
 
-仓库以可复现构建、独立制品和真实宿主的集成检查为主。
+仓库以单模块用例、可复现构建、独立制品和真实宿主的集成检查为主。
 
 | 检查 | 覆盖 |
 |---|---|
+| `pnpm test` | 单模块用例：失败原因链、可重试的失败、运行记录、设置白名单、清单边界与活动读取 |
+| `pnpm test:integration` | 组合用例：独立同步服务、活动流、Host 同步与同名工作区合并、逐文件传输、Pack 合并收敛、子任务活动与 blob 收集 |
 | `pnpm verify:docs` | 本地 Markdown 链接、锚点，以及公开插件目录与实际入口一致 |
 | `pnpm typecheck` | 根包与仓库内全部 TypeScript 引用 |
 | `pnpm verify:build` | 确定性构建：比较两次构建的全部生成文件 hash |
@@ -105,6 +112,14 @@ pnpm --filter dsh-mnemo-weave-source-runtime verify
 `pnpm verify` 串联以上检查。`prepublishOnly` 也运行同一条链。Windows 的 Node 24 任务只运行 `pnpm verify:windows-pnpm`，它检查桌面 PATH 之外的 pnpm 全局 shim。
 
 验证不读写运行者的真实记忆数据。`pnpm verify:headless` 创建临时 profile，把 `DSH_HOME`、`MNEMON_DATA_DIR`、工作区与模型端点都指向夹具内部。
+
+已安装 Mnemon Native CLI 时，可以用隔离 Web profile 验证会话沉淀。夹具使用脚本化模型和临时记忆空间，检查前台零记忆写入、后台正式记忆回执、新会话召回，以及常规校验跳过审查。
+
+```powershell
+pnpm build
+$env:MNEMO_VERIFY_DISTILLATION = '1'
+node tests/checks/verify-web-profile.mjs node_modules/@deepseek-ai/dsh "$env:TEMP/mnemo-distillation-web.json"
+```
 
 确定性构建比较两次构建的全部生成文件 hash，两者不一致即失败。它不承诺生产网络延迟或模型质量。
 

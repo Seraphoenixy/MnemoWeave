@@ -24,18 +24,26 @@ const ROUTE_TOOLS = namedBindings('route')
 const ACTION_TOOLS = namedBindings('action')
 const NAMED_SOURCE_TYPES = [...new Set([...Object.keys(ROUTE_TOOLS), ...Object.keys(ACTION_TOOLS)])]
 
+function isWorkingRulesProjection(fragment: ComposableMemoryView['projection'][number], runtimeSources: ReadonlySet<string>): boolean {
+  const value = fragment.provenance
+  return runtimeSources.has(fragment.sourceInstanceKey)
+    && typeof value === 'object' && value !== null && !Array.isArray(value) && value.workingRules === true
+}
+
+export function workingRulesSystemText(graph: MnemonRuntimeGraph, turn: ComposableMemoryTurn): string {
+  const sources = graph.memoryComposition.generation(turn.view.runtimeGeneration)?.sourceInstances() ?? []
+  const runtimeSources = new Set(sources.filter(source => source.sourceTypeId === 'runtime').map(source => source.sourceInstanceKey))
+  return turn.view.projection.filter(fragment => isWorkingRulesProjection(fragment, runtimeSources)).map(fragment => fragment.text).join('\n\n')
+}
+
 /** Present only operations bound to a registered product tool. */
 export function modelMemoryWake(graph: MnemonRuntimeGraph, turn: ComposableMemoryTurn, includeRuntime = true) {
   const generation = graph.memoryComposition.generation(turn.view.runtimeGeneration)
   if (generation === undefined) throw new Error('Cannot present an unpinned Memory generation')
-  if (!includeRuntime) {
-    const runtimeSources = new Set(generation.sourceInstances().filter(source => source.sourceTypeId === 'runtime').map(source => source.sourceInstanceKey))
-    // A presentation filter, not an authority change: retain the captured View,
-    // other Sources, and all explicit task/tool inputs. Identify actual Sources,
-    // including additional Runtime instances, rather than trusting fragment text.
-    return createMemoryWake({ ...turn.view, projection: turn.view.projection.filter(fragment => !runtimeSources.has(fragment.sourceInstanceKey)) }, memoryWakeBindings(generation, turn.view))
-  }
-  return graph.composableTurns.memoryWake(turn.view.id, memoryWakeBindings(generation, turn.view))
+  const runtimeSources = new Set(generation.sourceInstances().filter(source => source.sourceTypeId === 'runtime').map(source => source.sourceInstanceKey))
+  const projection = turn.view.projection.filter(fragment => !runtimeSources.has(fragment.sourceInstanceKey)
+    || (includeRuntime && !isWorkingRulesProjection(fragment, runtimeSources)))
+  return createMemoryWake({ ...turn.view, projection }, memoryWakeBindings(generation, turn.view))
 }
 
 export function presentMemoryWake(generation: MemoryCompositionGeneration, view: ComposableMemoryView) {

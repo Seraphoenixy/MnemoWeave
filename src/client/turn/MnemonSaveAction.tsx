@@ -112,15 +112,15 @@ async function saveDirectly(client: MnemonClient, destination: Exclude<SaveDesti
     // The Runtime Memory page's own path: Host assistance checks the layer's
     // writes and makes room when the file is full.
     const written = source.assistance?.includes('mutate') === true
-      ? await client.assistSource(source.sourceInstanceKey, 'mutate', input, source.revision, true)
-      : await client.mutateSourceManagement(source.sourceInstanceKey, 'mutate', input, source.revision, true)
+      ? await client.assistSource(source.sourceInstanceKey, 'mutate', input, source.revision, true, 'manual-save')
+      : await client.mutateSourceManagement(source.sourceInstanceKey, 'mutate', input, source.revision, true, 'manual-save')
     const result = written.value as { message?: string; entryCount?: number; maintenance?: unknown; archived?: { entries: number } }
     // Runtime Memory keeps one copy of an entry and says so.
     if (result.message?.startsWith('Entry already exists') === true) return { action: 'skipped', note: { key: 'saveAction.saved.duplicate' } }
     return { action: 'added', note: { key: result.maintenance === undefined && !result.archived?.entries ? 'saveAction.saved.runtime' : 'saveAction.saved.runtimeMaintained', params: { count: result.entryCount }, place: RUNTIME_PLACES[destination] } }
   }
   const result = (await client.mutateSourceManagement(source.sourceInstanceKey, 'remember',
-    { content, memoryBodyId: destination.slice('space:'.length), source: 'user' }, source.revision, true)).value as { action?: unknown; embedded?: unknown }
+    { content, memoryBodyId: destination.slice('space:'.length), source: 'user' }, source.revision, true, 'manual-save')).value as { action?: unknown; embedded?: unknown }
   const answered = typeof result.action === 'string' ? result.action : 'stored'
   // A Provider that queues its writes confirms them later.
   const action = answered === 'queued' ? 'accepted' : answered

@@ -615,6 +615,11 @@ function collectExport(root: string, components: MnemonPackComponent[], runtimeL
     const current = readCurrentDocuments(root)
     const index = forSync ? { ...current.index, documents: current.index.documents.map(document => ({
       ...document, lastAccessedAt: document.updatedAt,
+      // The workspace a Document belongs to is this machine's absolute path, so
+      // it must not travel: the same workspace has a different path on each
+      // machine, and a scope whose records disagreed on that field could never
+      // converge. The receiving side records its own path (see `mergeWorkspaceSync`).
+      workspaceRoot: undefined,
     })) } : current.index
     files[DOCUMENTS_INDEX_PATH] = strToU8(`${JSON.stringify(index, null, 2)}\n`)
     for (const document of current.index.documents) files[`payload/${document.relativePath}`] = current.files.get(document.id)!
@@ -643,7 +648,34 @@ function canonicalJson(value: unknown): string {
   return JSON.stringify(value) ?? 'null'
 }
 
-function mergeRuntime(root: string, pack: ParsedPack, runtimeLimits: RuntimeMemoryLimits): { runtime: RuntimeFile; report: RuntimeMergeReport; archived: RuntimeMemoryEntry[] } {
+/**
+ * Order a merged result canonically.
+ *
+ * A union has no inherent order: taking the local entries first and appending
+ * the peer's gives `[a, b]` on one machine and `[b, a]` on the other. Both are
+ * the same set, so a one-off import would not care — but sync runs repeatedly,
+ * and two snapshots that differ only by order differ by digest, so each machine
+ * would keep republishing the other's result forever. Sorting by identity makes
+ * the merged bytes depend on the set alone, which is what lets the second run
+ * of both machines agree.
+ *
+ * Local order is what a person arranged, so this is applied only where a merge
+ * combines two copies; a plain replace keeps the order it was given.
+ */
+function canonicalRuntimeEntries(entries: RuntimeMemoryEntry[]): RuntimeMemoryEntry[] {
+  return [...entries].sort((left, right) => left.created_at.localeCompare(right.created_at)
+    || left.target.localeCompare(right.target) || left.content.localeCompare(right.content))
+}
+
+function canonicalDocuments(documents: DocumentRecord[]): DocumentRecord[] {
+  return [...documents].sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))
+}
+
+function canonicalSpaces(bodies: MemorySpaceRegistryEntry[]): MemorySpaceRegistryEntry[] {
+  return [...bodies].sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))
+}
+
+function mergeRuntime(root: string, pack: ParsedPack, runtimeLimits: RuntimeMemoryLimits, canonical = false): { runtime: RuntimeFile; report: RuntimeMergeReport; archived: RuntimeMemoryEntry[] } {
   const current = readCurrentRuntime(root, runtimeLimits)
   const incoming = parseRuntime(json(pack.files[RUNTIME_MEMORIES_PATH]!, RUNTIME_MEMORIES_PATH), runtimeLimits)
   const entries = [...current.entries]
@@ -664,7 +696,7 @@ function mergeRuntime(root: string, pack: ParsedPack, runtimeLimits: RuntimeMemo
     entries.push(entry)
     incomingKeys.add(key)
   }
-  const fitted = fitMergedRuntime(entries, runtimeLimits)
+  const fitted = fitMergedRuntime(canonical ? canonicalRuntimeEntries(entries) : entries, runtimeLimits)
   report.added = fitted.entries.filter(entry => incomingKeys.has(entryKey(entry))).length
   return {
     runtime: parseRuntime({ version: 1, entries: fitted.entries }, runtimeLimits),
@@ -673,7 +705,21 @@ function mergeRuntime(root: string, pack: ParsedPack, runtimeLimits: RuntimeMemo
   }
 }
 
-function mergeDocuments(root: string, pack: ParsedPack): { index: DocumentIndex; files: Map<string, Uint8Array> } {
+/**
+ * A document's identity across machines.
+ *
+ * A Pack conflict copy used to take a random id, which is fine for a one-off
+ * import: re-importing the same archive finds the conflicting copy by its
+ * content hash and stops. Sync runs repeatedly, so the same pair of divergent
+ * copies would otherwise produce a new copy on every pass. Deriving the id
+ * from what the copy holds makes the operation idempotent: the second run
+ * finds the id it created and reports nothing new.
+ */
+function conflictDocumentId(source: DocumentRecord, workspaceRoot: string | undefined): string {
+  return sha256(JSON.stringify(['document-conflict', workspaceRoot ?? '', source.id, source.contentHash])).slice(0, 32)
+}
+
+function mergeDocuments(root: string, pack: ParsedPack, workspaceRoot?: string, canonical = false): { index: DocumentIndex; files: Map<string, Uint8Array> } {
   const current = readCurrentDocuments(root)
   const incoming = archiveDocuments(pack)
   const ids = new Map(current.index.documents.map(document => [document.id, document]))
@@ -682,21 +728,42 @@ function mergeDocuments(root: string, pack: ParsedPack): { index: DocumentIndex;
     current.files.set(document.id, bytes)
     ids.set(document.id, document)
   }
-  // A divergent document is kept beside the local one under a new id.
+  // A divergent document is kept beside the local one under a stable new id.
   const copy = (source: DocumentRecord): void => {
-    const remapped = remapDocument(source, incoming.files.get(source.id)!, randomUUID())
+    const id = conflictDocumentId(source, workspaceRoot)
+    const existing = ids.get(id)
+    // This run, or an earlier one, already kept this exact version.
+    if (existing !== undefined && existing.contentHash === source.contentHash) return
+    const remapped = remapDocument(source, incoming.files.get(source.id)!, id)
+    if (existing !== undefined) {
+      // The same derived id now names different bytes: keep both rather than
+      // silently replacing what an earlier pass stored.
+      const fallback = remapDocument(source, incoming.files.get(source.id)!, randomUUID())
+      add(fallback.document, fallback.bytes)
+      return
+    }
     add(remapped.document, remapped.bytes)
   }
   for (const source of incoming.index.documents) {
     const existing = ids.get(source.id)
-    if (existing !== undefined && existing.contentHash === source.contentHash) continue
+    // A synced record carries no workspace path: the scope it travelled in is
+    // this machine's copy of the same workspace, so it is recorded here.
+    const adopted = workspaceRoot === undefined ? source : { ...source, workspaceRoot }
+    if (existing !== undefined && existing.contentHash === adopted.contentHash) continue
     // Merging the same pack again, finds that copy and does not make a second one.
-    if (existing !== undefined && current.index.documents.some(document => document.contentHash === source.contentHash)) continue
-    if (existing !== undefined) copy(source)
-    else add(source, incoming.files.get(source.id)!)
+    if (existing !== undefined && current.index.documents.some(document => document.contentHash === adopted.contentHash)) continue
+    if (existing !== undefined) copy(adopted)
+    else add(adopted, incoming.files.get(source.id)!)
   }
   const activeBytes = current.index.documents.filter(document => document.status === 'active').reduce((sum, document) => sum + document.sizeBytes, 0)
   if (activeBytes > DOCUMENTS_ACTIVE_LIMIT_BYTES) throw new Error(`merged Documents exceed the ${DOCUMENTS_ACTIVE_LIMIT_BYTES} byte active limit`)
+  // Every record in this scope belongs to the workspace this machine synced, so
+  // each one names this machine's path. Without this, records that arrived
+  // without a path would be grouped under "no recorded workspace".
+  if (workspaceRoot !== undefined) {
+    current.index.documents = current.index.documents.map(document => ({ ...document, workspaceRoot }))
+  }
+  if (canonical) current.index.documents = canonicalDocuments(current.index.documents)
   return current
 }
 
@@ -706,7 +773,21 @@ function conflictSpaceName(source: MemorySpaceRegistryEntry): string {
   return source.name.slice(0, MEMORY_SPACE_NAME_MAX_LENGTH - suffix.length) + suffix
 }
 
-function mergeRegistry(root: string, pack: ParsedPack): { registry: MemorySpaceRegistryFile; databases: Map<string, Uint8Array> } {
+/**
+ * The id a divergent Memory Space copy takes.
+ *
+ * A Pack import could take a fresh `randomUUID()` because it is a deliberate
+ * one-off. Sync repeats, and the copy is only recognized by its name, so a
+ * random id would keep producing registries that differ from the peer's even
+ * when both hold the same spaces — and each machine would republish forever.
+ * Deriving it from what the copy holds makes the same input produce the same
+ * registry on every machine and every run.
+ */
+function conflictSpaceId(source: MemorySpaceRegistryEntry, database: Uint8Array): string {
+  return 'conflict-' + sha256(`${source.id}\0${sha256(database)}`).slice(0, 32)
+}
+
+function mergeRegistry(root: string, pack: ParsedPack, canonical = false): { registry: MemorySpaceRegistryFile; databases: Map<string, Uint8Array> } {
   const current = readCurrentRegistry(root)
   const incoming = archiveRegistry(pack)
   const ids = new Set(current.registry.bodies.map(body => body.id))
@@ -748,13 +829,14 @@ function mergeRegistry(root: string, pack: ParsedPack): { registry: MemorySpaceR
           current.databases.set(copy.id, advanced)
           continue
         }
-        add({ ...source, id: randomUUID(), name: conflictSpaceName(source), active: false, updatedAt: new Date().toISOString() }, sourceDb)
+        add({ ...source, id: conflictSpaceId(source, sourceDb), name: conflictSpaceName(source), active: false, updatedAt: source.updatedAt }, sourceDb)
       } else if (!held(sourceDb, body => body.name === source.name)) {
         // A space new here, unless one of the same name already holds every memory in it:
         // a copy an older version made, or the other machine's copy of a divergent space.
         add(source, sourceDb)
       }
     }
+    if (canonical) current.registry.bodies = canonicalSpaces(current.registry.bodies)
     return current
   } finally {
     identity.dispose()
@@ -786,13 +868,14 @@ function reconcilePersistedStore(root: string): void {
   }
 }
 
-function stageImport(root: string, pack: ParsedPack, components: MnemonPackComponent[], mode: MnemonPackImportMode, runtimeLimits: RuntimeMemoryLimits, options: { allowEmptySpaces?: boolean } = {}): { staging: string; report: RuntimeMergeReport | undefined } {
+function stageImport(root: string, pack: ParsedPack, components: MnemonPackComponent[], mode: MnemonPackImportMode, runtimeLimits: RuntimeMemoryLimits, options: { allowEmptySpaces?: boolean; workspaceRoot?: string; canonical?: boolean } = {}): { staging: string; report: RuntimeMergeReport | undefined } {
   const staging = join(root, `.dsh-pack-stage-${randomUUID()}`)
   mkdirSync(staging, { recursive: true, mode: 0o700 })
   try {
+    const canonical = options.canonical === true
     let report: RuntimeMergeReport | undefined
     if (components.includes('runtime')) {
-      const merged = mode === 'merge' ? mergeRuntime(root, pack, runtimeLimits) : undefined
+      const merged = mode === 'merge' ? mergeRuntime(root, pack, runtimeLimits, canonical) : undefined
       const runtime = merged === undefined ? parseRuntime(json(pack.files[RUNTIME_MEMORIES_PATH]!, RUNTIME_MEMORIES_PATH), runtimeLimits) : merged.runtime
       writeRuntime(join(staging, RUNTIME_DIRECTORY), runtime)
       report = merged?.report
@@ -803,11 +886,11 @@ function stageImport(root: string, pack: ParsedPack, components: MnemonPackCompo
       }
     }
     if (components.includes('documents')) {
-      const documents = mode === 'merge' ? mergeDocuments(root, pack) : archiveDocuments(pack)
+      const documents = mode === 'merge' ? mergeDocuments(root, pack, options.workspaceRoot, canonical) : archiveDocuments(pack)
       writeDocuments(join(staging, DOCUMENTS_DIRECTORY), documents.index, documents.files)
     }
     if (components.includes('memory-spaces')) {
-      const memory = mode === 'merge' ? mergeRegistry(root, pack) : archiveRegistry(pack)
+      const memory = mode === 'merge' ? mergeRegistry(root, pack, canonical) : archiveRegistry(pack)
       if (mode === 'replace' && !options.allowEmptySpaces && readCurrentRegistry(root).registry.bodies.length > 0 && memory.registry.bodies.length === 0) {
         throw new Error('cannot replace the last Mnemon Store with an empty Memory Space set')
       }
@@ -1005,6 +1088,33 @@ export class MnemonPackManager {
     await this.runner.withExclusive(() => withLocks(this.root, components, () => {
       if (!matches(this.captureWorkspaceSyncLocked().bytes)) throw new Error('Workspace memories changed during sync; retry')
       const staged = stageImport(this.root, pack, components, 'replace', this.runtimeLimits, { allowEmptySpaces: true })
+      commitStaging(this.root, staged.staging, components)
+      this.afterImport(components)
+    }))
+  }
+
+  /**
+   * Take the peer's snapshot as a union instead of replacing this one.
+   *
+   * Two clients name the same workspace differently — the DSH workspace id is
+   * derived from the local absolute path — so a workspace scope reaches the
+   * same server scope under names that differ per machine even though a person
+   * regards them as one workspace. Replacing would make each machine's edits
+   * take turns overwriting the other's. Merging keeps both: runtime entries are
+   * unioned by text, Documents by content (a genuine divergence keeps a second
+   * copy), Memory Spaces by content, and a Document that names the peer's
+   * workspace path is recorded under this machine's instead.
+   *
+   * The merge is idempotent — every derived identity is content-based — so a
+   * repeated run over the same peer snapshot adds nothing.
+   */
+  async mergeWorkspaceSync(bytes: Buffer, matches: (live: Buffer) => boolean, workspaceRoot?: string): Promise<void> {
+    const pack = parseArchive(bytes.toString('base64'), this.runtimeLimits)
+    if (pack.manifest.scope !== 'full') throw new Error('Workspace sync requires a complete memory snapshot')
+    const components = componentsForScope('full')
+    await this.runner.withExclusive(() => withLocks(this.root, components, () => {
+      if (!matches(this.captureWorkspaceSyncLocked().bytes)) throw new Error('Workspace memories changed during sync; retry')
+      const staged = stageImport(this.root, pack, components, 'merge', this.runtimeLimits, { allowEmptySpaces: true, canonical: true, ...(workspaceRoot === undefined ? {} : { workspaceRoot }) })
       commitStaging(this.root, staged.staging, components)
       this.afterImport(components)
     }))

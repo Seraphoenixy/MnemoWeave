@@ -7,5 +7,6 @@ export interface DocumentsPageClient {
   searchDocuments(query: string, includeArchived?: boolean, limit?: number): Promise<DocumentSearchResult>
   mutateDocument(request: DocumentMutation): Promise<DocumentMutationResult>
   archiveDocument(id: string): Promise<DocumentMutationResult>
+  claimDocument?(id: string): Promise<DocumentMutationResult>
   deleteDocument?(id: string, expectedRevision: string, fileRevision: string): Promise<DocumentMutationResult>
 }

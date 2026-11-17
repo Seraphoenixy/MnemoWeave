@@ -18,6 +18,12 @@ export interface SyncEndpoint { url: string; scope: string; password: string; se
 export function localSnapshotSync(endpoint: SyncEndpoint, dataDirectory: string, source: {
   capture(): Promise<SyncSnapshot>
   apply(bytes: Buffer, matches: (live: Buffer) => boolean): Promise<void>
+  /**
+   * Take the peer's snapshot as a union with the local one. Present only for a
+   * scope whose two copies may address the same content under different local
+   * identities, which is the workspace storage scope.
+   */
+  merge?(bytes: Buffer, matches: (live: Buffer) => boolean): Promise<void>
   assemble(entries: SyncSnapshot['entries']): Buffer
 }): Pick<SnapshotSync, 'sync'> {
   const client = new SyncClient(endpoint.url, endpoint.scope, endpoint.password, endpoint.session)
@@ -26,6 +32,9 @@ export function localSnapshotSync(endpoint: SyncEndpoint, dataDirectory: string,
   const sync = new SnapshotSync(client, {
     capture: () => source.capture(),
     apply: (bytes, expected) => source.apply(bytes, live => snapshotDigest(live) === expected),
+    ...(source.merge === undefined ? {} : {
+      merge: (bytes: Buffer, expected: string) => source.merge!(bytes, live => snapshotDigest(live) === expected),
+    }),
     assemble: entries => source.assemble(entries),
     load() {
       try { return JSON.parse(readFileSync(state, 'utf8')) as unknown }

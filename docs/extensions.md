@@ -200,7 +200,7 @@ export function apply(ctx: Context): void {
 }
 ```
 
-扩展不另建后台调度器；对话内写入仍通过已有 Host 工具、授权和 Source 回执。`capture` 不能把 `manage-spaces` 等一般写操作自动当成记录：作者必须指定实际记录用的 Action id。共享检索预算仍按整个执行回合计算，不按 Source 数量倍增；缓存和 Related 准入带 Source 身份，避免同名空间串用证据。停用贡献后重建失败时，不继续使用已撤销策略：新回合不带记忆 View 运行，对话本身照常进行；已固定的旧回合仍按原租约完成。
+扩展不另建后台调度器；对话内写入仍通过已有 Host 工具、授权和 Source 回执。`capture` 不能把 `manage-spaces` 等一般写操作自动当成记录：作者必须指定实际记录用的 Action id。选中的操作决定捕获能做什么：随附的主动记录只开放 `remember`，因此它能在新说法纠正旧条目时修订那一条，但不能删除其他记忆。共享检索预算仍按整个执行回合计算，不按 Source 数量倍增；缓存和 Related 准入带 Source 身份，避免同名空间串用证据。停用贡献后重建失败时，不继续使用已撤销策略：新回合不带记忆 View 运行，对话本身照常进行；已固定的旧回合仍按原租约完成。
 
 可选的 `createTurn(view)` 返回执行级 `query(request, read)` 策略。它只获得绑定当前 Route 和私有 grant 的 `read(input, narrowerLimits?)`，Core 仍校验输入、有效上限、已分派次数和生命周期。策略可以筛选、重放结果，并用 `Evidence.output` 提供简洁模型输出，但不会获得 Source 对象、写入回调或新增权限。策略不调用 `read` 就回答的读取（例如超出预算的读取）应以 `output.notRun: true` 说明，并且不返回条目；Host 不会把它计为一次记忆空间召回。即使继承同一个不可变 View，不同执行轮次也拥有独立策略状态。不提供此钩子时，读取仍经过 Core 边界直接进入 Source。
 
@@ -214,7 +214,7 @@ export function apply(ctx: Context): void {
 
 显式选择示例：定义 Strategy 后把它放进 `strategies` 传入 `installMemory`。安装后，它会出现在记忆系统**设置**页的**主策略**选择器中，选择结果以 `memoryView.strategyTypeId` 保存；自动化部署可在尚未保存选择时通过 `mnemon.memoryTopology.strategyId` 选择它；多个适用 Strategy 是错误，不采用“后导入覆盖前者”。Profile 显式替换默认 Entry；只安装一个包不等于允许它替换当前组合。
 
-可选 `ViewSpec.guidance` 承载 Strategy 的可信 `system`、`routing` 和读写提醒，与 Source 的引用数据分离，经校验后进入 View digest。没有提供时，Host 使用通用路由提示。已有 DSH 命名工具只显示本轮可用性，不重复注入工具目录中的 schema；外部 Source 可提供投影和工作台管理接口。已有产品工具与人工管理保留；工具存在不代表对应 Source 已进入本轮 View。分层策略的自动后台整理只在选择 `default-three-tier` 时运行，自定义 Strategy 不会隐式触发这项业务流程。
+可选 `ViewSpec.guidance` 承载 Strategy 的可信 `system` 与 `routing`，与 Source 的引用数据分离，经校验后进入 View digest。没有提供时，Host 使用通用路由提示。已有 DSH 命名工具只显示本轮可用性，不重复注入工具目录中的 schema；外部 Source 可提供投影和工作台管理接口。已有产品工具与人工管理保留；工具存在不代表对应 Source 已进入本轮 View。分层策略的自动后台整理只在选择 `default-three-tier` 时运行，自定义 Strategy 不会隐式触发这项业务流程。
 
 <a id="extensions-开放操作有限执行"></a>
 
@@ -325,7 +325,7 @@ RSI 应保存可复现候选输入/制品，对照已知组合评估，经明确
 |---|---|---|---|
 | 空快照退役卡片 | `src/client/pages/retired-memory-snapshot.ts`；`src/client/index.ts` 可选注入 `uiConversation` | DSH 0.2.2-rc.2 会展示空 developer 上下文注入。仅作用于 Chat 的独占定义隐藏 Mnemon 自己的空退役标记，保留审计、模型投影与其他来源；宿主提供独占登记时启用此规则 | 全部受支持宿主已通过验证过的公开展示契约自行隐藏这些空标记 |
 | DSH activation 归属与可见任务记录 | `src/host/session/agent-compat.ts`、`src/host/delegation/subagent-start.ts`、`src/host/review/review-tools.ts`、`src/host/boot/continuation-turn.ts`、`src/host/boot/task-continuation.ts`、`src/host/boot/lifecycle.ts`、`src/host/delegation/subagent.ts`；源码包解析见 `scripts/dsh-host-packages.ts` | 官方 0.2.2-rc.1 保留注册表归属、嵌套请求、Provider 枚举和隐藏独立根 Agent；master `fcc0ad4` 改用 Subagent `rootOf()` 与扁平请求。预留子 Agent 标识保留首步守卫，普通命名根 Agent 保留独立任务。公开解析后配置、注册事件及可选 `subagentProviderNames` 补齐发现能力；持久化 Mnemon 标识与可核验的旧子任务历史避免已完成任务触发自动化。人工新轮次获得当前权限，自动通知不能恢复权限或唤醒旧父会话；人工新委派沿用当前 View，并允许一层新子任务 | 旧官方 Host 退出支持后才合并旧归属和启动分支。历史任务仍存在时保留记录识别；只有经过验证且保留任务能力和 Provider 选择的公开替代契约，才可取代发现与可见性适配 |
-| DSH 工具执行契约 | `src/host/surface/tool-execution.ts` 与 `src/host/review/review-admission.ts`；真实宿主组合见 `scripts/verify-headless-profile.mjs` | 旧 Host 调度一次已解析调用。DSH 0.2.2-alpha.2 提供 `setExecutor()` 并调度原始模型调用批次；适配器保留当前 executor，要求恰好一个匹配的结果。alpha executor 在 capability 目录之外管理 `run_code`。准入仍在真实轮次内等待执行落盘 | 旧单次调用 Host 退出支持范围后，改为必需的公开 executor 契约 |
+| DSH 工具执行契约 | `src/host/surface/tool-execution.ts` 与 `src/host/review/review-admission.ts`；真实宿主组合见 `tests/checks/verify-headless-profile.mjs` | 旧 Host 调度一次已解析调用。DSH 0.2.2-alpha.2 提供 `setExecutor()` 并调度原始模型调用批次；适配器保留当前 executor，要求恰好一个匹配的结果。alpha executor 在 capability 目录之外管理 `run_code`。准入仍在真实轮次内等待执行落盘 | 旧单次调用 Host 退出支持范围后，改为必需的公开 executor 契约 |
 | `buildin` 显示方式 | `src/host/contracts/display-mode.ts` 的 `normalizeDisplayMode`；`src/host/configuration/config.ts` 中的 `displayMode` schema；`src/host/configuration/settings.ts` 的 `migrateLegacyDisplayMode` 与设置描述 | 上游 0.3 把会话标签页入口写作 `buildin`。0.4.2 起 Host 把它读作 `builtin`，并在 profile 可写时通过 DSH 检查 revision 的写入器保存一次 `builtin`；只读 profile 保留旧写法 | 不再支持升级最后由 0.3 保存的 profile 的主版本发布 |
 | `toolviews` 偏好 | `src/host/configuration/config.ts` 中的 `conversationInteraction` schema；`src/host/contracts/protocol.ts` 的 `Config` | 0.1.1 与 0.1.2 用它控制对话内的工具卡片，0.1.3 起不再有代码读取它。已保存的 profile 可能仍有这个字段：这类配置照常通过校验，设置写入拒绝它，解析后的配置不含它 | 任何能接受从 schema 生成的表单中去掉这个开关的版本。schema 会放行未声明的键，已保存的值仍能通过校验 |
 | 拓扑配置中的主策略 | `src/host/configuration/config.ts` 中的 `memoryTopology.strategyId`；`src/host/support/main-strategy.ts` 中的 `mainStrategyTypeId`，它为组合、空闲审查与 View 面板返回内置分层策略的类型 id。状态 RPC 还会发送整个拓扑，客户端只读取其中的各层 | 在有插件选择之前，由拓扑配置指定主策略。profile 仍可设置它，但已不再有代码据此选择策略；主策略固定为 Core 的内置分层组合 | 不再读取它的主版本发布。届时只设置了它的 profile 会改用默认的分层策略组合，因此该版本需要迁移或说明 |

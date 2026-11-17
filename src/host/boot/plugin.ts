@@ -114,6 +114,7 @@ export function apply(rawContext: unknown, rawConfig: MnemonConfig | LiveHostCon
     settings: () => skillSettings.get(),
     source: agent => skillsSourceFor(runtime, agent),
     taskRoute: workspace => lifecycle.skillTaskRoute(workspace),
+    skillEvidence: (parent, topic, signal) => coordinator.skillEvidence(parent, topic, signal),
     runTask: (workspaceRoot, signal, operation, route) => lifecycle.runSkillTask(workspaceRoot, signal, operation, route),
     skillTask: (parent, label, prompt, schema, persona, signal, _route, maxTokens) => coordinator.skillTask(parent, label, prompt, schema, persona, signal, taskRoute(parent), maxTokens),
   })

@@ -80,7 +80,7 @@ export const DEFAULT_THREE_TIER_VIEW_STRATEGY = defineMemoryStrategy({
       if (targets.length > 0) {
         const capture = 'MNEMON OPTIONAL AUTO CAPTURE\n' + policies.capture.instruction
           + '\nEligible Source instances: ' + targets.map(source => source.sourceInstanceKey).join(', ')
-          + '\nUse only a named memory tool available for an eligible Source. Do not duplicate a fact across Sources. Do not overwrite or delete existing memory as part of automatic capture. A suggestion is not a committed write; report the actual receipt. No background task is started by this policy.'
+          + '\nUse only a named memory tool available for an eligible Source. Do not duplicate a fact across Sources. When new wording corrects or supersedes an existing entry, update that entry through the recording operation the Source offers for revision, and say in the receipt what it replaced. Do not gather unrelated entries into a cleanup pass: capturing corrects what this conversation changed, and nothing else. A suggestion is not a committed write; report the actual receipt. No background task is started by this policy.'
         spec.guidance = { ...spec.guidance, system: [spec.guidance?.system, capture].filter(Boolean).join('\n\n') }
       }
     }

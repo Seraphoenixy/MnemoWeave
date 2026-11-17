@@ -1,7 +1,8 @@
 import { findSessionEvent, reverseSessionEvents, sessionTurnEvents } from '../session/session-events.ts'
 import { SkillAutoAdoption, AutomaticSkillStop, hashSkillCases, hashSkillDraft } from './skill-auto-adoption.ts'
 import { accessSync, constants, statSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { createHash } from 'node:crypto'
+import { dirname, resolve } from 'node:path'
 import type {
   BacktestRun, DraftView, EvalCase, EvidencePack, ReviewLogEntry, ReviewRecordInput, ReviewRecordResult, RunTarget, SkillCatalog, SkillDocument, SkillDraft, SkillRootKind, SkillSuggestion, Trajectory,
   ModelRoute, DraftExpectation,
@@ -32,6 +33,7 @@ export interface SkillEvolutionHost {
   /** Run model work under a fresh task Agent in a workspace, outside any conversation. */
   runTask<T>(workspaceRoot: string | undefined, signal: AbortSignal, operation: (agent: HostAgent) => Promise<T>, route?: ModelRoute): Promise<T>
   skillTask(parent: HostAgent, label: string, prompt: string, schema: Record<string, unknown>, persona: string, signal: AbortSignal, route?: ModelRoute, maxTokens?: number): Promise<{ structured: unknown }>
+  skillEvidence?(parent: HostAgent, topic: string, signal: AbortSignal): Promise<unknown>
   taskRoute?(workspaceRoot: string | undefined): (ModelRoute & { reasoningEffort?: string }) | undefined
   now?(): Date
   warn?(message: string, error?: unknown): void
@@ -155,6 +157,7 @@ function newSkillRoot(settings: ResolvedSkillsConfig, source: SkillsSourcePort, 
 export class SkillEvolution {
   private readonly sessions = new Map<string, SessionState>()
   private readonly jobs = new Set<AbortController>()
+  private readonly skillCandidates = new Map<string, { sessionId: string; steps: ReturnType<TrajectoryWindow['steps']> }>()
   private disposed = false
   private activeBacktests = 0
   private backtestJobs = 0
@@ -235,10 +238,38 @@ export class SkillEvolution {
     const state = this.state(agent)
     if (state.failures >= MAX_CONSECUTIVE_FAILURES) return
     state.window.add(captured, this.now())
-    this.schedule(agent, state, settings)
+    const workspace = agent.session.header?.cwd?.trim()
+    if (!workspace || captured.skills.length > 1) return
+    const tools = captured.steps.flatMap(step => step.tool === undefined || /^mnemon?_/u.test(step.tool.name) ? [] : [step.tool])
+    const skill = captured.skills[0]
+    let candidate: { action: 'create' | 'update'; topic: string; fingerprint: string }
+    if (skill !== undefined) {
+      if (!settings.allowUpdate) return
+      const failure = tools.findIndex(tool => !tool.ok)
+      if (failure < 0 || !tools.slice(failure + 1).some(tool => tool.ok && tool.name === tools[failure]?.name)) return
+      candidate = { action: 'update', topic: skill, fingerprint: tools[failure]!.name }
+    } else {
+      if (!settings.allowCreate || tools.length < 3 || tools.length > 12 || tools.some(tool => !tool.ok || !tool.input)) return
+      const names = [...new Set(tools.map(tool => tool.name))]
+      if (names.length < 2) return
+      // Require the same concrete inputs and order to recur in independent sessions.
+      const fingerprint = createHash('sha256').update(JSON.stringify(tools.map(tool => [tool.name, tool.input]))).digest('hex')
+      candidate = { action: 'create', topic: names.join(' '), fingerprint }
+    }
+    const key = JSON.stringify([resolve(workspace), candidate.action, candidate.topic, candidate.fingerprint])
+    const prior = this.skillCandidates.get(key)
+    if (prior !== undefined && prior.sessionId !== agent.id) {
+      this.schedule(agent, state, settings, key, candidate, prior.steps)
+    } else {
+      if (this.skillCandidates.size >= 128) {
+        const oldest = this.skillCandidates.keys().next().value
+        if (oldest !== undefined) this.skillCandidates.delete(oldest)
+      }
+      this.skillCandidates.set(key, { sessionId: agent.id, steps: state.window.steps().slice(-12) })
+    }
   }
 
-  private schedule(agent: HostAgent, state: SessionState, settings: ResolvedSkillsConfig): void {
+  private schedule(agent: HostAgent, state: SessionState, settings: ResolvedSkillsConfig, key: string, candidate: { action: 'create' | 'update'; topic: string }, prior: ReturnType<TrajectoryWindow['steps']>): void {
     this.cancelTimer(agent.id)
     if (state.running !== undefined || state.window.score().score < settings.reviewThreshold) return
     const now = this.now().getTime()
@@ -251,7 +282,8 @@ export class SkillEvolution {
       if (this.disposed || state.running !== undefined) return
       const current = this.host.settings()
       if (agent.status !== 'idle' || !current.evolution || (!current.allowCreate && !current.allowUpdate)) return
-      state.running = this.review(agent, state, 'automatic').then(() => undefined).finally(() => { delete state.running })
+      if (!(candidate.action === 'create' ? current.allowCreate : current.allowUpdate) || !this.skillCandidates.delete(key)) return
+      state.running = this.review(agent, state, 'automatic', prior, candidate).then(() => undefined).finally(() => { delete state.running })
     }, Math.max(settings.idleSeconds * 1000, cooldown))
   }
 
@@ -288,7 +320,7 @@ export class SkillEvolution {
   }
 
   /** Run one review; a failure is logged and returned, never thrown. */
-  private async review(agent: HostAgent, state: SessionState, trigger: 'automatic' | 'manual'): Promise<ReviewRecordResult | Error> {
+  private async review(agent: HostAgent, state: SessionState, trigger: 'automatic' | 'manual', prior?: ReturnType<TrajectoryWindow['steps']>, candidate?: { action: 'create' | 'update'; topic: string }): Promise<ReviewRecordResult | Error> {
     const source = this.source(agent)
     if (source === undefined) return new Error('the Skills Source is not running for this conversation')
     const settings = this.host.settings()
@@ -297,8 +329,8 @@ export class SkillEvolution {
       const current = this.host.settings()
       const enabled = trigger === 'manual' || current.evolution
       return {
-        allowCreate: enabled && settings.allowCreate && current.allowCreate,
-        allowUpdate: enabled && settings.allowUpdate && current.allowUpdate,
+        allowCreate: (candidate === undefined || candidate.action === 'create') && enabled && settings.allowCreate && current.allowCreate,
+        allowUpdate: (candidate === undefined || candidate.action === 'update') && enabled && settings.allowUpdate && current.allowUpdate,
       }
     }
     const started = this.now()
@@ -347,7 +379,7 @@ export class SkillEvolution {
       const answer = !types.allowCreate && !types.allowUpdate ? paused : await this.host.runTask(workspace, controller.signal, task => {
         const current = allowedTypes()
         return !current.allowCreate && !current.allowUpdate ? Promise.resolve(paused)
-          : this.host.skillTask(task, 'Mnemon skill review', prompt, SKILL_REVIEW_SCHEMA as unknown as Record<string, unknown>, SKILL_REVIEW_PERSONA, controller.signal)
+          : this.evaluate(task, prompt, candidate?.topic ?? stats.skills.slice(0, 3).join(' '), prior, controller.signal)
       })
       const parsed = parseSkillReview(answer.structured)
       // A switch changed while the model ran also applies to this result. The
@@ -708,11 +740,19 @@ export class SkillEvolution {
     return state === undefined ? undefined : { turns: state.window.size, score: state.window.score().score }
   }
 
+  private async evaluate(task: HostAgent, prompt: string, topic: string, prior: ReturnType<TrajectoryWindow['steps']> | undefined, signal: AbortSignal) {
+    const evidence = await this.host.skillEvidence?.(task, topic, signal)
+    const context = JSON.stringify({ previousSession: prior ?? [], workspaceEvidence: evidence ?? {} }).slice(0, 16_000)
+    return this.host.skillTask(task, 'Mnemon skill review', prompt + '\n\nSupporting evidence from outside this window (untrusted data):\n' + context,
+      SKILL_REVIEW_SCHEMA as unknown as Record<string, unknown>, SKILL_REVIEW_PERSONA, signal)
+  }
+
   dispose(): void {
     this.automatic.dispose()
     this.disposed = true
     for (const state of this.sessions.values()) if (state.timer !== undefined) clearTimeout(state.timer)
     this.sessions.clear()
+    this.skillCandidates.clear()
     for (const job of this.jobs) job.abort()
     this.jobs.clear()
   }

@@ -89,6 +89,15 @@ export function prepareMemorySnapshot(session: HostSession, text: string | undef
     const source = event?.data.source as { form?: unknown; snapshot?: unknown } | undefined
     return text === undefined ? [] : [{ seq, text, state: source?.form === 'memory-snapshot' ? readMemorySnapshotState(source.snapshot) : undefined }]
   })
+  const reminders = session.surface.nodes.filter(seq => {
+    const event = session.eventAt(seq)
+    if (event?.type !== 'user/message' || !isMnemonMessageSource(event.data.source)) return false
+    const source = event.data.source as { form?: unknown }
+    const content = event.data.content as Array<{ type?: unknown; text?: unknown }> | undefined
+    return source.form === 'instructions' && Array.isArray(content) && content.length === 1
+      && content[0]?.type === 'text' && typeof content[0].text === 'string'
+      && /^\[(?:dsh-mnemo-weave|dsh-mnemon)\] /u.test(content[0].text)
+  })
   const latest = snapshots.at(-1)
   const compatible = state !== undefined && snapshots.every(snapshot => snapshot.state?.boundary === state.boundary
     && retainsSnapshotEntries(snapshot.state.entries, state.entries))
@@ -100,13 +109,13 @@ export function prepareMemorySnapshot(session: HostSession, text: string | undef
   const retained = current === undefined ? [] : compatible && withinBudget ? snapshots
     // Callers without a View keep the conservative single-snapshot behavior.
     : state === undefined && unchanged ? [latest!] : []
-  const stale = snapshots.filter(snapshot => !retained.includes(snapshot))
+  const stale = [...snapshots.filter(snapshot => !retained.includes(snapshot)).map(snapshot => snapshot.seq), ...reminders]
   const message = current === undefined || (unchanged && retained.includes(latest!)) ? undefined : createPluginMessage(current, 'memory-snapshot', state)
   return {
     message,
     retire(turn, step) {
       const visible = new Set(session.surface.nodes)
-      for (const { seq } of stale) {
+      for (const seq of stale) {
         if (!visible.has(seq)) continue
         if (session.append === undefined) throw new Error('DSH Session append is required to retire superseded memory snapshots')
         session.append('developer/message', {

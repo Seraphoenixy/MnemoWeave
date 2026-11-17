@@ -4,9 +4,9 @@ import { readdir, readFile } from 'node:fs/promises'
 import { dirname, join, relative, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { packageManagerCommand } from './package-manager.mjs'
+import { packageManagerCommand } from '../support/package-manager.mjs'
 
-const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const outputRoot = join(root, 'dist')
 
 function build() {

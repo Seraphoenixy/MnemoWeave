@@ -321,6 +321,8 @@ export interface SearchRequest {
 
 export interface RememberRequest {
   content: string
+  /** Existing, recalled Insight in the same active Space that new evidence supersedes. */
+  replacesId?: string
   category?: Category
   /** Integer 1..5 when supplied. Omission uses the Provider's default. */
   importance?: number

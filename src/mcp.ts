@@ -76,7 +76,7 @@ server.registerTool('read_workspace_memory', {
 })
 
 server.registerTool('append_workspace_memory', {
-  description: 'Save a durable rule or fact to the shared Working Rules.',
+  description: 'Save a standing behavior rule explicitly requested by the user to the shared Working Rules. Project facts, troubleshooting lessons, and validation results do not belong here.',
   inputSchema: {
     content: z.string().trim().min(1).refine(
       content => Buffer.byteLength(content, 'utf8') <= RUNTIME_ENTRY_MAX_BYTES,

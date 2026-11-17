@@ -68,11 +68,23 @@ export interface SnapshotOptions {
   conflictToken?: string
   signal?: AbortSignal
   transfer?: (progress: SnapshotTransfer) => void
+  /**
+   * Take the peer's copy as a union with the local one instead of choosing a
+   * side, then publish the result. Scopes whose two copies address different
+   * identities — a workspace each machine named for itself — use this: there is
+   * no "which copy survives" question to ask, because both sides' content is
+   * wanted, and a conflict would make one machine's edits overwrite the other's.
+   *
+   * A merge runs only when both sides have content; a scope that exists on one
+   * side alone is copied as usual, so the first machine to reach a server does
+   * not need an empty local copy to be meaningful.
+   */
+  merge?: boolean
 }
 
 export interface SnapshotSyncResult {
   cursor: number
-  action: 'unchanged' | 'pulled' | 'pushed'
+  action: 'unchanged' | 'pulled' | 'pushed' | 'merged'
 }
 
 interface SnapshotReplica {
@@ -80,6 +92,12 @@ interface SnapshotReplica {
   capture(): Promise<SyncSnapshot>
   /** Replace local content with the assembled archive, if nothing moved meanwhile. */
   apply(bytes: Buffer, expectedDigest: string): Promise<void>
+  /**
+   * Take the peer's content as a union with the local one, if nothing moved
+   * meanwhile. Absent when the scope cannot merge, and a merge request against
+   * it is refused rather than silently replacing.
+   */
+  merge?(bytes: Buffer, expectedDigest: string): Promise<void>
   /** Assemble an archive from a set of entries, so a partial pull can be completed locally. */
   assemble(entries: SnapshotEntries): Buffer
   load(): unknown
@@ -101,6 +119,9 @@ export class SnapshotSync {
 
   async sync(options: SnapshotOptions = {}): Promise<SnapshotSyncResult> {
     const state = readState(this.replica.load() ?? { cursor: 0, remote: null })
+    // A merge request against a scope that has no merge is a caller error, not
+    // a reason to fall back to replacing one side's content with the other's.
+    if (options.merge === true && this.replica.merge === undefined) throw new Error('This sync scope cannot merge')
     for (let attempt = 0; attempt < 4; attempt++) {
       options.signal?.throwIfAborted()
       const { cursor, remote } = await this.latest(state, options.signal)
@@ -110,31 +131,49 @@ export class SnapshotSync {
         this.replica.save({ cursor, remote })
         return { cursor, action: 'unchanged' }
       }
+      // A merge has nothing to ask: both sides' content survives. It still needs
+      // both sides to have something to merge, so an empty local copy simply
+      // pulls, and an empty peer simply uploads.
+      const merging = options.merge === true && remote !== null && !local.empty
       const localChanged = state.remote === null ? !local.empty : digest !== state.remote.bytes
       const remoteChanged = remote?.bytes !== state.remote?.bytes
       const conflictToken = snapshotDigest(Buffer.from(JSON.stringify([cursor, digest, remote?.bytes ?? null])))
       // A manifest this build dropped during migration is not a change either
       // side made: the local copy is published without asking for a resolution.
       const migrated = republishesAfterMigration(local, state, remote)
-      if (!migrated && options.resolve !== undefined && options.conflictToken !== conflictToken) throw new SnapshotConflict(conflictToken)
-      if (!migrated && remote !== null && localChanged && remoteChanged && options.resolve === undefined) throw new SnapshotConflict(conflictToken)
-      if (!migrated && remote !== null && (options.resolve === 'server' || options.resolve === undefined && !localChanged)) {
-        const bytes = await this.pullFrom(remote, local, options.signal, options.transfer)
-        if (snapshotDigest(bytes) !== remote.bytes) throw new Error('Sync snapshot digest mismatch')
+      if (!merging && !migrated && options.resolve !== undefined && options.conflictToken !== conflictToken) throw new SnapshotConflict(conflictToken)
+      if (!merging && !migrated && remote !== null && localChanged && remoteChanged && options.resolve === undefined) throw new SnapshotConflict(conflictToken)
+      if (merging || (!migrated && remote !== null && (options.resolve === 'server' || options.resolve === undefined && !localChanged))) {
+        const bytes = await this.pullFrom(remote!, local, options.signal, options.transfer)
+        if (snapshotDigest(bytes) !== remote!.bytes) throw new Error('Sync snapshot digest mismatch')
+        if (merging) {
+          await this.replica.merge!(bytes, digest)
+          // The union is local content now, so it is published like any other
+          // local change: the next pass sees it differ from the peer's manifest
+          // and uploads it. Reporting the step as a push keeps the counts honest
+          // for the machine that produced the union.
+          const unmerged = await this.replica.capture()
+          const unionDigest = snapshotDigest(unmerged.bytes)
+          // A merge that added nothing leaves the local content as the peer's.
+          if (unionDigest === remote!.bytes) {
+            this.replica.save({ cursor, remote: remote! })
+            return { cursor, action: 'merged' }
+          }
+          const next = await this.upload(unmerged, unionDigest, options.signal, options.transfer, state.remote)
+          const accepted = await this.pushManifest(next, cursor, options.signal, attempt)
+          if (accepted !== undefined) return { cursor: accepted, action: 'merged' }
+          continue
+        }
         await this.replica.apply(bytes, digest)
-        this.replica.save({ cursor, remote })
+        this.replica.save({ cursor, remote: remote! })
         return { cursor, action: 'pulled' }
       }
       if (remote === null && local.empty) return { cursor, action: 'unchanged' }
       if (remote === null && options.resolve === 'server') throw new Error('The server has no memory snapshot to apply')
       const next = await this.upload(local, digest, options.signal, options.transfer, state.remote)
       try {
-        const accepted = await this.client.push({
-          baseCursor: cursor, requestId: randomUUID(),
-          changes: [{ key: SNAPSHOT_KEY, operation: 'put', value: next }],
-        }, options.signal)
-        this.replica.save({ cursor: accepted, remote: next })
-        return { cursor: accepted, action: 'pushed' }
+        const accepted = await this.pushManifest(next, cursor, options.signal, attempt)
+        if (accepted !== undefined) return { cursor: accepted, action: 'pushed' }
       } catch (error) {
         if (!(error instanceof RemoteSyncConflict) || attempt === 3) throw error
         // The next attempt calls `latest()` again, which pulls to the peer's
@@ -144,6 +183,25 @@ export class SnapshotSync {
       }
     }
     throw new Error('Sync did not settle')
+  }
+
+  /**
+   * Publish one manifest at `cursor`. A base-cursor conflict is answered with
+   * `undefined` when another pass can retry, so both callers report it the same
+   * way: the loop re-reads the peer and decides again.
+   */
+  private async pushManifest(next: SyncManifest, cursor: number, signal: AbortSignal | undefined, attempt: number): Promise<number | undefined> {
+    try {
+      const accepted = await this.client.push({
+        baseCursor: cursor, requestId: randomUUID(),
+        changes: [{ key: SNAPSHOT_KEY, operation: 'put', value: next }],
+      }, signal)
+      this.replica.save({ cursor: accepted, remote: next })
+      return accepted
+    } catch (error) {
+      if (!(error instanceof RemoteSyncConflict) || attempt === 3) throw error
+      return undefined
+    }
   }
 
   /**

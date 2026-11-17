@@ -120,7 +120,8 @@ export function createRuntimeMemorySource(config: Config = {}): MemorySourceDefi
             revision: current.revision,
             // A truncated projection cannot certify that all old facts remain
             // visible. Hosts then conservatively compare the entire fragment.
-            provenance: { sourceTypeId: 'runtime', ...(current.text.length <= request.maxCharacters ? { snapshot: current.snapshot } : {}) },
+            provenance: { sourceTypeId: 'runtime', ...(globalRules === undefined ? {} : { workingRules: true }),
+              ...(current.text.length <= request.maxCharacters ? { snapshot: current.snapshot } : {}) },
           }],
           presentation: {
             visibleItems: current.entries.length,

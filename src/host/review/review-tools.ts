@@ -30,42 +30,11 @@ export function idleReviewBlockReason(parent: HostAgent, agentTeams: 'pause' | '
 
 export type ReviewToolPolicy = (execution: Readonly<ToolExecution>) => string | undefined
 
-type ReviewLayer = 'working-memory' | 'documents'
-
-/** The two writes an idle review can make, one per layer; both are rows of the tool table. */
-const DOCUMENT_WRITE = 'mnemo_document_manage' satisfies MemoryToolName
-const WORKING_MEMORY_WRITE = 'mnemo_runtime_memory' satisfies MemoryToolName
-
-function reviewLayer(execution: Readonly<ToolExecution>): ReviewLayer | undefined {
-  if (execution.name === DOCUMENT_WRITE) return 'documents'
-  if (execution.name !== WORKING_MEMORY_WRITE) return undefined
+export const reviewDocumentPolicy: ReviewToolPolicy = execution => {
+  if (execution.name !== ('mnemo_document_manage' satisfies MemoryToolName)) return undefined
   const input = execution.arguments
-  // Profile changes (target=user) never belong in a Document, so they stay independent.
-  return typeof input === 'object' && input !== null && ((input as { target?: unknown }).target ?? 'memory') === 'memory' ? 'working-memory' : undefined
-}
-
-/**
- * One idle review pass records project knowledge in one layer (#319). The first
- * Document write or working-memory change it admits claims the pass; the
- * other layer is refused from then on, even when that first call fails, so a
- * refused or full layer is never evaded by writing the same knowledge elsewhere.
- */
-export function reviewLayerPolicy(): ReviewToolPolicy {
-  let claimed: ReviewLayer | undefined
-  return execution => {
-    const layer = reviewLayer(execution)
-    if (layer === undefined) return undefined
-    if (layer === 'documents') {
-      const input = execution.arguments
-      const action = typeof input === 'object' && input !== null ? (input as { action?: unknown }).action : undefined
-      if (action !== 'create' && action !== 'update') return 'Idle review can only create or update Documents.'
-    }
-    claimed ??= layer
-    if (claimed === layer) return undefined
-    return claimed === 'documents'
-      ? 'This idle review already attempted a Document write, so it cannot also change working memory. Finish with the result tool.'
-      : 'This idle review already changed working memory, so it cannot also write a Document. Finish with the result tool.'
-  }
+  const action = typeof input === 'object' && input !== null ? (input as { action?: unknown }).action : undefined
+  if (action !== 'create' && action !== 'update') return 'Session distillation can only create or update workspace documents.'
 }
 
 /**

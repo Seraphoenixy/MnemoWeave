@@ -141,6 +141,17 @@ export function DocumentsPage(props: { client: DocumentsPageClient; revision: nu
     } catch (reason) { setError(message(reason)) } finally { setSaving(false) }
   }
 
+  const claim = async () => {
+    if (selected === null || props.client.claimDocument === undefined) return
+    setSaving(true); setError(null); setNotice(null)
+    try {
+      const result = await props.client.claimDocument(selected.id)
+      setSelected(result.document)
+      setNotice(t('documents.claimed'))
+      props.onMutate()
+    } catch (reason) { setError(message(reason)) } finally { setSaving(false) }
+  }
+
   const beginEdit = () => {
     if (selected === null) return
     setTitle(selected.title); setDescription(selected.description); setContent(selected.content); setSources(selected.sourcePaths.join('\n')); setEditing(true); setComposing(false); setConfirmArchive(false)
@@ -202,7 +213,7 @@ export function DocumentsPage(props: { client: DocumentsPageClient; revision: nu
     <header><div><h3>{t('documents.newTitle')}</h3><p>{t('documents.editorHint')}</p></div><span>{t('documents.managedCopy')}</span></header>
     <div className={css.documentEditorMeta}><label>{t('documents.name')}<input value={title} onChange={event => setTitle(event.target.value)} required /></label><label>{t('documents.routing')}<input value={description} onChange={event => setDescription(event.target.value)} /></label></div>
     <label>{t('documents.sources')}<input value={sources} onChange={event => setSources(event.target.value)} placeholder={t('documents.sourcesPlaceholder')} /></label>
-    <label>{t('documents.markdown')}<textarea value={content} onChange={event => setContent(event.target.value)} rows={10} required /></label>
+    <label>{t('documents.markdown')}<textarea value={content} onChange={event => setContent(event.target.value)} rows={10} /></label>
   </form>
   const editComposer = selected === null ? null : <form id={documentEditFormId} className={css.documentEditor} onSubmit={event => void update(event)}>
     <header><div><h3>{t('documents.editTitle')}</h3><p>{t('documents.editorHint')}</p></div><code>{selected.id}</code></header>
@@ -255,6 +266,7 @@ export function DocumentsPage(props: { client: DocumentsPageClient; revision: nu
             <header><div><span>{selected.status === 'active' ? t('documents.active') : t('documents.coldArchive')}</span><h3>{selected.title}</h3><p>{selected.description || t('documents.noDescription')}</p></div><div className={css.documentActions}>{props.writeEnabled && selected.status === 'active' && <button type="button" className={documentEditActionClass} onClick={beginEdit}>{t('documents.edit')}</button>}{props.writeEnabled && props.client.deleteDocument !== undefined && snapshot !== null && <button type="button" className={documentArchiveActionClass} disabled={!selectedIsCurrent} onClick={() => { setDeleteError(null); setDeleteTarget({ document: selected, revision: snapshot.revision }) }}>{t('documents.delete')}</button>}</div></header>
             <dl><div><dt>{t('documents.path')}</dt><dd><code>{selected.relativePath}</code></dd></div><div><dt>{t('documents.revision')}</dt><dd>{selected.revision}</dd></div><div><dt>{t('documents.hash')}</dt><dd><code>{selected.contentHash.slice(0, 16)}</code></dd></div><div><dt>{t('documents.size')}</dt><dd>{humanBytes(selected.sizeBytes)}</dd></div></dl>
             {selected.workspaceRoot !== undefined && <div className={css.documentSources}><span>{t('documents.workspaceRecorded')}</span><code>{selected.workspaceRoot}</code></div>}
+            {selected.workspaceRoot === undefined && props.writeEnabled && props.client.claimDocument !== undefined && <button type="button" className={documentEditActionClass} disabled={saving} onClick={() => void claim()}>{t('documents.claim')}</button>}
             {selected.sourcePaths.length > 0 && <div className={css.documentSources}><span>{t('documents.sources')}</span>{selected.sourcePaths.map(path => <code key={path}>{path}</code>)}</div>}
             {selected.status === 'archived' && <div className={css.documentArchiveReceipt}><strong>{t(selected.memoryBodyIds.length === 0 ? 'documents.archiveNote' : 'documents.archiveReceipt')}</strong><p>{selected.archiveSummary}</p><div>{selected.memoryBodyIds.map(id => <code key={id}>{id}</code>)}</div></div>}
             <DocumentMarkdown content={selected.content} />
@@ -263,7 +275,7 @@ export function DocumentsPage(props: { client: DocumentsPageClient; revision: nu
         </section>
       </div>
       <p className={css.runtimeFootnote}>{t('documents.footnote')}</p>
-      {composing && <SidebarModal title={t('documents.newTitle')} description={t('documents.editorHint')} busy={saving} onClose={resetComposer} footer={<div className={css.modalFooterActions}><button type="button" data-dialog-close className={css.secondaryButton} disabled={saving} onClick={resetComposer}>{t('common.cancel')}</button><button type="submit" form={documentCreateFormId} className={css.primaryButton} disabled={saving || title.trim() === '' || content.trim() === ''}>{saving ? t('documents.saving') : t('documents.create')}</button></div>}>{composer}</SidebarModal>}
+      {composing && <SidebarModal title={t('documents.newTitle')} description={t('documents.editorHint')} busy={saving} onClose={resetComposer} footer={<div className={css.modalFooterActions}><button type="button" data-dialog-close className={css.secondaryButton} disabled={saving} onClick={resetComposer}>{t('common.cancel')}</button><button type="submit" form={documentCreateFormId} className={css.primaryButton} disabled={saving || title.trim() === '' || (content.trim() === '' && sourcePaths(sources).length === 0)}>{saving ? t('documents.saving') : t('documents.create')}</button></div>}>{composer}</SidebarModal>}
       {editing && selected !== null && <SidebarModal title={t('documents.editTitle')} description={selected.title} busy={saving} onClose={() => setEditing(false)} footer={<div className={css.modalFooterActions}><button type="button" data-dialog-close className={css.secondaryButton} disabled={saving} onClick={() => setEditing(false)}>{t('common.cancel')}</button><button type="submit" form={documentEditFormId} className={css.primaryButton} disabled={saving}>{saving ? t('documents.saving') : t('documents.save')}</button></div>}>{editComposer}</SidebarModal>}
       {confirmArchive && selected !== null && <SidebarModal title={t('documents.archiveConfirm')} description={selected.title} busy={saving} onClose={() => setConfirmArchive(false)} footer={<div className={css.modalFooterActions}><button type="button" data-dialog-close data-autofocus className={css.secondaryButton} disabled={saving} onClick={() => setConfirmArchive(false)}>{t('common.cancel')}</button><button type="button" className={css.dangerSolidButton} disabled={saving} onClick={() => void archive()}>{saving ? t('documents.archiving') : t('documents.archiveNow')}</button></div>}><div className={css.bodyDeleteConfirm}><p>{t('documents.archiveDescription')}</p><div className={css.bodyDeleteSummary}><strong>{selected.title}</strong><span>{selected.relativePath} · {humanBytes(selected.sizeBytes)}</span></div></div></SidebarModal>}
       {deleteTarget !== null && props.writeEnabled && <SidebarModal title={t('documents.deleteConfirm')} description={deleteTarget.document.title} busy={saving} onClose={() => setDeleteTarget(null)} footer={<div className={css.modalFooterActions}><button type="button" data-dialog-close data-autofocus className={css.secondaryButton} disabled={saving} onClick={() => setDeleteTarget(null)}>{t('common.cancel')}</button><button type="button" className={css.dangerSolidButton} disabled={saving} onClick={() => void remove()}>{saving ? t('documents.deleting') : t('documents.deleteNow')}</button></div>}><div className={css.bodyDeleteConfirm}>{deleteError !== null && <div className={css.inlineError} role="alert">{deleteError}</div>}<p>{t('documents.deleteDescription')}</p><div className={css.bodyDeleteSummary}><strong>{deleteTarget.document.title}</strong><span>{deleteTarget.document.relativePath} · {humanBytes(deleteTarget.document.sizeBytes)}</span></div></div></SidebarModal>}

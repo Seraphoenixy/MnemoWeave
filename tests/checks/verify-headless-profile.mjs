@@ -7,10 +7,10 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { composeEntries, loadOverlayPatches } from '@deepseek-ai/dsh-app-boot'
-import { STARTER_COMPONENT_ROWS, STARTER_ENHANCEMENT_PACKAGES } from '../src/host/contracts/starter-components.ts'
-import { workspaceStorageId } from '../src/sdk/workspace-storage.ts'
+import { STARTER_COMPONENT_ROWS, STARTER_ENHANCEMENT_PACKAGES } from '../../src/host/contracts/starter-components.ts'
+import { workspaceStorageId } from '../../src/sdk/workspace-storage.ts'
 
-const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const bundlePatches = loadOverlayPatches('dsh', join(root, 'cordis.patch.yml'))
 const declaredGroup = composeEntries([bundlePatches.filter(patch => patch.insert !== undefined)]).find(row => row.id === 'mnemon-bundle')
 const visibleRows = declaredGroup?.config.filter(row => !row.group)
@@ -246,7 +246,10 @@ try {
   }
   const rulesDirectory = join(storageRoot, 'working-rules', 'runtime')
   if (!existsSync(join(rulesDirectory, 'memories.json')) || !existsSync(join(rulesDirectory, '工作准则.md'))) throw new Error('Headless plugin did not initialize isolated Working Rules')
-  if (!JSON.stringify(toolRequest).includes('工作准则.md')) throw new Error('Working Rules did not reach the real DSH prompt')
+  // The layer is a system-prompt section: the heading and the generated working
+  // rules file must both reach the real prompt, and the Wake must not repeat it.
+  if (!JSON.stringify(toolRequest.system).includes('### Working Rules')) throw new Error('Working Rules did not reach the real DSH prompt')
+  if (JSON.stringify(toolRequest.system).includes('工作准则.md')) throw new Error('Working Rules still reach the prompt as a quoted snapshot file')
   if (upgradeMemory !== undefined && await readFile(join(storageRoot, 'runtime', 'memories.json'), 'utf8') !== upgradeMemory) throw new Error('Package upgrade changed existing Runtime Memory bytes')
   if (upgradeMemory !== undefined && !JSON.stringify(toolRequest).includes(upgradeMemoryMarker)) throw new Error('Upgraded Headless did not read the retained synthetic Runtime entry')
 
@@ -265,6 +268,17 @@ try {
     throw new Error('DSH did not record recall and committed write outcomes: ' + JSON.stringify(activity))
   }
   if (activityText.some(value => value.includes(privateQuery) || value.includes(privateRule))) throw new Error('Activity includes private source text')
+
+  // Working Rules reach the prompt as entry text only. After a real write, the
+  // next request must carry that text in the system prompt and none of the
+  // storage decoration (importance, ages, branch header, § separator).
+  requests.length = 0
+  assertSuccess('running the working rules prompt fixture', await run(['--profile', 'headless', 'Read the saved rule.'], { cwd: workspaceRoot, env }))
+  const rulesPrompt = requests.map(request => JSON.stringify(request.system)).join('\n')
+  if (!rulesPrompt.includes(privateRule)) throw new Error('Working Rules entry text did not reach the system prompt')
+  for (const decoration of ['importance=', 'created=', 'updated=', 'Git branch:', '§']) {
+    if (rulesPrompt.includes(decoration)) throw new Error(`Working Rules prompt still carries projection decoration: ${decoration}`)
+  }
 
   requests.length = 0
   await writeFile(profilePatchPath, profileOverrides + '- id: mnemon-source-documents\n  disabled: true\n')

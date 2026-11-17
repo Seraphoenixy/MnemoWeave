@@ -245,6 +245,7 @@ function registerDocumentTools(ctx: HostContextShape, { requireSource, config, s
       type: 'object',
       properties: {
         query: { type: 'string', description: 'Focused natural-language or keyword query. Empty lists recent documents.' },
+        workspaceId: { type: 'string', description: 'Registered DSH workspace ID. Supply only when the user explicitly selects another workspace.' },
         includeArchived: { type: 'boolean', description: 'Include cold archived originals only for explicit deep-reference inspection.' },
         limit: { type: 'integer', minimum: 1, description: 'Maximum requested results. Model output is capped at 4.' },
       },
@@ -252,7 +253,7 @@ function registerDocumentTools(ctx: HostContextShape, { requireSource, config, s
     },
     output: { schema: JSON_OBJECT_OUTPUT, render: (_args: unknown, value: unknown) => text(value),
       presentationMeta: namedToolPresentation('mnemo_document_search') },
-    async execute(args: { query: string; includeArchived?: boolean; limit?: number }, exec: ToolExecution) {
+    async execute(args: { query: string; includeArchived?: boolean; limit?: number; workspaceId?: string }, exec: ToolExecution) {
       const agent = requireAgent(exec)
       requireSource(exec, 'documents', 'search')
       return coordinator.documentQuery(agent, args, exec.signal)
@@ -271,7 +272,7 @@ function registerDocumentTools(ctx: HostContextShape, { requireSource, config, s
         id: { type: 'string', description: 'Required for update and archive.' },
         title: { type: 'string', description: 'Meaningful workspace-document title. Required for create.' },
         description: { type: 'string', description: 'Concise routing description.' },
-        content: { type: 'string', description: 'Managed Markdown body. Required for create.' },
+        content: { type: 'string', description: 'Managed Markdown body. For a reference-only record, omit the body and provide sourcePaths.' },
         sourcePaths: { type: 'array', items: { type: 'string' }, description: 'Read-only source paths relative to the workspace.' },
       },
       required: ['action'],
@@ -303,7 +304,7 @@ function registerDocumentTools(ctx: HostContextShape, { requireSource, config, s
 function registerRuntimeTools(ctx: HostContextShape, { requireSource, config, composableTurn }: ToolHelpers, coordinator: MnemonSubagentCoordinator): void {
   ctx.tools.register(definition({
     name: 'mnemo_runtime_memory',
-    description: 'Maintain the shared Working Rules. Save a durable preference, standing convention, or compact environment fact that should guide future turns by default. A general request to remember something does not determine its destination. Skip retrieved evidence unless the user explicitly asks to save it. Skip guesses, assistant-authored claims, temporary progress, secrets, easily rediscovered facts, and skill-covered guidance. Existing rules may move to the local archive when capacity is exceeded. Optional branches restrict DSH projection to sessions on those Git branches.',
+    description: 'Maintain the shared Working Rules. Save an explicit user preference or standing behavior rule that should guide future turns by default. A general request to remember something does not determine its destination. Skip retrieved evidence unless the user explicitly asks to save it. Skip guesses, assistant-authored claims, temporary progress, secrets, easily rediscovered facts, and skill-covered guidance. Existing rules may move to the local archive when capacity is exceeded. Optional branches restrict DSH projection to sessions on those Git branches.',
     parameters: {
       type: 'object',
       properties: {
@@ -342,11 +343,12 @@ function registerRuntimeTools(ctx: HostContextShape, { requireSource, config, co
 function registerMemorySpaceWriteTools(ctx: HostContextShape, { requireSource, sourceAction }: ToolHelpers, coordinator: MnemonSubagentCoordinator): void {
   ctx.tools.register(definition({
     name: 'mnemo_remember',
-    description: `Store one self-contained durable insight in a selected provider-backed Memory Space. Use this when the user explicitly chooses a Memory Space or when a verified lesson or durable insight should be retrieved on demand, such as a diagnosed cause and remedy or a tested workaround. ${REUSABLE_LESSON_CONTENT} Save each distinct qualifying lesson separately when it is independently useful. Keep related details together when they form one lesson. Respect requests not to remember. Choose a suitable writable space, check for equivalent insights when recall is available, and wait for the provider receipt. Providers using semantic extraction may return skipped. Skip duplicates, transcripts, temporary progress, guesses, secrets, routine observations, and knowledge already covered by a project record or memory entry.`,
+    description: `Store one self-contained durable insight in a selected provider-backed Memory Space. Use this when the user explicitly chooses a Memory Space or when a verified lesson or durable insight should be retrieved on demand, such as a diagnosed cause and remedy or a tested workaround. ${REUSABLE_LESSON_CONTENT} Save each distinct qualifying lesson separately when it is independently useful. Keep related details together when they form one lesson. Respect requests not to remember. Choose a suitable writable space, check for equivalent insights when recall is available, and wait for the provider receipt. Providers using semantic extraction may return skipped. Skip duplicates, transcripts, temporary progress, guesses, secrets, routine observations, and lessons already covered by an equivalent retrievable memory entry.`,
     parameters: {
       type: 'object',
       properties: {
         content: { type: 'string', description: 'One concise, self-contained durable insight.' },
+        replacesId: { type: 'string', description: 'A recalled insight ID in the same active Space, only when verified evidence supersedes its conclusion. Unsupported Providers skip the revision.' },
         category: { type: 'string', enum: [...CATEGORIES] },
         importance: { type: 'integer', minimum: 1, maximum: 5, description: 'Durable value from 1 through 5.' },
         tags: { type: 'array', items: { type: 'string' }, maxItems: 20, description: 'Concise tags.' },
@@ -358,8 +360,9 @@ function registerMemorySpaceWriteTools(ctx: HostContextShape, { requireSource, s
     },
     output: { schema: JSON_OBJECT_OUTPUT, render: (_args: unknown, value: unknown) => text(value),
       presentationMeta: namedToolPresentation('mnemo_remember') },
-    async execute(args: { content: string; category?: Category; importance?: number; tags?: string[]; entities?: string[]; source?: Source; memoryBodyId?: string }, exec: ToolExecution) {
+    async execute(args: { content: string; replacesId?: string; category?: Category; importance?: number; tags?: string[]; entities?: string[]; source?: Source; memoryBodyId?: string }, exec: ToolExecution) {
       requireSource(exec, 'memory-spaces', 'write')
+      if (args.replacesId !== undefined) requireSource(exec, 'memory-spaces', 'forget')
       const request = { ...args, source: args.source ?? 'agent' }
       return isSubagent(exec.agent)
         ? sourceAction(exec, 'memory-spaces', 'remember', request)

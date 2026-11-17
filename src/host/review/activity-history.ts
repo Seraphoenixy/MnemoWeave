@@ -79,7 +79,7 @@ export function collectTurnActivity(session: string, parentSession: string | und
   return activity
 }
 
-export function recordSubagentActivity(store: ActivityStore | undefined, parent: HostAgent, turn: number | undefined, runId: string, childId: string | undefined, result: Pick<SubagentActivityEvent, 'operation' | 'outcome' | 'durationMs' | 'committedWrites' | 'usage'>): void {
+export function recordSubagentActivity(store: ActivityStore | undefined, parent: HostAgent, turn: number | undefined, runId: string, childId: string | undefined, result: Pick<SubagentActivityEvent, 'operation' | 'outcome' | 'durationMs' | 'committedWrites' | 'usage' | 'trigger' | 'skipReason'>): void {
   store?.record({
     version: 1, kind: 'subagent', id: activityKey('dsh-subagent', runId), at: Date.now(), ...result,
     parentSession: activityKey('session', parent.id),

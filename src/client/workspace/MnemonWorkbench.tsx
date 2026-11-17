@@ -5,7 +5,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExtern
 import { IconChevronLeftOutline14, IconRefreshOutlineRegular, IconSettingsOutlineRegular } from '../kit/ui-icons.ts'
 import type { PropsRenderSlots } from '@deepseek-ai/dsh-client-ui-slots'
 
-import { DEFAULT_SKILLS_CONFIG, type ClientConnectionHandle, type ClientSettingsScope, type ClientSettingsSnapshot, type Config, type JsonValue, type LifecycleAgentSnapshot, type MemorySourceManagementInstance, type SkillsConfig, type StorageAreaInventory, type StorageScopeKind, type VersionRestartStatus } from "../../host/contracts/protocol.ts"
+import { DEFAULT_SKILLS_CONFIG, type ClientConnectionHandle, type ClientSettingsScope, type ClientSettingsSnapshot, type Config, type JsonValue, type LifecycleAgentSnapshot, type MemorySourceManagementInstance, type SkillsConfig, type StorageScopeKind, type VersionRestartStatus } from "../../host/contracts/protocol.ts"
 import type { MemoryPluginEntryView, MemoryViewDashboard } from '../../host/contracts/view-protocol.ts'
 import type { MemoryCompositionStatus } from '../../host/contracts/protocol.ts'
 import { MnemonClient } from "../connection/api.ts"
@@ -226,13 +226,6 @@ function RestartReminder({ pending }: { pending: VersionRestartStatus }): JSX.El
 /** Resolve the configured scope before the first status round-trip to keep the Sidebar header stable. */
 function configuredStorageScope(config: Config | undefined): StorageScopeKind {
   return config?.storageScope ?? (config?.dataDir?.trim() ? 'custom' : 'global')
-}
-
-/** The Source whose data a storage area holds. */
-const AREA_SOURCES: Readonly<Partial<Record<StorageAreaInventory['kind'], string>>> = { runtime: 'runtime', documents: 'documents', 'memory-bodies': 'memory-spaces' }
-
-function storageAreaLabel(t: MnemonTranslate, kind: StorageAreaInventory['kind']): string {
-  return t(kind === 'runtime' ? 'status.storageRuntime' : kind === 'memory-bodies' ? 'status.storageSpaces' : kind === 'documents' ? 'status.storageDocuments' : 'status.storageState')
 }
 
 export function MnemonWorkbench(props: MnemonWorkbenchProps): JSX.Element {
@@ -502,10 +495,6 @@ function MnemonWorkspace({ connection, settingsScope, sessionId, workspaceId, wo
     component: { componentId: card.componentId, packageName: card.packageName, label: card.label, enabled: card.enabled }, language: locale,
     ...(sessionId === undefined ? {} : { sessionId }), ...(workspaceId === undefined ? {} : { workspace: { id: workspaceId } }),
   }, { entryKey: card.componentId, fallback: <strong>{t('board.running')}</strong> })
-  const areaName = (kind: StorageAreaInventory['kind']): string => {
-    const sourceTypeId = AREA_SOURCES[kind]
-    return sourceTypeId === undefined ? storageAreaLabel(t, kind) : sourceName(sourceTypeId, storageAreaLabel(t, kind))
-  }
   const activeSourcePageId = sourcePageEntryId(page)
   const activeSourcePage = activeSourcePageId === undefined ? undefined : visibleSourcePages.find(entry => entry.id === activeSourcePageId)
   const activeSourceInstances = activeSourcePage === undefined ? [] : instancesFor(activeSourcePage.sourceTypeId)
@@ -597,7 +586,7 @@ function MnemonWorkspace({ connection, settingsScope, sessionId, workspaceId, wo
           {page === 'status' && focus !== undefined && disabledTypes.has(focus.sourceTypeId) && <SourceDisabledPage title={focus.title} onOpenConfiguration={openComposition} />}
           {page === 'status' && !focused && <WorkbenchStatusContext.Provider value={status}>
             <StatusPage client={client} status={status} loading={statusLoading} writeEnabled={writeEnabled} attention={notice !== undefined}
-              components={componentCards} renderCard={renderCard} areaName={areaName} onRefresh={() => void loadStatus()} onOpenConfiguration={openConfiguration} active={active} />
+              components={componentCards} renderCard={renderCard} onRefresh={() => void loadStatus()} active={active} />
           </WorkbenchStatusContext.Provider>}
           {settingsPageContent}
           {activeManagedSourceInstance !== undefined && managedSourcePageContent}

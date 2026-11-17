@@ -85,7 +85,7 @@ export function checkDocuments(root, files) {
 }
 
 function main() {
-  const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
   const files = [...new Set(execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], { cwd: root, encoding: 'utf8' })
     .split('\0').filter(file => file && existsSync(join(root, file))))]
   const report = checkDocuments(root, files)

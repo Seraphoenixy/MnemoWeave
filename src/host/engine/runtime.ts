@@ -40,6 +40,11 @@ export interface MnemonAgentRuntimeSource {
   readonly config: ResolvedConfig
   readonly executions: MemoryExecutions
   forAgent(agent: HostAgent, options?: { independent?: boolean }): MnemonRuntimeGraph
+  route?(request: { workspaceId?: string; sessionId?: string }): {
+    graph: MnemonRuntimeGraph
+    selectedWorkspace?: HostWorkspace
+    participation: WorkspaceMemoryParticipation
+  }
   memoryParticipation?(agent: HostAgent): WorkspaceMemoryParticipation
   bindAgentRuntime(agentId: string, graph: MnemonRuntimeGraph): () => void
   /** Synchronous notification after a committed live configuration swap. */

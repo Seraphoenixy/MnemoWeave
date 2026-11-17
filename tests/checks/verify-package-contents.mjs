@@ -2,7 +2,7 @@
 import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { localeExport, readPackageLocales } from './package-locales.mjs'
+import { localeExport, readPackageLocales } from '../support/package-locales.mjs'
 
 const result = spawnSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], {
   encoding: 'utf8',
@@ -20,8 +20,8 @@ if (result.status !== 0) {
 const parsedPack = JSON.parse(result.stdout)
 const pack = Array.isArray(parsedPack) ? parsedPack[0] : Object.values(parsedPack)[0]
 const paths = pack.files.map(file => file.path)
-const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
-const locales = readPackageLocales(fileURLToPath(new URL('../', import.meta.url)), manifest).map(asset => asset.path)
+const manifest = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'))
+const locales = readPackageLocales(fileURLToPath(new URL('../../', import.meta.url)), manifest).map(asset => asset.path)
 const details = ['locale/detail.en.md', 'locale/detail.zh.md']
 const executables = Object.values(manifest.bin ?? {})
 // A subpath export is either a target string or a conditions object; a wildcard
@@ -36,13 +36,13 @@ const missing = required.filter(path => !paths.includes(path))
 // Each component ships its own presentation assets and locale files under
 // dist/components/<id>/, which its subpath exports name.
 const unexpected = paths.filter(path => !allowedRootFiles.has(path) && !executables.includes(path) && !locales.includes(path) && !details.includes(path) && !(/^dist\/.+\.(?:js|d\.ts)$/.test(path)) && !(/^dist\/components\/[a-z0-9-]+\/(?:presentation|locale|market)\/.+$/.test(path)))
-const clientBundle = readFileSync(new URL('../dist/client.js', import.meta.url), 'utf8')
+const clientBundle = readFileSync(new URL('../../dist/client.js', import.meta.url), 'utf8')
 const hostLeaks = ['require("node:', "require('node:", '#region src/host/surface/version-updates.ts', '#region src/host/surface/rpc.ts',
   'login/device/code', 'login/oauth/access_token', 'api.github.com', 'Ov23liq4i7n8UsylGRfb']
   .filter(pattern => clientBundle.includes(pattern))
 const relativeReadmeImages = (() => {
   const path = 'README.md'
-  const source = readFileSync(new URL('../README.md', import.meta.url), 'utf8')
+  const source = readFileSync(new URL('../../README.md', import.meta.url), 'utf8')
   const markdownImages = [...source.matchAll(/!\[[^\]]*\]\(([^)\s]+)(?:\s+['"][^)]*['"])?\)/g)]
   const htmlImages = [...source.matchAll(/<img\b[^>]*\bsrc=['"]([^'"]+)['"]/gi)]
   return [...markdownImages, ...htmlImages]

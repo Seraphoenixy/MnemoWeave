@@ -117,9 +117,9 @@ mnemon:
 | `recallQuality.maxRankedResults` | `4` | 0–50 | `strict-v1` 最多接纳的 Provider 排名结果数；不表示标准化置信度，与中相关度结果按排名交错选择 |
 | `recallQuality.maxUnknownResults` | `2` | 0–50 | `strict-v1` 在有分数证据之后最多接纳的无 score 或未声明量纲条数 |
 | `routingGuidance` | `true` | boolean | 是否注册额外的分层路由 system section |
-| `lifecycleEnabled` | `true` | boolean | 是否启用 pre-step cue 和评分空闲审查 |
-| `recallMode` | `guided` | `guided` / `off` | 是否在每个会话注入一次可持续复用的按需 recall cue；不移除显式召回 |
-| `writebackMode` | `guided` | `guided` / `off` | 是否在每个会话注入一次可持续复用的运行时记忆 cue，并启用评分加 dirty admission 的空闲审查；不移除显式写入 |
+| `lifecycleEnabled` | `true` | boolean | 是否启用工作准则正文注入、Wake 快照和自动会话沉淀 |
+| `recallMode` | `guided` | `guided` / `off` | 兼容旧配置。召回路由指引由 `routingGuidance` 控制 |
+| `writebackMode` | `guided` | `guided` / `off` | 是否启用自动会话沉淀；显式写入由 `writeEnabled` 控制 |
 | `idleReviewMs` | `30000` | 5000–600000 ms | 达标后需要连续空闲的时间 |
 | `idleReview.enabled` | `true` | boolean | 自动审查独立开关 |
 | `idleReview.runtimeMemory` | `true` | boolean | 允许审查修改工作准则；`false` 时只创建工作区档案 |
@@ -467,15 +467,15 @@ writeEnabled=false
   -> overrides all explicit semantic writes
 
 writebackMode=off
-  -> no write cue, no scored review
+  -> no automatic session distillation
   -> explicit writes remain when writeEnabled=true
 
-recallMode=off
-  -> no recall cue
+routingGuidance=false
+  -> no memory routing guidance
   -> explicit recall remains
 
 lifecycleEnabled=false
-  -> no lifecycle cues or review
+  -> no Working Rules injection, Wake refresh, or automatic session distillation
   -> UI, commands, and explicit tools remain
 
 routingGuidance=false

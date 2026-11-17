@@ -5,6 +5,11 @@ import { localSnapshotSync, type SyncEndpoint } from '../sync/client/filesystem.
 import { globalMemoryDirectory } from './data-directory.ts'
 import { ActivityStore } from './activity.ts'
 
+/** The activity stream the MCP and the Host append Working Rules reads and writes to. */
+export function workingRulesActivityStore(): ActivityStore {
+  return new ActivityStore(join(globalMemoryDirectory(), WORKING_RULES_DIRECTORY, 'state', 'activity'))
+}
+
 export function openWorkingRules(legacyDirectory?: string) {
   const globalDirectory = globalMemoryDirectory()
   const directory = join(globalDirectory, WORKING_RULES_DIRECTORY)
@@ -14,7 +19,7 @@ export function openWorkingRules(legacyDirectory?: string) {
   })
   return {
     memory,
-    activity: new ActivityStore(join(directory, 'state', 'activity')),
+    activity: workingRulesActivityStore(),
     connectSync: (endpoint: SyncEndpoint) => localSnapshotSync(endpoint, directory, {
       capture: async () => memory.captureWorkingRules(),
       apply: async (bytes, matches) => memory.replaceWorkingRules(bytes, matches),
