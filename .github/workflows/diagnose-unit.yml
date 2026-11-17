@@ -1,8 +1,9 @@
 name: Diagnose unit tests
 
-# Reads the failing case names from the unit suite on the runner that reports
-# the failure, without an authenticated log download. Each failing case is
-# emitted as a workflow error so it appears in the public check-run annotations.
+# Reads the failing case names and their assertion detail from the unit suite on
+# the runner that reports the failure, without an authenticated log download.
+# Failing blocks are printed to stderr and re-emitted as workflow errors so they
+# appear in the public check-run annotations.
 on:
   push:
     branches: [main]
@@ -36,14 +37,13 @@ jobs:
         run: |
           set +e
           node --experimental-transform-types --test --test-reporter=tap "tests/unit/*.test.mjs" > unit.tap 2>&1
-          status=$?
-          echo "exit status: $status"
-          # Emit each failing case and its assertion detail as an annotation.
-          awk '/^not ok/{name=$0} /^ *error: /{print name " || " $0}' unit.tap | head -40 | while IFS= read -r line; do
-            echo "::error title=unit failure::$line"
-          done
-          # The assertion that failed, for each failing case.
-          awk '/^# Subtest: /{case=$0} /AssertionError|Expected values|actual:|expected:|operator:|at .*test\.mjs/{print case " >> " $0}' unit.tap | head -80 | while IFS= read -r line; do
-            echo "::error title=unit assertion::$line"
+          echo "exit status: $?"
+          # Print each failing case's block, from its `not ok` line to the next
+          # top-level result, so the assertion text is visible.
+          awk '/^not ok [0-9]+ - tests\//{printing=1} printing{print} /^ok [0-9]+ - tests\//{printing=0}' unit.tap \
+            | grep -v '^#' | head -120 > failed.txt
+          cat failed.txt
+          head -c 3000 failed.txt | while IFS= read -r line; do
+            [ -n "$line" ] && echo "::error title=unit failure::$line"
           done
           exit 0
