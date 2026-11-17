@@ -24,8 +24,10 @@ const subagent = {
 
 async function fixture(run) {
   const root = await mkdtemp(join(tmpdir(), 'mnemo-activity-'))
-  // The global Working Rules stream lives under the data directory, so a case
-  // that clears it must not touch the runner's own.
+  // The global Working Rules stream lives under the data directory. It is read
+  // from the environment by the Host's own entry points, so a case that clears
+  // it has to point that variable at its disposable directory; it is restored
+  // after every case even when the case throws.
   const previous = process.env.MNEMON_DATA_DIR
   process.env.MNEMON_DATA_DIR = join(root, 'working-rules')
   try {

@@ -1,0 +1,37 @@
+name: Diagnose unit tests
+
+# Reads the failing case names from the unit suite on the runner that reports
+# the failure, without an authenticated log download.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Install pnpm
+        run: npm install --global pnpm@10.13.1
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Report failing cases
+        if: always()
+        run: |
+          node --experimental-transform-types --test --test-reporter=tap "tests/unit/*.test.mjs" > unit.tap 2>&1 || true
+          grep -E "^not ok|^# Subtest|error:|expected:|actual:|operator:|at .*test\.mjs" unit.tap | head -120
+          echo "--- tail ---"
+          tail -60 unit.tap
