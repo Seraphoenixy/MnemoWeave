@@ -175,7 +175,7 @@
     "test:integration": "node --experimental-transform-types --test \"tests/integration/*.test.mjs\"",
     "verify:build": "node tests/checks/verify-deterministic-build.mjs",
     "verify:headless": "node tests/checks/verify-headless-profile.mjs",
-    "verify:sync": "node --experimental-transform-types --test \"tests/integration/*.test.mjs\"",
+    "verify:sync": "node --experimental-transform-types tests/checks/verify-sync.mjs",
     "verify:package": "node tests/checks/verify-package-contents.mjs && node tests/checks/verify-public-entries.mjs && pnpm run lint:package",
     "verify:docs": "node tests/checks/verify-docs.mjs",
     "verify": "pnpm run verify:docs && pnpm run typecheck && pnpm run test && pnpm run verify:build && pnpm run verify:headless && pnpm run verify:sync && pnpm run verify:package"
