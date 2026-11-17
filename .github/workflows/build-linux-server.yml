@@ -1,0 +1,97 @@
+name: Build Linux Sync Server
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-server:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          architecture: x64
+          package-manager-cache: false
+
+      - name: Install pnpm
+        run: npm install --global pnpm@10.13.1
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type-check
+        run: pnpm run typecheck
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Package Linux x64 server
+        shell: bash
+        run: |
+          version=$(node -p 'require("./package.json").version')
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            version=${GITHUB_REF_NAME#v}
+          fi
+          if [[ ! "$version" =~ ^[0-9A-Za-z][0-9A-Za-z.+-]*$ ]]; then
+            echo "Invalid release version: $version" >&2
+            exit 1
+          fi
+          node_binary=$(node -p 'process.execPath')
+          bundle=MnemoWeave-linux-x64
+          install -d "release/$bundle"
+          install -m 0755 "$node_binary" "release/$bundle/node"
+          install -m 0644 "$(dirname "$node_binary")/../LICENSE" "release/$bundle/NODE-LICENSE"
+          install -m 0644 dist/mnemo-weave-sync-server.js "release/$bundle/mnemo-weave-sync-server.mjs"
+          install -m 0755 deploy/linux/start.sh "release/$bundle/start.sh"
+          sed 's|^ExecStart=.*|ExecStart=/opt/mnemoweave/start.sh|' deploy/linux/mnemoweave-sync.service \
+            > "release/$bundle/mnemoweave-sync.service"
+          archive="release/MnemoWeave-linux-server-v$version-$(git rev-parse --short=7 HEAD).tar.gz"
+          tar -C release -czf "$archive" "$bundle"
+          echo "archive=$archive" >> "$GITHUB_ENV"
+
+      - name: Verify extracted server without system Node
+        shell: bash
+        run: |
+          smoke_dir=$(mktemp -d)
+          tar -xzf "$archive" -C "$smoke_dir"
+          pnpm run verify:sync "$smoke_dir/MnemoWeave-linux-x64/start.sh"
+
+      - name: Upload Linux server bundle
+        uses: actions/upload-artifact@v6
+        with:
+          name: MnemoWeave-linux-server
+          path: ${{ env.archive }}
+          if-no-files-found: error
+
+  release:
+    name: Create draft GitHub Release
+    needs: linux-server
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Linux server bundle
+        uses: actions/download-artifact@v6
+        with:
+          name: MnemoWeave-linux-server
+          path: release-assets
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG_NAME" release-assets/*.tar.gz \
+            --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "MnemoWeave $TAG_NAME" --generate-notes --draft

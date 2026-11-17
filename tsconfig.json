@@ -1,0 +1,130 @@
+{
+  "compilerOptions": {
+    "target": "ES2024",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": [
+      "ES2024",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "jsx": "react-jsx",
+    "allowImportingTsExtensions": true,
+    "skipLibCheck": true,
+    "types": [
+      "node"
+    ],
+    "paths": {
+      "dsh-mnemo-weave/contracts": [
+        "./src/core/contracts/index.ts"
+      ],
+      "dsh-mnemo-weave/extension-sdk": [
+        "./src/sdk/index.ts"
+      ],
+      "dsh-mnemo-weave/testing": [
+        "./src/sdk/testing.ts"
+      ],
+      "dsh-mnemo-weave/client": [
+        "./src/client/extension-sdk.ts"
+      ],
+      "dsh-mnemo-weave/provider-sdk": [
+        "./src/components/source-memory-spaces/src/provider-sdk.ts"
+      ],
+      "dsh-mnemo-weave/testing/component": [
+        "./src/components/source-memory-spaces/src/testing.ts"
+      ],
+      "dsh-mnemo-weave/source-runtime": [
+        "./src/components/source-runtime/src/index.ts"
+      ],
+      "dsh-mnemo-weave/source-runtime/contracts": [
+        "./src/components/source-runtime/src/contracts.ts"
+      ],
+      "dsh-mnemo-weave/source-documents": [
+        "./src/components/source-documents/src/index.ts"
+      ],
+      "dsh-mnemo-weave/source-documents/contracts": [
+        "./src/components/source-documents/src/contracts.ts"
+      ],
+      "dsh-mnemo-weave/source-memory-spaces": [
+        "./src/components/source-memory-spaces/src/index.ts"
+      ],
+      "dsh-mnemo-weave/source-memory-spaces/contracts": [
+        "./src/components/source-memory-spaces/src/contracts.ts"
+      ],
+      "dsh-mnemo-weave/source-skills": [
+        "./src/components/source-skills/src/index.ts"
+      ],
+      "dsh-mnemo-weave/source-skills/contracts": [
+        "./src/components/source-skills/src/contracts.ts"
+      ],
+      "dsh-mnemo-weave/strategy-auto-capture": [
+        "./src/components/strategy-auto-capture/src/index.ts"
+      ],
+      "dsh-mnemo-weave/provider-mnemon-native": [
+        "./src/components/provider-mnemon-native/src/index.ts"
+      ],
+      "dsh-mnemo-weave/provider-mnemon-native/descriptor": [
+        "./src/components/provider-mnemon-native/src/descriptor.ts"
+      ],
+      "dsh-mnemo-weave/source-memory-spaces/native-cli": [
+        "./src/components/source-memory-spaces/src/native-cli.ts"
+      ],
+      "dsh-mnemo-weave/source-memory-spaces/space-identity": [
+        "./src/components/source-memory-spaces/src/space-identity.ts"
+      ],
+      "dsh-mnemo-weave/source-memory-spaces/client": [
+        "./src/components/source-memory-spaces/src/client.ts"
+      ],
+      "dsh-mnemo-weave/source-runtime/client": [
+        "./src/components/source-runtime/src/client.ts"
+      ],
+      "dsh-mnemo-weave/source-documents/client": [
+        "./src/components/source-documents/src/client.ts"
+      ],
+      "dsh-mnemo-weave/source-skills/client": [
+        "./src/components/source-skills/src/client.ts"
+      ],
+      "dsh-mnemo-weave/source-runtime/presentation/locales.json": [
+        "./src/components/source-runtime/presentation/locales.json"
+      ],
+      "dsh-mnemo-weave/source-runtime/presentation/page.module.css": [
+        "./src/components/source-runtime/presentation/page.module.css"
+      ],
+      "dsh-mnemo-weave/source-runtime/presentation/sidebar.module.css": [
+        "./src/components/source-runtime/presentation/sidebar.module.css"
+      ],
+      "dsh-mnemo-weave/source-documents/presentation/locales.json": [
+        "./src/components/source-documents/presentation/locales.json"
+      ],
+      "dsh-mnemo-weave/source-documents/presentation/page.module.css": [
+        "./src/components/source-documents/presentation/page.module.css"
+      ],
+      "dsh-mnemo-weave/source-documents/presentation/sidebar.module.css": [
+        "./src/components/source-documents/presentation/sidebar.module.css"
+      ],
+      "dsh-mnemo-weave/source-memory-spaces/presentation/locales.json": [
+        "./src/components/source-memory-spaces/presentation/locales.json"
+      ],
+      "dsh-mnemo-weave/source-memory-spaces/presentation/page.module.css": [
+        "./src/components/source-memory-spaces/presentation/page.module.css"
+      ],
+      "dsh-mnemo-weave/source-memory-spaces/presentation/sidebar.module.css": [
+        "./src/components/source-memory-spaces/presentation/sidebar.module.css"
+      ],
+      "dsh-mnemo-weave/provider/mnemon-native": [
+        "./src/components/provider-mnemon-native/src/index.ts"
+      ]
+    },
+    "resolveJsonModule": true
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "tsdown.config.ts"
+  ]
+}

@@ -1,0 +1,271 @@
+{
+  "name": "dsh-mnemo-weave",
+  "version": "0.1.1",
+  "description": "MnemoWeave memory plugin for DeepSeek Harness and local MCP for Codex and ZCode.",
+  "keywords": [
+    "deepseek-harness",
+    "deepseek-harness-plugin",
+    "dsh-plugin",
+    "agent-memory",
+    "llm-memory",
+    "persistent-memory",
+    "long-term-memory",
+    "runtime-memory",
+    "working-memory",
+    "cross-session-memory",
+    "multi-agent-memory",
+    "shared-agent-memory",
+    "memory-orchestration",
+    "memory-provider",
+    "pluggable-memory",
+    "context-management",
+    "project-memory",
+    "project-documents",
+    "document-search",
+    "semantic-recall",
+    "local-first",
+    "mnemon"
+  ],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public",
+    "tag": "latest"
+  },
+  "engines": {
+    "node": ">=20",
+    "dsh": ">=0.2.2-rc.1 <0.3.0-0"
+  },
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/types/src/index.d.ts",
+  "typesVersions": {
+    "*": {
+      "contracts": [
+        "dist/types/src/core/contracts/index.d.ts"
+      ],
+      "extension-sdk": [
+        "dist/types/src/sdk/index.d.ts"
+      ]
+    }
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/types/src/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./core": {
+      "types": "./dist/types/src/core/plugin.d.ts",
+      "default": "./dist/core.js"
+    },
+    "./client": {
+      "types": "./dist/types/src/client/index.d.ts",
+      "default": "./dist/client.js"
+    },
+    "./contracts": {
+      "types": "./dist/types/src/core/contracts/index.d.ts",
+      "default": "./dist/contracts.js"
+    },
+    "./extension-sdk": {
+      "types": "./dist/types/src/sdk/index.d.ts",
+      "default": "./dist/extension-sdk.js"
+    },
+    "./testing": {
+      "types": "./dist/types/src/sdk/testing.d.ts",
+      "default": "./dist/testing.js"
+    },
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./bundle": {
+      "types": "./dist/types/src/bundle.d.ts",
+      "default": "./dist/bundle.js"
+    },
+    "./provider-sdk": {
+      "types": "./dist/types/src/components/source-memory-spaces/src/provider-sdk.d.ts",
+      "default": "./dist/provider-sdk.js"
+    },
+    "./testing/component": {
+      "types": "./dist/types/src/components/source-memory-spaces/src/testing.d.ts",
+      "default": "./dist/testing-component.js"
+    },
+    "./source-runtime": {
+      "types": "./dist/types/src/components/source-runtime/src/index.d.ts",
+      "default": "./dist/source-runtime.js"
+    },
+    "./source-runtime/contracts": {
+      "types": "./dist/types/src/components/source-runtime/src/contracts.d.ts",
+      "default": "./dist/source-runtime-contracts.js"
+    },
+    "./source-runtime/presentation/*": "./dist/components/source-runtime/*",
+    "./source-runtime/locale/*.json": "./dist/components/source-runtime/locale/*.json",
+    "./source-documents": {
+      "types": "./dist/types/src/components/source-documents/src/index.d.ts",
+      "default": "./dist/source-documents.js"
+    },
+    "./source-documents/contracts": {
+      "types": "./dist/types/src/components/source-documents/src/contracts.d.ts",
+      "default": "./dist/source-documents-contracts.js"
+    },
+    "./source-documents/presentation/*": "./dist/components/source-documents/*",
+    "./source-documents/locale/*.json": "./dist/components/source-documents/locale/*.json",
+    "./source-memory-spaces": {
+      "types": "./dist/types/src/components/source-memory-spaces/src/index.d.ts",
+      "default": "./dist/source-memory-spaces.js"
+    },
+    "./source-memory-spaces/contracts": {
+      "types": "./dist/types/src/components/source-memory-spaces/src/contracts.d.ts",
+      "default": "./dist/source-memory-spaces-contracts.js"
+    },
+    "./source-memory-spaces/presentation/*": "./dist/components/source-memory-spaces/*",
+    "./source-memory-spaces/locale/*.json": "./dist/components/source-memory-spaces/locale/*.json",
+    "./source-skills": {
+      "types": "./dist/types/src/components/source-skills/src/index.d.ts",
+      "default": "./dist/source-skills.js"
+    },
+    "./source-skills/contracts": {
+      "types": "./dist/types/src/components/source-skills/src/contracts.d.ts",
+      "default": "./dist/source-skills-contracts.js"
+    },
+    "./source-skills/presentation/*": "./dist/components/source-skills/*",
+    "./source-skills/locale/*.json": "./dist/components/source-skills/locale/*.json",
+    "./strategy-auto-capture": {
+      "types": "./dist/types/src/components/strategy-auto-capture/src/index.d.ts",
+      "default": "./dist/strategy-auto-capture.js"
+    },
+    "./strategy-auto-capture/presentation/*": "./dist/components/strategy-auto-capture/*",
+    "./strategy-auto-capture/locale/*.json": "./dist/components/strategy-auto-capture/locale/*.json",
+    "./provider/*": {
+      "types": "./dist/types/src/components/provider-mnemon-native/src/index.d.ts",
+      "default": "./dist/provider-*.js"
+    }
+  },
+  "files": [
+    "locale",
+    "dist",
+    "cordis.patch.yml",
+    "README.md",
+    "THIRD_PARTY_NOTICES.md",
+    "SECURITY.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-session",
+        "@deepseek-ai/dsh-client-locale"
+      ],
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "verify:windows-pnpm": "node --experimental-strip-types scripts/verify-windows-pnpm.mjs",
+    "build": "tsdown && tsc -p tsconfig.types.json && node scripts/link-bundle-declarations.mjs && node scripts/copy-component-assets.mjs",
+    "prepublishOnly": "pnpm run verify",
+    "lint:package": "publint --strict && attw --pack . --profile esm-only --quiet",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "verify:build": "node scripts/verify-deterministic-build.mjs",
+    "verify:headless": "node scripts/verify-headless-profile.mjs",
+    "verify:sync": "node --experimental-transform-types scripts/verify-sync.mjs",
+    "verify:package": "node scripts/verify-package-contents.mjs && node scripts/verify-public-entries.mjs && pnpm run lint:package",
+    "verify:docs": "node scripts/verify-docs.mjs",
+    "verify": "pnpm run verify:docs && pnpm run typecheck && pnpm run verify:build && pnpm run verify:headless && pnpm run verify:sync && pnpm run verify:package"
+  },
+  "dependencies": {
+    "@deepseek-ai/cosmokit": "^1.8.5",
+    "@deepseek-ai/schemastery": "~3.19.0",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "@swan-io/srp": "0.2.6",
+    "fflate": "^0.8.3",
+    "yaml": "^2.9.0",
+    "zod": "^4.4.3"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.1.0",
+    "@deepseek-ai/dsh-app-boot": ">=0.2.2-rc.1 <0.3.0-0",
+    "@deepseek-ai/dsh-typert-protocol": ">=0.2.2-rc.1 <0.3.0-0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.5",
+    "@deepseek-ai/cordis": "~4.1.0",
+    "@deepseek-ai/dsh": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-agent": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-agent-loop": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-api-gateway": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-app-boot": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-connection": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-locale": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-store": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-chat": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-conversation": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-layout": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-plugin-manager": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-renderer": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-session": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-settings": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-sidebar": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-slots": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-tool": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-llm": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-session": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-session-format-v0-to-v1": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-session-persistence-jsonl": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-session-projection": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-session-query": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-subagent": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-subagent-spawn-in-process": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-system-prompt": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-tool-executor-ptc": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-typert-protocol": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-typert-registry": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-util-code-language": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-util-workspace-path": "0.2.2-rc.1",
+    "@shikijs/langs": "^4.3.1",
+    "@types/node": "^22.0.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "anser": "^2.3.5",
+    "clsx": "^2.1.1",
+    "diff": "^9.0.0",
+    "immer": "^10.1.1",
+    "katex": "^0.16.47",
+    "lightningcss": "^1.29.0",
+    "markdown-to-jsx": "^7.7.0",
+    "mdast-util-from-markdown": "^2.0.3",
+    "mdast-util-gfm": "^3.1.0",
+    "mdast-util-math": "^3.0.0",
+    "micromark-core-commonmark": "^2.0.3",
+    "micromark-extension-gfm": "^3.0.0",
+    "micromark-extension-math": "^3.1.0",
+    "micromark-factory-space": "^2.0.1",
+    "micromark-util-character": "^2.1.1",
+    "micromark-util-classify-character": "^2.0.1",
+    "micromark-util-sanitize-uri": "^2.0.1",
+    "micromark-util-symbol": "^2.0.1",
+    "publint": "^0.3.23",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "semver": "^7.8.5",
+    "shiki": "^4.3.1",
+    "simple-icons": "16.31.0",
+    "tsdown": "^0.22.0",
+    "typescript": "^5.9.0",
+    "zustand": "~4.4.7"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-app-boot": {
+      "optional": true
+    }
+  }
+}

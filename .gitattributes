@@ -1,0 +1,22 @@
+# This repository stores every text file with LF endings.
+#
+# `eol=lf` makes the checkout use LF on every platform, whatever the local
+# `core.autocrlf` setting is. Without it, Git for Windows checks the tree out
+# as CRLF, and any check that reads a file from disk and compares it with text
+# written as `\n` fails on Windows only.
+* text=auto eol=lf
+
+# Windows batch files need CRLF to run.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Files Git must never convert.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.zip binary
+*.tgz binary

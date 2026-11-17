@@ -1,0 +1,137 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify-windows-workspace:
+    name: Verify Windows workspace paths (Node ${{ matrix.node }})
+    runs-on: windows-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['24']
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+          package-manager-cache: false
+
+      - name: Install pnpm
+        run: npm install --global pnpm@10.13.1
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify real pnpm global shims outside the Desktop PATH
+        run: pnpm run verify:windows-pnpm
+
+  verify-source:
+    name: Verify source (Node 24)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Install pnpm
+        run: npm install --global pnpm@10.13.1
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type-check integrated source
+        run: pnpm run typecheck
+
+      - name: Check documentation links and public plugin catalog
+        run: pnpm run verify:docs
+
+      - name: Verify deterministic root build
+        run: pnpm run verify:build
+      - name: Verify standalone sync server and PAKE on Linux
+        run: pnpm run verify:sync
+
+      - name: Build public plugin SDK entries
+        run: >-
+          pnpm --workspace-concurrency=2
+          --filter dsh-mnemo-weave-source-memory-spaces
+          --filter dsh-mnemo-weave-source-documents
+          --filter dsh-mnemo-weave-source-runtime
+          --filter dsh-mnemo-weave-source-skills
+          --parallel run build
+
+      - name: Verify root package
+        run: pnpm run verify:package
+
+      - name: Set up Node.js 20 for runtime compatibility
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          package-manager-cache: false
+
+      - name: Import every public entry on Node.js 20
+        run: node scripts/verify-public-entries.mjs
+
+  # Exercise supported DSH release candidates from npm.
+  verify-installed-dsh:
+    name: Verify on installed DSH ${{ matrix.dsh }} (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { dsh: '0.2.2-rc.1', node: '24.22.2' }
+          - { dsh: '0.2.2-rc.2', node: '24.22.2' }
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+          package-manager-cache: false
+
+      - name: Install pnpm
+        run: npm install --global pnpm@10.13.1
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install DSH ${{ matrix.dsh }}
+        env:
+          DSH_RELEASE: ${{ matrix.dsh }}
+        run: npm install --global --prefix "$RUNNER_TEMP/dsh" "@deepseek-ai/dsh@$DSH_RELEASE" --no-fund --no-audit
+
+      - name: Build root and public plugin SDK entries
+        run: >-
+          pnpm run build &&
+          pnpm --workspace-concurrency=2
+          --filter dsh-mnemo-weave-source-memory-spaces
+          --filter dsh-mnemo-weave-source-documents
+          --filter dsh-mnemo-weave-source-runtime
+          --filter dsh-mnemo-weave-source-skills
+          --parallel run build
+
+      - name: Verify delayed first-party model discovery
+        run: node --experimental-transform-types scripts/verify-task-model-directory.mjs "$RUNNER_TEMP/dsh/lib/node_modules/@deepseek-ai/dsh/package.json"

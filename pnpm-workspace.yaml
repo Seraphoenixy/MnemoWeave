@@ -1,0 +1,14 @@
+packages:
+  - .
+
+# Every component ships in this one package, so the workspace holds no author
+# packages to link and no semver peers to resolve locally.
+
+allowBuilds:
+  '@deepseek-ai/dsh-subprocess-local': true
+  '@google/genai': true
+  esbuild: true
+  koffi: true
+  lightningcss: true
+  node-pty: true
+  protobufjs: true

@@ -1,0 +1,379 @@
+import type { JsonValue, RpcResult, SettingsOperation } from "../contracts/protocol.ts"
+
+export type {
+  ClientConnectionHandle,
+  ClientSettingsScope,
+  ClientSettingsSnapshot,
+  JsonPrimitive,
+  JsonValue,
+  RpcError,
+  RpcResult,
+  SettingsOperation,
+} from "../contracts/protocol.ts"
+
+export type HostRpcHandler = (endpoint: string, payload: unknown, signal?: AbortSignal) => Promise<RpcResult<unknown>>
+
+export interface HostConnectionHandle {
+  rpc: {
+    handle(channel: string, handler: HostRpcHandler): unknown
+  }
+}
+
+export interface HostSettingsScope<T> {
+  get(): T
+}
+
+/** Mnemon's settings namespaces over DSH profile Config, with revision-fenced writes. */
+export interface HostSettingsService {
+  readonly writable: boolean
+  register<T>(
+    namespace: string,
+    schema: unknown,
+    options: { base?: Partial<T>; applies: 'live' | 'restart'; validate?: (value: T) => void },
+  ): HostSettingsScope<T>
+  describe(options?: { redactSecrets?: boolean }): Array<{
+    ns: string
+    value: unknown
+    base?: unknown
+    user?: unknown
+    revision: number
+    applies: 'live' | 'restart'
+  }>
+  mutate(namespace: string, ops: SettingsOperation[], expectedRevision?: number): Promise<void>
+  /** Observe committed namespace values; returns the unsubscribe function. */
+  onUpdated(listener: (namespace: string, value: unknown) => void): () => void
+}
+
+export interface ToolExecution {
+  callId?: string
+  rootCallId?: string
+  signal: AbortSignal
+  agent?: HostAgent
+  name?: string
+  /** Parsed tool arguments, available on the authoritative tools/result event. */
+  arguments?: unknown
+  parent?: symbol
+  token?: symbol
+  /** End the current model turn after an authoritative terminal tool call. */
+  concludeTurn?: () => void
+}
+
+export type CommandResult = { kind: 'success'; text?: string } | { kind: 'error'; text: string }
+
+export interface CommandInvocation {
+  agent: HostAgent
+  rawInput: string
+  signal: AbortSignal
+}
+
+export interface CommandDefinition {
+  name: string
+  description: string
+  input?: { hint: string }
+  handler(invocation: CommandInvocation): CommandResult | Promise<CommandResult>
+}
+
+export interface CommandService {
+  register(definition: CommandDefinition): unknown
+}
+
+export interface ToolDefinition {
+  name: string
+  description: string
+  parameters: Record<string, unknown>
+  output: {
+    schema: Record<string, unknown>
+    render: (args: Record<string, unknown>, value: never) => Array<{ type: 'text'; text: string }>
+    /** Durable, JSON-safe, tool-private projection available to Host UI replay. */
+    presentationMeta?: (args: unknown, value: unknown) => JsonValue
+  }
+  execute: (args: never, execution: ToolExecution) => Promise<unknown>
+  presentCall?: (args: never) => Record<string, unknown>
+  presentResult?: () => Record<string, unknown>
+}
+
+export interface HostMessageSource {
+  kind: string
+  plugin?: string
+  form?: string
+  summary?: string
+}
+
+/** Minimum shape shared by DSH content blocks, including merge-added blocks. */
+export interface HostOpaqueContentBlock {
+  type: string
+  /** Present on text-like blocks; omitted by images and other merge-added blocks. */
+  text?: string
+}
+
+export interface HostTextContentBlock extends HostOpaqueContentBlock {
+  type: 'text'
+  text: string
+}
+
+/** Durable image metadata, matching DSH's attachment reference. */
+export interface HostImageAttachmentRef {
+  attachmentId: string
+  mediaType: 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'
+  bytes: number
+  width: number
+  height: number
+  name?: string
+}
+
+export interface HostImageContentBlock extends HostOpaqueContentBlock {
+  type: 'image'
+  attachment: HostImageAttachmentRef
+}
+
+/** User content is open to DSH/plugin blocks while documenting first-party text and image shapes. */
+export type HostUserContentBlock = HostTextContentBlock | HostImageContentBlock | HostOpaqueContentBlock
+
+export interface HostUserMessage {
+  id: string
+  role: 'user'
+  content: HostUserContentBlock[]
+  source: HostMessageSource
+}
+
+export interface HostSessionEvent {
+  type: string
+  seq?: number
+  time?: number
+  data: Record<string, unknown>
+  surfaceOp?: 'append' | { op: 'replace'; startSeq: number; endSeq: number }
+  sourceEventSeqs?: readonly number[]
+}
+
+/** Minimum DSH Session surface: immutable header, range snapshots and indexed reads. */
+export interface HostSession {
+  /** Public DSH next sequence offset (log length). Optional for older adapters. */
+  readonly seq?: number
+  inheritedEventCount?: number
+  header?: { origin?: 'subagent'; parentSession?: string; delegationDepth?: number; cwd?: string; agentPreset?: string }
+  snapshotEvents(fromSeq?: number, toSeqExclusive?: number): readonly HostSessionEvent[]
+  eventAt(seq: number): HostSessionEvent | undefined
+  /**
+   * The request header in force: the model this Session last asked DSH for. A
+   * task Agent whose inherited route follows its conversation reads it before
+   * the profile-wide default, so background work runs on the model that
+   * conversation uses. DSH applies a model switch on the next request.
+   */
+  requestHeader?(): { config?: { provider?: string; model?: string; reasoningEffort?: string } } | undefined
+  /** Model-visible event sequences, in order; rewinds and compaction replace them. */
+  surface: { readonly nodes: readonly number[] }
+  /** Public Session append; replacements preserve the original events for audit. */
+  append?(type: string, data: unknown, options?: { surfaceOp?: HostSessionEvent['surfaceOp']; sourceEventSeqs?: readonly number[] }): unknown
+}
+
+export type HostPreStepDecision = { kind: 'reject' } | { kind: 'enter'; messages: HostUserMessage[] }
+
+export interface HostToolExecutionInput {
+  callId: string
+  name: string
+  arguments: unknown
+  agent: HostAgent
+  signal: AbortSignal
+}
+
+export interface HostAgentContext {
+  /** Cordis lifetime check. */
+  readonly fiber?: { assertActive(): void }
+  /** DSH's monotonic guard also covers tools registered in this Agent's scope. */
+  tools?: {
+    /** Public execution pipeline, including presentation, policy and guards. */
+    execute?(input: HostToolExecutionInput): Promise<{ isError: boolean }>
+    /** Public executor registration identifies Hosts whose execute() takes model-call batches. */
+    setExecutor?(executor: unknown): unknown
+    guard?(guard: (execution: ToolExecution) => string | undefined): unknown
+    /** Public presentation-agnostic lookup in the exact Agent scope. */
+    get?(name: string, scope?: HostAgent): unknown
+    /** Hides the tools this Agent inherits outside the filter and refuses to run them. */
+    restrict?(filter: { allow?: string[]; deny?: string[] }): unknown
+  }
+  /** DSH's prompt registry; a section registered here applies to this Agent alone and shadows a global one of the same name. */
+  systemPrompt?: {
+    section?(section: { name: string; order: number; text: string }): unknown
+    getSectionOrder?(name: string): number
+  }
+  /**
+   * `options` is optional and forwarded verbatim to the host. `prepend`
+   * places the listener at the head of the chain, which for a waterfall
+   * means it observes the fully assembled result. Omitting it keeps the
+   * previous two-argument behaviour exactly.
+   */
+  on(name: string, listener: (...args: never[]) => unknown, options?: { prepend?: boolean }): () => unknown
+  effect(callback: () => (() => unknown) | void, label?: string): () => unknown
+  get?(name: string): unknown
+}
+
+export interface HostAgent {
+  id: string
+  status: 'idle' | 'running'
+  options?: { provider?: string; model?: string; maxTokens?: number; reasoningEffort?: string; subagentDepth?: number }
+  session: HostSession
+  ctx: HostAgentContext
+  followup(message: HostUserMessage): void
+  steer(message: HostUserMessage): void
+  inject(message: HostUserMessage): void
+  cancel(cause: { kind: 'hook'; reason: string }, options?: { keepInbox?: boolean }): void
+}
+
+export interface HostAgentHandle {
+  agent: HostAgent
+  dispose(): Promise<void>
+}
+
+export interface CreateHostAgentOptions {
+  sessionId: string
+  meta?: { cwd?: string; agentPreset?: string; origin?: 'subagent' }
+  agentOptions?: { provider?: string; model?: string; maxTokens?: number; reasoningEffort?: string }
+  signal?: AbortSignal
+  /** DSH calls it with the unpublished Agent's context and the Agent itself. */
+  setup?: (agentCtx: HostAgentContext, agent?: HostAgent) => unknown | Promise<unknown>
+}
+
+export interface HostAgentsService {
+  get(id: string): HostAgent | undefined
+  /** Public DSH runtime ownership, independent of persisted session lineage. */
+  isOwnedBy?(id: string, parent: HostAgent): boolean
+  roots?(): HostAgent[]
+  list?(): HostAgent[]
+  /** Factory for an owned, clean top-level Agent. */
+  create(options: CreateHostAgentOptions): Promise<HostAgentHandle>
+}
+
+export interface HostWorkspace {
+  readonly id: string
+  readonly path: string
+  readonly title: string
+  /** Sessions the workspace lists, whether or not their Agents are loaded. */
+  readonly sessionIds?: readonly string[]
+}
+
+export interface HostWorkspaceRegistry {
+  get(id: string): HostWorkspace | undefined
+  list(): HostWorkspace[]
+}
+
+export interface HostSubagentResult {
+  output: Array<{ type: string; text?: string; [key: string]: unknown }>
+  structured?: unknown
+  /** Provider-authored failure detail; in-process children leave it unset. */
+  diagnostic?: string
+  stopReason: string
+}
+
+export interface HostSubagentRun {
+  id: string
+  localAgent?: HostAgent
+  result: Promise<HostSubagentResult>
+  dispose(): Promise<void>
+}
+
+export interface HostSubagentProvider {
+  inheritsParentContext?: boolean
+  capabilities: { outputSchema: boolean; depthLimit: boolean }
+  /** Present on a provider whose children DSH creates in this process, such as spawn and fork. */
+  prepareContinuable?: unknown
+}
+
+export interface HostSubagentStartRequest {
+  label?: string
+  /** Optional catalog name, forwarded only to Hosts with named-child support. */
+  name?: string
+  prompt: Array<{ type: 'text'; text: string }>
+  parent: HostAgent
+  signal: AbortSignal
+  agentOptions?: { provider?: string; model?: string; maxTokens?: number }
+  outputSchema?: Record<string, unknown>
+  maxDepth?: number
+  /** Tools and persona registered in the child's own scope. */
+  toolFilter?: { allow?: string[]; deny?: string[] }
+  persona?: string
+}
+
+/** One managed child; its result settles once the child is idle and released. */
+export interface HostSubagentActivation {
+  childId: string
+  messageId?: string
+  result: Promise<HostSubagentResult>
+  dispose(): Promise<void>
+}
+
+export interface HostSubagentsService {
+  list?(): string[]
+  /** Activation-owned trees on post-rc.1 master; absent from the official rc.1 package. */
+  rootOf?(agent: HostAgent): HostAgent
+  getProvider(name: string): HostSubagentProvider | undefined
+  /**
+   * Managed activations. The
+   * signal covers startup only; `dispose` stops a running child. Caller
+   * delivery returns the result without notifying the parent conversation.
+   */
+  startActivation?(spec: {
+    childId?: string
+    provider: string
+    label: string
+    request: Omit<HostSubagentStartRequest, 'label' | 'signal' | 'toolFilter' | 'persona'>
+    signal: AbortSignal
+    delivery: 'parent' | 'caller'
+  }): Promise<HostSubagentActivation>
+}
+
+export interface HostLlmService {
+  listProviders(): Array<{ id: string; name: string }>
+  listModels(provider: string): Promise<Array<{
+    id: string
+    name: string
+    description?: string
+    /** Absent means unknown; an explicit list declares the accepted request modalities. */
+    inputModalities?: readonly string[]
+  }>>
+}
+
+/** What the credentials store says about one record, as this plugin reads it. */
+export interface HostCredentialRecordInfo {
+  configured: boolean
+  kind?: 'api-key' | 'grant'
+  writable: boolean
+}
+
+/**
+ * The record half of DSH's credentials store. Records are addressed by
+ * `"<scope>/<id>"`, presence is the whole fact, and `modifyRecord` is the only
+ * write path, so a grant is replaced under the store's own cross-process lock.
+ */
+export interface HostCredentialsService {
+  readRecord(key: string): Promise<unknown>
+  describeRecord(key: string): Promise<HostCredentialRecordInfo>
+  modifyRecord(key: string, mutate: (current: unknown) => Promise<unknown>): Promise<unknown>
+  deleteRecord(key: string): Promise<void>
+}
+
+export interface HostContextShape {
+  tools: { register(definition: ToolDefinition): unknown }
+  commands: CommandService
+  /** DSH's profile settings forms; only the Mnemon settings facade reads them. */
+  settings: unknown
+  /** Web-only transport; absent from non-Web profiles such as Headless. */
+  connection?: HostConnectionHandle
+  agents: HostAgentsService
+  subagents: HostSubagentsService
+  /** Web workbench catalog; Agent execution routes by session cwd without it. */
+  workspaceRegistry?: HostWorkspaceRegistry
+  /** DSH's credentials store; absent from a profile that mounts no provider. */
+  credentials?: HostCredentialsService
+  get(name: string): unknown
+  /** Cordis owns service publication in every profile, including Headless. */
+  provide(name: string, value?: unknown, check?: () => boolean): unknown
+  inject(services: string[], callback: (ctx: HostContextShape) => void): unknown
+  /**
+   * `options` is optional and forwarded verbatim to the host. `prepend`
+   * places the listener at the head of the chain, which for a waterfall
+   * means it observes the fully assembled result. Omitting it keeps the
+   * previous two-argument behaviour exactly.
+   */
+  on(name: string, listener: (...args: never[]) => unknown, options?: { prepend?: boolean }): () => unknown
+  effect(callback: () => (() => unknown) | void, label?: string): () => unknown
+}

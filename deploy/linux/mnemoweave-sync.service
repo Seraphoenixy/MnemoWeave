@@ -1,0 +1,22 @@
+[Unit]
+Description=MnemoWeave Memory Sync
+After=network.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+StateDirectory=mnemoweave-sync
+UMask=0077
+LoadCredential=sync-auth:/etc/mnemoweave-sync/auth.json
+Environment=MNEMOWEAVE_SYNC_AUTH_FILE=%d/sync-auth
+Environment=MNEMOWEAVE_SYNC_DATA_DIR=/var/lib/mnemoweave-sync
+ExecStart=/usr/bin/node /opt/mnemoweave/mnemo-weave-sync-server.mjs
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

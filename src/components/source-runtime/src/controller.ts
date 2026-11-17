@@ -1,0 +1,909 @@
+import {
+  closeSync,
+  constants,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+  writeSync,
+} from 'node:fs'
+import { createHash } from 'node:crypto'
+import { basename, join, resolve } from 'node:path'
+import {
+  DEFAULT_RUNTIME_MEMORY_LIMIT_BYTES,
+  DEFAULT_RUNTIME_USER_LIMIT_BYTES,
+  MAX_RUNTIME_MEMORY_LIMIT_BYTES,
+} from './defaults.ts'
+import type { RuntimeMemoryStorage } from './config.ts'
+import type {
+  RuntimeMemoryAction,
+  RuntimeMemoryCompactedEntry,
+  RuntimeMemoryEntry,
+  RuntimeMemoryEntryOrigin,
+  RuntimeMemoryImportance,
+  RuntimeMemoryMaintenancePlan,
+  RuntimeMemoryMutation,
+  RuntimeMemoryMutationResult,
+  RuntimeMemorySnapshot,
+  RuntimeMemoryTarget,
+  RuntimeMemoryTargetView,
+  RuntimeMemoryUsage,
+} from './contracts.ts'
+import {
+  RUNTIME_MEMORY_VERSION, RUNTIME_ENTRY_DELIMITER, RUNTIME_MEMORY_LIMITS, RUNTIME_BRANCH_NAME_MAX, RUNTIME_BRANCH_NAME_PATTERN,
+  RUNTIME_ARCHIVE_DIRECTORY, RUNTIME_DIRECTORY, RUNTIME_ENTRY_MAX_BYTES, RUNTIME_LOCK_FILE, RUNTIME_LOCK_STALE_MS, RUNTIME_MEMORIES_FILE, RUNTIME_PROJECTION_FILES, WORKING_RULES_FILE,
+  parseRuntimeBranches, runtimeBytes, runtimeProjection, runtimePinnedProjection, assertRuntimePinnedBudget, RUNTIME_PINNED_PROJECTION_LIMIT, type RuntimeMemoryLimits,
+} from './contracts.ts'
+
+export { RUNTIME_BRANCH_NAME_MAX }
+
+export interface RuntimeMemoryContextProjection {
+  revision: string
+  text: string
+  /** Exact entries represented by this branch-aware prompt projection. */
+  entries: RuntimeMemoryEntry[]
+  /** Complete stored entry count before branch filtering. */
+  totalEntries: number
+  minimumCharacters: number
+}
+
+const LOCK_TIMEOUT_MS = 5_000
+const LOCK_RETRY_MS = 20
+
+interface RuntimeMemoryFile {
+  version: typeof RUNTIME_MEMORY_VERSION
+  entries: RuntimeMemoryEntry[]
+  importedRoots?: string[]
+  workingRulesLimit?: number
+}
+
+interface WorkingRulesOptions {
+  legacyRoots: readonly string[]
+  followStoredLimit?: boolean
+}
+
+type RuntimeMemoryResultFields = Pick<RuntimeMemoryMutationResult, 'message' | 'added' | 'replaced' | 'removed'>
+
+interface PreparedRuntimeMemoryMutation {
+  changed: boolean
+  projectedEntries: RuntimeMemoryEntry[]
+  compactableEntries: RuntimeMemoryEntry[]
+  pendingEntry?: RuntimeMemoryEntry
+  excludedEntry?: RuntimeMemoryEntry
+  fields: RuntimeMemoryResultFields
+}
+
+/** Append to a file that is not a symbolic link; the open fails on one. */
+function appendWithoutLinks(path: string, text: string): void {
+  const descriptor = openSync(path, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | (constants.O_NOFOLLOW ?? 0), 0o600)
+  try {
+    const bytes = Buffer.from(text, 'utf8')
+    for (let offset = 0; offset < bytes.length;) offset += writeSync(descriptor, bytes, offset, bytes.length - offset)
+  } finally { closeSync(descriptor) }
+}
+
+export class RuntimeMemoryCapacityError extends Error {
+  readonly code = 'runtime-capacity' as const
+  constructor(
+    readonly target: RuntimeMemoryTarget,
+    readonly used: number,
+    readonly projected: number,
+    readonly limit: number,
+  ) {
+    super(`Would exceed ${target} runtime memory capacity: ${projected} bytes (current ${used}, limit ${limit}). Archive and compact runtime memory before retrying.`)
+    this.name = 'RuntimeMemoryCapacityError'
+  }
+}
+
+export class RuntimeMemoryConflictError extends Error {
+  readonly code = 'revision-conflict' as const
+  constructor() {
+    super('runtime memory changed while archival was running; no compacted data was applied')
+    this.name = 'RuntimeMemoryConflictError'
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isTarget(value: unknown): value is RuntimeMemoryTarget {
+  return value === 'memory' || value === 'user'
+}
+
+function isImportance(value: unknown): value is RuntimeMemoryImportance {
+  return value === 'critical' || value === 'normal' || value === 'low'
+}
+
+export const RUNTIME_BRANCHES_PER_ENTRY_MAX = 16
+
+/**
+ * The single entry a Working Rules scope syncs. Named like an archive entry so
+ * a scope built from files and a scope built from one file travel the same way.
+ */
+export const WORKING_RULES_SYNC_PATH = 'working-rules.json'
+
+/** Validate a model-supplied branch scope. Returns the normalized list; an empty list means "no scope". */
+export function normalizeRuntimeBranches(value: unknown, field = 'branches'): string[] {
+  if (!Array.isArray(value)) throw new Error(`${field} must be an array of git branch names`)
+  const branches: string[] = []
+  const seen = new Set<string>()
+  for (const item of value) {
+    if (typeof item !== 'string') throw new Error(`${field} must contain only git branch names`)
+    const branch = item.trim()
+    if (branch === ''
+      || branch.length > RUNTIME_BRANCH_NAME_MAX
+      || !RUNTIME_BRANCH_NAME_PATTERN.test(branch)
+      || branch === '-'
+      || branch.startsWith('/') || branch.startsWith('-')
+      || branch.endsWith('/') || branch.endsWith('.')
+      || branch.includes('..') || branch.includes('//') || branch.includes('@{')) {
+      throw new Error(`${field} must contain git branch names (letters, numbers, dot, underscore, slash, dash)`)
+    }
+    if (seen.has(branch)) throw new Error(`${field} must not repeat a branch name`)
+    seen.add(branch)
+    branches.push(branch)
+  }
+  if (branches.length > RUNTIME_BRANCHES_PER_ENTRY_MAX) {
+    throw new Error(`${field} supports at most ${RUNTIME_BRANCHES_PER_ENTRY_MAX} branch names`)
+  }
+  return branches
+}
+
+function entryMatchesBranch(entry: RuntimeMemoryEntry, branch: string): boolean {
+  return entry.branches === undefined || entry.branches.length === 0 || entry.branches.includes(branch)
+}
+
+function scopeBranch(branch: string | undefined): string | undefined {
+  const value = branch?.trim()
+  return value === undefined || value === '' ? undefined : value
+}
+
+function normalizeContent(value: string | undefined, field: string): string {
+  const content = value?.trim().replace(/\s+/gu, ' ') ?? ''
+  if (content === '') throw new Error(`${field} is required`)
+  if (content.includes('§')) throw new Error(`${field} must not contain the reserved § entry delimiter`)
+  const bytes = Buffer.byteLength(content, 'utf8')
+  if (bytes > RUNTIME_ENTRY_MAX_BYTES) throw new Error(`${field} is too large (${bytes} bytes; max ${RUNTIME_ENTRY_MAX_BYTES})`)
+  return content
+}
+
+function parseOrigin(value: unknown): RuntimeMemoryEntryOrigin | undefined {
+  if (!isRecord(value)) return undefined
+  if (typeof value.machine !== 'string' || typeof value.label !== 'string' || typeof value.at !== 'string') return undefined
+  return { machine: value.machine, label: value.label, at: value.at }
+}
+
+function parseEntry(value: unknown): RuntimeMemoryEntry | undefined {
+  if (!isRecord(value) || typeof value.content !== 'string' || !isTarget(value.target) || !isImportance(value.importance)) return undefined
+  if (typeof value.created_at !== 'string' || typeof value.updated_at !== 'string') return undefined
+  const content = value.content.trim().replace(/\s+/gu, ' ')
+  if (content === '' || content.includes('§')) return undefined
+  if (value.target === 'user' && value.branches !== undefined) return undefined
+  if (value.pinned !== undefined && typeof value.pinned !== 'boolean') return undefined
+  const branches = parseRuntimeBranches(value.branches)
+  // The provenance a Host stamps is kept, read through its own rule like the branch
+  // scope; nothing else from the stored object passes through unchecked.
+  const origin = parseOrigin(value.origin)
+  return {
+    content,
+    created_at: value.created_at,
+    updated_at: value.updated_at,
+    target: value.target,
+    importance: value.importance,
+    ...(value.pinned === undefined ? {} : { pinned: value.pinned }),
+    ...(branches === undefined ? {} : { branches }),
+    ...(origin === undefined ? {} : { origin }),
+  }
+}
+
+function age(timestamp: string, projectedAt: number): string {
+  const time = Date.parse(timestamp)
+  if (!Number.isFinite(time)) return 'unknown'
+  if (time > projectedAt) return 'future'
+  return `${Math.floor((projectedAt - time) / 86_400_000)}d`
+}
+
+/** Prompt-only annotations; stored content, matching and capacity stay unchanged. */
+function contextMarkdown(entries: readonly RuntimeMemoryEntry[], target: RuntimeMemoryTarget, projectedAt: number): string {
+  return entries.filter(entry => entry.target === target).map(entry => {
+    const annotations: string[] = []
+    if (entry.importance !== 'normal') annotations.push(`importance=${entry.importance}`)
+    for (const [name, timestamp] of [['created', entry.created_at], ['updated', entry.updated_at]] as const) {
+      const elapsed = age(timestamp, projectedAt)
+      if (elapsed !== '0d') annotations.push(`${name}=${elapsed}`)
+    }
+    return `${annotations.length === 0 ? '' : `[${annotations.join('; ')}]\n`}${entry.content}`
+  }).join(RUNTIME_ENTRY_DELIMITER)
+}
+
+function revision(file: RuntimeMemoryFile): string {
+  return createHash('sha256').update(JSON.stringify(file)).digest('hex')
+}
+
+function prepareMutation(
+  before: readonly RuntimeMemoryEntry[],
+  request: RuntimeMemoryMutation,
+  now: string,
+  preserveImportance = false,
+): PreparedRuntimeMemoryMutation {
+  if (!isTarget(request.target)) throw new Error('target must be memory or user')
+  if (!['add', 'replace', 'remove'].includes(request.action)) throw new Error('action must be add, replace, or remove')
+  if (request.importance !== undefined && !isImportance(request.importance)) throw new Error('importance must be critical, normal, or low')
+  if (request.target === 'user' && request.branches !== undefined) throw new Error('branches applies to target=memory only')
+  const branchScope = request.branches === undefined ? undefined : normalizeRuntimeBranches(request.branches)
+  const entries = before.map(entry => ({ ...entry }))
+
+  if (request.action === 'add') {
+    const content = normalizeContent(request.content, 'content')
+    const duplicate = entries.find(entry => entry.target === request.target && entry.content === content)
+    if (duplicate !== undefined) {
+      return {
+        changed: false,
+        projectedEntries: entries,
+        compactableEntries: entries.filter(entry => entry.target === request.target),
+        fields: { message: 'Entry already exists (no duplicate added).', added: duplicate.content },
+      }
+    }
+    const pendingEntry: RuntimeMemoryEntry = {
+      content,
+      created_at: now,
+      updated_at: now,
+      target: request.target,
+      importance: request.importance ?? 'normal',
+      ...(branchScope !== undefined && branchScope.length > 0 ? { branches: branchScope } : {}),
+    }
+    return {
+      changed: true,
+      projectedEntries: [...entries, pendingEntry],
+      compactableEntries: entries.filter(entry => entry.target === request.target),
+      pendingEntry,
+      fields: { message: 'Entry added.', added: content },
+    }
+  }
+
+  const oldText = normalizeContent(request.oldText, 'oldText')
+  const substringMatches = entries
+    .map((entry, index) => entry.target === request.target && entry.content.includes(oldText) ? index : -1)
+    .filter(index => index >= 0)
+  const exactMatches = substringMatches.filter(index => entries[index]!.content === oldText)
+  // Full entry content takes precedence, but duplicate exact entries remain ambiguous.
+  const matches = exactMatches.length > 0 ? exactMatches : substringMatches
+  if (matches.length === 0) throw new Error(`No ${request.target} entry contains ${JSON.stringify(oldText)}.`)
+  if (matches.length > 1) throw new Error(`Multiple ${request.target} entries contain ${JSON.stringify(oldText)}; use a unique substring.`)
+  const index = matches[0]!
+  const previous = entries[index]!
+  const compactableEntries = entries.filter((entry, entryIndex) => entry.target === request.target && entryIndex !== index)
+
+  if (request.action === 'replace') {
+    const ranks = { low: 0, normal: 1, critical: 2 }
+    const requested = request.importance ?? previous.importance
+    const importance = preserveImportance && ranks[requested] < ranks[previous.importance] ? previous.importance : requested
+    const content = normalizeContent(request.content, 'content')
+    const pendingEntry: RuntimeMemoryEntry = {
+      ...previous,
+      content,
+      updated_at: now,
+      importance,
+    }
+    if (branchScope !== undefined) {
+      if (branchScope.length === 0) delete pendingEntry.branches
+      else pendingEntry.branches = branchScope
+    }
+    entries[index] = pendingEntry
+    return {
+      changed: true,
+      projectedEntries: entries,
+      compactableEntries,
+      pendingEntry,
+      excludedEntry: previous,
+      fields: { message: importance === requested ? 'Entry replaced.' : 'Entry replaced; original importance preserved.', replaced: { from: previous.content, to: content } },
+    }
+  }
+
+  return {
+    changed: true,
+    projectedEntries: entries.filter((_, entryIndex) => entryIndex !== index),
+    compactableEntries,
+    excludedEntry: previous,
+    fields: { message: 'Entry removed.', removed: previous.content },
+  }
+}
+
+function compactionCandidates(
+  compacted: readonly RuntimeMemoryCompactedEntry[],
+  existing: readonly RuntimeMemoryEntry[],
+  target: RuntimeMemoryTarget,
+  now: string,
+): RuntimeMemoryEntry[] {
+  const seen = new Set<string>()
+  const existingByContent = new Map<string, RuntimeMemoryEntry>()
+  // Preserve find()'s first match, including legacy duplicates with different scopes.
+  for (const entry of existing) if (!existingByContent.has(entry.content)) existingByContent.set(entry.content, entry)
+  return compacted.map((entry): RuntimeMemoryEntry => {
+    const content = normalizeContent(entry.content, 'compacted content')
+    if (!isImportance(entry.importance)) throw new Error('compacted importance must be critical, normal, or low')
+    if (seen.has(content)) throw new Error('compacted runtime memory contains duplicate entries')
+    seen.add(content)
+    const unchanged = existingByContent.get(content)
+    // A compactor that drops the scope inherits it from the identical committed entry, so branch
+    // visibility can never be silently widened by maintenance.
+    const inheritedBranches = entry.branches ?? unchanged?.branches
+    if (entry.pinned !== undefined && entry.pinned !== unchanged?.pinned) throw new Error('Compaction cannot change pin state')
+    if (unchanged?.pinned === true && (entry.importance !== unchanged.importance || JSON.stringify(inheritedBranches) !== JSON.stringify(unchanged.branches))) throw new Error('Compaction cannot change a pinned entry')
+    return {
+      content,
+      created_at: unchanged?.created_at ?? now,
+      updated_at: unchanged?.updated_at ?? now,
+      target,
+      importance: entry.importance,
+      ...(unchanged?.pinned === undefined ? {} : { pinned: unchanged.pinned }),
+      ...(unchanged?.origin === undefined ? {} : { origin: unchanged.origin }),
+      ...(inheritedBranches === undefined ? {} : { branches: inheritedBranches }),
+    }
+  })
+}
+
+function packCompactionCandidates(
+  replacements: readonly RuntimeMemoryEntry[],
+  target: RuntimeMemoryTarget,
+  maxBytes: number,
+): RuntimeMemoryEntry[] {
+  if (runtimeBytes(replacements.filter(entry => entry.pinned === true), target) > maxBytes) throw new Error('Pinned runtime entries exceed the available capacity. Unpin entries or increase the capacity; no data was changed.')
+  const ranked: Record<'pinned' | RuntimeMemoryImportance, number[]> = { pinned: [], critical: [], normal: [], low: [] }
+  replacements.forEach((entry, index) => ranked[entry.pinned === true ? 'pinned' : entry.importance].push(index))
+  const selected = new Set<number>()
+  const delimiterBytes = Buffer.byteLength(RUNTIME_ENTRY_DELIMITER, 'utf8')
+  let used = 0
+  let count = 0
+  // Stable buckets retain pins first, then preserve importance and original order.
+  for (const importance of ['pinned', 'critical', 'normal', 'low'] as const) for (const index of ranked[importance]) {
+    const entry = replacements[index]!
+    const matchesTarget = entry.target === target
+    const added = matchesTarget ? Buffer.byteLength(entry.content, 'utf8') + (count === 0 ? 0 : delimiterBytes) : 0
+    if (used + added > maxBytes) continue
+    used += added
+    if (matchesTarget) count += 1
+    selected.add(index)
+  }
+  return replacements.filter((_, index) => selected.has(index))
+}
+
+function sleepSync(milliseconds: number): void {
+  const buffer = new Int32Array(new SharedArrayBuffer(4))
+  Atomics.wait(buffer, 0, 0, milliseconds)
+}
+
+/**
+ * Single authority for hot memory. JSON is the durable source of truth;
+ * Markdown files retain plain content; prompt projections add recorded metadata.
+ */
+export class RuntimeMemoryController {
+  readonly directory: string
+  readonly sourcePath: string
+  readonly userSourcePath: string
+  readonly memoryPath: string
+  readonly userPath: string
+  readonly lockPath: string
+  /** Where MEMORY.md entries go when compaction leaves them out and no Memory Space can take them. */
+  readonly archivePath: string
+  readonly archiveSourcePath: string
+  readonly limits: RuntimeMemoryLimits
+
+  private queue: Promise<unknown> = Promise.resolve()
+  private readonly localUserPath: string
+  private readonly userController: RuntimeMemoryController | undefined
+
+  private get pinnedBudget(): number {
+    return this.workingRules === undefined ? RUNTIME_PINNED_PROJECTION_LIMIT : 2 * RUNTIME_PINNED_PROJECTION_LIMIT
+  }
+
+  constructor(
+    runner: RuntimeMemoryStorage,
+    private readonly now: () => Date = () => new Date(),
+    limits: RuntimeMemoryLimits = RUNTIME_MEMORY_LIMITS,
+    userRunner?: RuntimeMemoryStorage,
+    private readonly workingRules?: WorkingRulesOptions,
+  ) {
+    for (const [target, limit] of Object.entries(limits)) {
+      if (!Number.isInteger(limit) || limit < 1 || limit > MAX_RUNTIME_MEMORY_LIMIT_BYTES) {
+        throw new Error(`runtime ${target} memory limit must be an integer within 1..${MAX_RUNTIME_MEMORY_LIMIT_BYTES} bytes`)
+      }
+    }
+    this.limits = workingRules === undefined ? { ...limits } : { memory: limits.memory + limits.user, user: 0 }
+    this.directory = join(runner.effectiveDataDir(), RUNTIME_DIRECTORY)
+    this.sourcePath = join(this.directory, RUNTIME_MEMORIES_FILE)
+    this.memoryPath = join(this.directory, workingRules === undefined ? RUNTIME_PROJECTION_FILES.memory : WORKING_RULES_FILE)
+    this.localUserPath = join(this.directory, RUNTIME_PROJECTION_FILES.user)
+    this.lockPath = join(this.directory, RUNTIME_LOCK_FILE)
+    this.archivePath = join(this.directory, RUNTIME_ARCHIVE_DIRECTORY, workingRules === undefined ? 'MEMORY.md' : WORKING_RULES_FILE)
+    this.archiveSourcePath = join(this.directory, RUNTIME_ARCHIVE_DIRECTORY, 'memories.jsonl')
+    const userDirectory = userRunner === undefined ? this.directory : join(userRunner.effectiveDataDir(), RUNTIME_DIRECTORY)
+    this.userController = userDirectory === this.directory || userRunner === undefined
+      ? undefined
+      : new RuntimeMemoryController(userRunner, now, this.limits)
+    this.userPath = workingRules === undefined ? this.userController?.userPath ?? this.localUserPath : this.memoryPath
+    this.userSourcePath = this.userController?.sourcePath ?? this.sourcePath
+    this.initialize()
+  }
+
+  snapshot(): RuntimeMemorySnapshot {
+    const local = this.readSource()
+    if (this.userController === undefined) return this.snapshotUnlocked(local)
+    const global = this.userController.readSource()
+    return this.snapshotUnlocked({
+      version: RUNTIME_MEMORY_VERSION,
+      entries: [
+        ...global.entries.filter(entry => entry.target === 'user'),
+        ...local.entries.filter(entry => entry.target === 'memory'),
+      ],
+    })
+  }
+
+  captureWorkingRules(): { bytes: Buffer; entries: Record<string, Uint8Array>; empty: boolean } {
+    if (this.workingRules === undefined) throw new Error('Sync requires a Working Rules controller')
+    const content = this.withLock(() => this.workingRulesContent(this.readSource()))
+    // One scope, one file: addressing it by path keeps the shape the same as a
+    // Pack scope, so the same manifest comparison drives both.
+    return { ...content, entries: { [WORKING_RULES_SYNC_PATH]: content.bytes } }
+  }
+
+  /** Rebuild the scope's one file from the entries a pull assembled. */
+  assembleWorkingRules(entries: Record<string, Uint8Array>): Buffer {
+    const bytes = entries[WORKING_RULES_SYNC_PATH]
+    if (bytes === undefined) throw new Error('Working Rules sync is missing its content entry')
+    return Buffer.from(bytes)
+  }
+
+  replaceWorkingRules(bytes: Buffer, matches: (live: Buffer) => boolean): void {
+    if (this.workingRules === undefined) throw new Error('Sync requires a Working Rules controller')
+    const payload = this.decodeSource(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as unknown)
+    this.withLock(() => {
+      const local = this.readSource()
+      if (!matches(this.workingRulesContent(local).bytes)) throw new Error('Working Rules changed during sync; retry')
+      const limit = local.workingRulesLimit ?? this.limits.memory
+      const used = runtimeBytes(payload.entries, 'memory')
+      if (used > limit) throw new RuntimeMemoryCapacityError('memory', runtimeBytes(local.entries, 'memory'), used, limit)
+      assertRuntimePinnedBudget(payload.entries, this.pinnedBudget)
+      this.persist({ ...local, entries: payload.entries })
+    })
+  }
+
+  private workingRulesContent(file: RuntimeMemoryFile): { bytes: Buffer; empty: boolean } {
+    return {
+      bytes: Buffer.from(JSON.stringify({ version: file.version, entries: file.entries })),
+      empty: file.entries.length === 0,
+    }
+  }
+
+  /**
+   * Read the exact Runtime revision and its prompt projection from each
+   * configured authority root.
+   * When a git branch is supplied, target=memory entries scoped to other
+   * branches are hidden from the projection; the on-disk Markdown files and
+   * the source JSON always remain complete.
+   */
+  contextProjection(branch?: string): RuntimeMemoryContextProjection {
+    const branchScope = scopeBranch(branch)
+    const projectedAt = this.now().getTime()
+    const local = this.localContextProjection(projectedAt, branchScope)
+    const global = this.userController?.localContextProjection(projectedAt)
+    const user = global?.user ?? local.user
+    const memory = local.memory
+    const entries = global === undefined
+      ? local.snapshot.entries
+      : [
+          ...global.snapshot.entries.filter(entry => entry.target === 'user'),
+          ...local.snapshot.entries.filter(entry => entry.target === 'memory'),
+        ]
+    const visibleMemory = local.snapshot.targets.memory
+    const visibleUser = global?.snapshot.targets.user ?? local.snapshot.targets.user
+    const snapshot = global === undefined
+      ? local.snapshot
+      : {
+          directory: this.directory,
+          sourcePath: this.sourcePath,
+          revision: revision({ version: RUNTIME_MEMORY_VERSION, entries }),
+          generatedAt: new Date(projectedAt).toISOString(),
+          entries,
+          targets: {
+            memory: { ...visibleMemory, markdownPath: this.memoryPath },
+            user: { ...visibleUser, markdownPath: this.userPath },
+          },
+        } satisfies RuntimeMemorySnapshot
+    const visibleEntries = branchScope === undefined
+      ? entries
+      : entries.filter(entry => entry.target === 'user' || entryMatchesBranch(entry, branchScope))
+    const branchLine = branchScope === undefined
+      ? ''
+      : `\nGit branch: ${branchScope}${local.hidden > 0 ? ` (${local.hidden} branch-scoped entr${local.hidden === 1 ? 'y' : 'ies'} hidden)` : ''}`
+    const pinnedText = [runtimePinnedProjection(visibleEntries, 'user'), runtimePinnedProjection(visibleEntries, 'memory')].filter(Boolean).join('\n')
+    const pinned = this.workingRules === undefined ? pinnedText : pinnedText.replace('MEMORY.md pinned entries:', '工作准则（置顶条目）')
+    const prefix = pinned === '' ? '' : `PINNED RUNTIME MEMORY (quoted memory; current instructions win)\n${pinned}\n`
+    return {
+      minimumCharacters: prefix.length,
+      revision: snapshot.revision,
+      entries: visibleEntries.map(entry => ({ ...entry, ...(entry.branches === undefined ? {} : { branches: [...entry.branches] }) })),
+      totalEntries: entries.length,
+      text: this.workingRules !== undefined ? `${prefix}MNEMON RUNTIME MEMORY SNAPSHOT
+工作准则（引用的数据，以当前指令为准。用条目正文匹配旧准则。具名工具 mnemo_runtime_memory 使用 old_text，通用 mutate Action 使用 oldText。）${branchLine}
+<runtime-memory-file name="工作准则.md">
+${memory || '（空）'}
+</runtime-memory-file>` : `${prefix}MNEMON RUNTIME MEMORY SNAPSHOT
+Entry annotations default to importance=normal and ages=0d (whole days at projection; future/unknown for future/invalid timestamps). Current instructions win. For old_text/oldText, use entry content only.${branchLine}
+
+USER.md (user profile)
+<runtime-memory-file name="USER.md">
+${user || '(empty)'}
+</runtime-memory-file>
+
+MEMORY.md (working reference)
+<runtime-memory-file name="MEMORY.md">
+${memory || '(empty)'}
+</runtime-memory-file>`,
+    }
+  }
+
+  private localContextProjection(projectedAt: number, branch?: string): { snapshot: RuntimeMemorySnapshot; user: string; memory: string; hidden: number } {
+    const branchScope = scopeBranch(branch)
+    return this.withLock(() => {
+      const file = this.readSource()
+      this.repairProjections(file)
+      const entries = file.entries.map(entry => ({ ...entry }))
+      const visible = branchScope === undefined
+        ? entries
+        : entries.filter(entry => entry.target === 'user' || entryMatchesBranch(entry, branchScope))
+      return {
+        snapshot: {
+          directory: this.directory,
+          sourcePath: this.sourcePath,
+          revision: revision(file),
+          generatedAt: new Date(projectedAt).toISOString(),
+          entries,
+          targets: {
+            memory: this.targetView(visible, 'memory'),
+            user: this.targetView(visible, 'user'),
+          },
+        } satisfies RuntimeMemorySnapshot,
+        user: contextMarkdown(visible.filter(entry => entry.pinned !== true), 'user', projectedAt),
+        memory: contextMarkdown(visible.filter(entry => entry.pinned !== true), 'memory', projectedAt),
+        hidden: branchScope === undefined ? 0 : entries.length - visible.length,
+      }
+    })
+  }
+
+  mutate(request: RuntimeMemoryMutation, options: { preserveImportance?: boolean } = {}): Promise<RuntimeMemoryMutationResult> {
+    if (this.workingRules !== undefined) request = { ...request, target: 'memory' }
+    if (request.target === 'user' && this.userController !== undefined) return this.userController.mutate(request, options)
+    const operation = this.queue.then(() => this.withLock(() => this.mutateLocked(request, options.preserveImportance)))
+    this.queue = operation.catch(() => undefined)
+    return operation
+  }
+
+  /** Human-management only. Automatic maintenance preserves this explicit state. */
+  setPinned(target: RuntimeMemoryTarget, content: string, pinned: boolean): Promise<RuntimeMemorySnapshot> {
+    if (this.workingRules !== undefined) target = 'memory'
+    if (target === 'user' && this.userController !== undefined) return this.userController.setPinned(target, content, pinned).then(() => this.snapshot())
+    const operation = this.queue.then(() => this.withLock(() => {
+      const file = this.readSource()
+      const matches = file.entries.filter(entry => entry.target === target && entry.content === content)
+      if (matches.length !== 1) throw new Error('Pin requires one exact current entry; reload and retry')
+      matches[0]!.pinned = pinned
+      matches[0]!.updated_at = this.now().toISOString()
+      if (pinned) assertRuntimePinnedBudget(file.entries, this.pinnedBudget)
+      this.persist(file)
+      return this.snapshotUnlocked(file)
+    }))
+    this.queue = operation.catch(() => undefined)
+    return operation
+  }
+
+  /** Resolve exactly which committed entries survive a blocked mutation and are safe to compact. */
+  planMaintenance(request: RuntimeMemoryMutation, options: { preserveImportance?: boolean } = {}): Promise<RuntimeMemoryMaintenancePlan> {
+    if (this.workingRules !== undefined) request = { ...request, target: 'memory' }
+    if (request.target === 'user' && this.userController !== undefined) return this.userController.planMaintenance(request, options)
+    const operation = this.queue.then(() => this.withLock(() => {
+      const file = this.readSource()
+      const prepared = prepareMutation(file.entries, request, this.now().toISOString(), options.preserveImportance)
+      assertRuntimePinnedBudget(prepared.projectedEntries, this.pinnedBudget)
+      const used = runtimeBytes(file.entries, request.target)
+      const projected = runtimeBytes(prepared.projectedEntries, request.target)
+      const limit = this.limits[request.target]
+      return {
+        revision: revision(file),
+        action: request.action,
+        target: request.target,
+        entries: prepared.compactableEntries.map(entry => ({ ...entry })),
+        ...(prepared.pendingEntry === undefined ? {} : {
+          pending: { content: prepared.pendingEntry.content, importance: prepared.pendingEntry.importance, ...(prepared.pendingEntry.pinned === undefined ? {} : { pinned: prepared.pendingEntry.pinned }) },
+        }),
+        ...(prepared.excludedEntry === undefined ? {} : { excluded: { ...prepared.excludedEntry } }),
+        used,
+        projected,
+        limit,
+        requiresMaintenance: prepared.changed && projected > limit,
+        localArchive: true as const,
+      }
+    }))
+    this.queue = operation.catch(() => undefined)
+    return operation
+  }
+
+  /**
+   * Commit semantic compaction and the original mutation together, or leave every local file unchanged.
+   * With `archive: 'local'`, committed MEMORY.md entries that compaction leaves out are appended to the
+   * local archive first, so a limit with no Memory Space to archive into never loses memory.
+   */
+  compactAndMutate(
+    expectedRevision: string,
+    request: RuntimeMemoryMutation,
+    compacted: RuntimeMemoryCompactedEntry[],
+    maxCompactedBytes?: number,
+    options: { archive?: 'local'; preserveImportance?: boolean } = {},
+  ): Promise<RuntimeMemoryMutationResult> {
+    if (this.workingRules !== undefined) request = { ...request, target: 'memory' }
+    if (request.target === 'user' && this.userController !== undefined) {
+      return this.userController.compactAndMutate(expectedRevision, request, compacted, maxCompactedBytes, options)
+    }
+    const operation = this.queue.then(() => this.withLock(() => {
+      const file = this.readSource()
+      const beforeRevision = revision(file)
+      if (beforeRevision !== expectedRevision) throw new RuntimeMemoryConflictError()
+      const now = this.now().toISOString()
+      const prepared = prepareMutation(file.entries, request, now, options.preserveImportance)
+      assertRuntimePinnedBudget(prepared.projectedEntries, this.pinnedBudget)
+      const compactedByteBudget = maxCompactedBytes ?? this.limits[request.target]
+      if (!Number.isInteger(compactedByteBudget) || compactedByteBudget < 0 || compactedByteBudget > this.limits[request.target]) {
+        throw new Error('compaction byte budget is invalid')
+      }
+      if (!prepared.changed) {
+        return this.result(request.target, prepared.projectedEntries, prepared.fields)
+      }
+      const replacements = compactionCandidates(compacted, prepared.compactableEntries, request.target, now)
+      for (const pinned of prepared.compactableEntries.filter(entry => entry.pinned === true)) {
+        if (!replacements.some(entry => entry.content === pinned.content && entry.pinned === true)) throw new Error('Compaction omitted a pinned entry; no data was changed')
+      }
+      if (prepared.pendingEntry !== undefined && replacements.some(entry => entry.content === prepared.pendingEntry!.content)) {
+        throw new Error('compacted runtime memory duplicates the pending mutation')
+      }
+      if (prepared.excludedEntry !== undefined && replacements.some(entry => entry.content === prepared.excludedEntry!.content)) {
+        throw new Error('compacted runtime memory reintroduces the replaced or removed entry')
+      }
+      // The worker supplies semantic candidates; deterministic packing owns exact
+      // UTF-8 accounting so the LLM never has to count bytes or delimiters.
+      const fitted = packCompactionCandidates(replacements, request.target, compactedByteBudget)
+      const targetEntries = [...fitted, ...(prepared.pendingEntry === undefined ? [] : [prepared.pendingEntry])]
+      const entries = [...file.entries.filter(entry => entry.target !== request.target), ...targetEntries]
+      const used = runtimeBytes(entries, request.target)
+      const limit = this.limits[request.target]
+      if (used > limit) throw new RuntimeMemoryCapacityError(request.target, runtimeBytes(file.entries, request.target), used, limit)
+      const next: RuntimeMemoryFile = { ...file, entries }
+      const kept = new Set(fitted.map(entry => entry.content))
+      const archived = options.archive === 'local' && request.target === 'memory'
+        ? prepared.compactableEntries.filter(entry => !kept.has(entry.content))
+        : undefined
+      // The archive is appended before the compacted store commits: a failure in
+      // between leaves an entry in both places, never in neither.
+      if (archived !== undefined && archived.length > 0) this.archiveLocally(archived, beforeRevision, now)
+      this.persist(next)
+      return {
+        ...this.result(request.target, entries, prepared.fields),
+        ...(archived === undefined ? {} : { archived: { entries: archived.length, path: this.archivePath } }),
+      }
+    }))
+    this.queue = operation.catch(() => undefined)
+    return operation
+  }
+
+  /** Append entries to the local archive: JSON Lines to restore from, and Markdown to read. */
+  private archiveLocally(entries: readonly RuntimeMemoryEntry[], fromRevision: string, archivedAt: string): void {
+    const directory = join(this.directory, RUNTIME_ARCHIVE_DIRECTORY)
+    mkdirSync(directory, { recursive: true, mode: 0o700 })
+    // The data directory can sit in a workspace: an archive never follows a link out of it.
+    const stat = lstatSync(directory)
+    if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error(`Runtime Memory archive is not a directory: ${directory}`)
+    // Refuse a link or a directory at either file before writing to the other.
+    for (const path of [this.archiveSourcePath, this.archivePath]) {
+      let file
+      try { file = lstatSync(path) } catch { continue }
+      if (!file.isFile()) throw new Error(`Runtime Memory archive file is not a regular file: ${path}`)
+    }
+    appendWithoutLinks(this.archiveSourcePath, entries.map(entry => `${JSON.stringify({ archivedAt, fromRevision, ...entry })}\n`).join(''))
+    const header = existsSync(this.archivePath) ? '' : this.workingRules === undefined
+      ? '# MEMORY.md archive\n\nEntries that left MEMORY.md at its limit while no Memory Space could take them, oldest first.\n'
+      : '# 工作准则归档\n'
+    appendWithoutLinks(this.archivePath, `${header}\n## ${archivedAt}\n\n${entries.map(entry => entry.content).join(RUNTIME_ENTRY_DELIMITER)}\n`)
+  }
+
+  private initialize(): void {
+    mkdirSync(this.directory, { recursive: true, mode: 0o700 })
+    this.withLock(() => {
+      const file = this.readSource()
+      if (this.workingRules !== undefined) {
+        const imported = new Set(file.importedRoots)
+        const currentDirectory = realpathSync.native(this.directory)
+        for (const root of this.workingRules.legacyRoots) {
+          const path = resolve(root, RUNTIME_DIRECTORY, RUNTIME_MEMORIES_FILE)
+          if (!existsSync(path)) continue
+          const directory = realpathSync.native(resolve(root, RUNTIME_DIRECTORY))
+          if (currentDirectory === directory || imported.has(directory)) continue
+          file.entries.push(...this.readSource(path).entries)
+          imported.add(directory)
+        }
+        file.importedRoots = [...imported]
+        if (!this.workingRules.followStoredLimit) file.workingRulesLimit = this.limits.memory
+      }
+      this.persist(file)
+    })
+  }
+
+  private mutateLocked(request: RuntimeMemoryMutation, preserveImportance = false): RuntimeMemoryMutationResult {
+    const file = this.readSource()
+    const prepared = prepareMutation(file.entries, request, this.now().toISOString(), preserveImportance)
+    assertRuntimePinnedBudget(prepared.projectedEntries, this.pinnedBudget)
+    const limit = file.workingRulesLimit ?? this.limits[request.target]
+    if (!prepared.changed) return this.result(request.target, prepared.projectedEntries, prepared.fields, limit)
+    const used = runtimeBytes(prepared.projectedEntries, request.target)
+    if (used > limit) {
+      if (this.workingRules === undefined) throw new RuntimeMemoryCapacityError(request.target, runtimeBytes(file.entries, request.target), used, limit)
+      const pending = prepared.pendingEntry
+      const reserved = pending === undefined ? 0 : Buffer.byteLength(pending.content, 'utf8')
+      if (reserved > limit) throw new Error(`The working rule requires ${reserved} UTF-8 bytes but Working Rules are limited to ${limit}.`)
+      const separator = pending === undefined ? 0 : Buffer.byteLength(RUNTIME_ENTRY_DELIMITER, 'utf8')
+      const kept = packCompactionCandidates(prepared.compactableEntries, request.target, Math.max(0, limit - reserved - separator))
+      const retained = new Set(kept)
+      const archived = prepared.compactableEntries.filter(entry => !retained.has(entry))
+      const entries = [...kept, ...(pending === undefined ? [] : [pending])]
+      this.archiveLocally(archived, revision(file), this.now().toISOString())
+      this.persist({ ...file, entries })
+      return { ...this.result(request.target, entries, prepared.fields, limit), archived: { entries: archived.length, path: this.archivePath } }
+    }
+    this.persist({ ...file, entries: prepared.projectedEntries })
+    return this.result(request.target, prepared.projectedEntries, prepared.fields, limit)
+  }
+
+  private result(
+    target: RuntimeMemoryTarget,
+    entries: readonly RuntimeMemoryEntry[],
+    fields: RuntimeMemoryResultFields,
+    limit = this.limits[target],
+  ): RuntimeMemoryMutationResult {
+    return {
+      success: true,
+      message: fields.message,
+      target,
+      entryCount: entries.filter(entry => entry.target === target).length,
+      usage: { used: runtimeBytes(entries, target), limit },
+      ...(fields.added === undefined ? {} : { added: fields.added }),
+      ...(fields.replaced === undefined ? {} : { replaced: fields.replaced }),
+      ...(fields.removed === undefined ? {} : { removed: fields.removed }),
+    }
+  }
+
+  private targetView(entries: readonly RuntimeMemoryEntry[], target: RuntimeMemoryTarget): RuntimeMemoryTargetView {
+    return {
+      target,
+      entryCount: entries.filter(entry => entry.target === target).length,
+      used: runtimeBytes(entries, target),
+      limit: this.limits[target],
+      markdownPath: target === 'memory' ? this.memoryPath : this.userPath,
+      pinned: { count: entries.filter(entry => entry.target === target && entry.pinned === true).length, characters: runtimePinnedProjection(entries, target).length, limit: this.pinnedBudget },
+    }
+  }
+
+  private snapshotUnlocked(file: RuntimeMemoryFile): RuntimeMemorySnapshot {
+    const entries = file.entries.map(entry => ({ ...entry }))
+    return {
+      ...(this.workingRules === undefined ? {} : { storageKind: 'working-rules' as const }),
+      directory: this.directory,
+      sourcePath: this.sourcePath,
+      revision: revision(file),
+      generatedAt: this.now().toISOString(),
+      entries,
+      targets: {
+        memory: this.targetView(entries, 'memory'),
+        user: this.targetView(entries, 'user'),
+      },
+    }
+  }
+
+  private readSource(path = this.sourcePath): RuntimeMemoryFile {
+    if (!existsSync(path)) return { version: RUNTIME_MEMORY_VERSION, entries: [] }
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(readFileSync(path, 'utf8'))
+    } catch (error) {
+      throw new Error(`runtime memories.json is unreadable: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    return this.decodeSource(parsed)
+  }
+
+  private decodeSource(parsed: unknown): RuntimeMemoryFile {
+    if (!isRecord(parsed) || parsed.version !== RUNTIME_MEMORY_VERSION || !Array.isArray(parsed.entries)) {
+      throw new Error(`runtime memories.json must use version ${RUNTIME_MEMORY_VERSION}`)
+    }
+    const entries = parsed.entries.map(parseEntry)
+    if (entries.some(entry => entry === undefined)) throw new Error('runtime memories.json contains an invalid entry')
+    return {
+      version: RUNTIME_MEMORY_VERSION,
+      entries: (entries as RuntimeMemoryEntry[]).map(entry => this.workingRules === undefined ? entry : { ...entry, target: 'memory' }),
+      ...(Array.isArray(parsed.importedRoots) ? { importedRoots: parsed.importedRoots.filter((root): root is string => typeof root === 'string') } : {}),
+      ...(this.workingRules !== undefined && typeof parsed.workingRulesLimit === 'number' && Number.isInteger(parsed.workingRulesLimit) &&
+        parsed.workingRulesLimit > 0 && parsed.workingRulesLimit <= 2 * MAX_RUNTIME_MEMORY_LIMIT_BYTES ? { workingRulesLimit: parsed.workingRulesLimit } : {}),
+    }
+  }
+
+  private persist(file: RuntimeMemoryFile): void {
+    mkdirSync(this.directory, { recursive: true, mode: 0o700 })
+    const nonce = `${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}`
+    const writes: Array<[string, string]> = [
+      ...(this.workingRules === undefined ? [[this.localUserPath, runtimeProjection(file.entries, 'user')] as [string, string]] : []),
+      [this.memoryPath, runtimeProjection(file.entries, 'memory')],
+      [this.sourcePath, `${JSON.stringify(file, null, 2)}\n`],
+    ]
+    const temporaries = writes.map(([path]) => join(this.directory, `.${basename(path)}.${nonce}.tmp`))
+    try {
+      writes.forEach(([, content], index) => writeFileSync(temporaries[index]!, content, { encoding: 'utf8', mode: 0o600 }))
+      // Projections move first; memories.json is the final commit marker and source of truth.
+      writes.forEach(([path], index) => renameSync(temporaries[index]!, path))
+    } finally {
+      for (const temporary of temporaries) rmSync(temporary, { force: true })
+    }
+  }
+
+  private repairProjections(file: RuntimeMemoryFile): void {
+    const projections = this.workingRules === undefined ? [[this.localUserPath, 'user'], [this.memoryPath, 'memory']] as const : [[this.memoryPath, 'memory']] as const
+    for (const [path, target] of projections) {
+      const expected = runtimeProjection(file.entries, target)
+      let current: string | undefined
+      try {
+        current = readFileSync(path, 'utf8')
+      } catch {
+        current = undefined
+      }
+      if (current === expected) continue
+      const temporary = join(this.directory, `.${basename(path)}.${process.pid}.${Date.now()}.tmp`)
+      try {
+        writeFileSync(temporary, expected, { encoding: 'utf8', mode: 0o600 })
+        renameSync(temporary, path)
+      } finally {
+        rmSync(temporary, { force: true })
+      }
+    }
+  }
+
+  private withLock<T>(callback: () => T): T {
+    const started = Date.now()
+    let descriptor: number | undefined
+    while (descriptor === undefined) {
+      try {
+        descriptor = openSync(this.lockPath, 'wx', 0o600)
+      } catch (error) {
+        const code = isRecord(error) && typeof error.code === 'string' ? error.code : undefined
+        if (code !== 'EEXIST') throw error
+        try {
+          if (Date.now() - statSync(this.lockPath).mtimeMs > RUNTIME_LOCK_STALE_MS) {
+            rmSync(this.lockPath, { force: true })
+            continue
+          }
+        } catch {
+          continue
+        }
+        if (Date.now() - started >= LOCK_TIMEOUT_MS) throw new Error('timed out waiting for the runtime memory controller lock')
+        sleepSync(LOCK_RETRY_MS)
+      }
+    }
+    try {
+      return callback()
+    } finally {
+      closeSync(descriptor)
+      rmSync(this.lockPath, { force: true })
+    }
+  }
+}
