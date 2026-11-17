@@ -2,8 +2,8 @@ name: Diagnose unit tests
 
 # Reads the failing case names and their assertion detail from the unit suite on
 # the runner that reports the failure, without an authenticated log download.
-# Failing blocks are printed to stderr and re-emitted as workflow errors so they
-# appear in the public check-run annotations.
+# Every line of the failing files' output is re-emitted as a workflow error, so
+# the annotation list carries the assertion text.
 on:
   push:
     branches: [main]
@@ -32,18 +32,19 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Report failing cases
+      - name: Run each unit file separately
         if: always()
         run: |
           set +e
-          node --experimental-transform-types --test --test-reporter=tap "tests/unit/*.test.mjs" > unit.tap 2>&1
-          echo "exit status: $?"
-          # Print each failing case's block, from its `not ok` line to the next
-          # top-level result, so the assertion text is visible.
-          awk '/^not ok [0-9]+ - tests\//{printing=1} printing{print} /^ok [0-9]+ - tests\//{printing=0}' unit.tap \
-            | grep -v '^#' | head -120 > failed.txt
-          cat failed.txt
-          head -c 3000 failed.txt | while IFS= read -r line; do
-            [ -n "$line" ] && echo "::error title=unit failure::$line"
+          for file in tests/unit/*.test.mjs; do
+            node --experimental-transform-types --test "$file" > single.log 2>&1
+            status=$?
+            if [ $status -ne 0 ]; then
+              echo "::error title=failed file::$file (exit $status)"
+              # Emit the failing assertion lines for this file.
+              grep -E "✖|AssertionError|expected|actual|Error|at file" single.log | head -30 | while IFS= read -r line; do
+                echo "::error title=$file::$line"
+              done
+            fi
           done
           exit 0
