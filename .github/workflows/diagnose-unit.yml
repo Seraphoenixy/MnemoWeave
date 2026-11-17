@@ -42,7 +42,8 @@ jobs:
           awk '/^not ok/{name=$0} /^ *error: /{print name " || " $0}' unit.tap | head -40 | while IFS= read -r line; do
             echo "::error title=unit failure::$line"
           done
-          grep -n "AssertionError\|expected:\|actual:" unit.tap | head -40 | while IFS= read -r line; do
-            echo "::error title=unit detail::$line"
+          # The assertion that failed, for each failing case.
+          awk '/^# Subtest: /{case=$0} /AssertionError|Expected values|actual:|expected:|operator:|at .*test\.mjs/{print case " >> " $0}' unit.tap | head -80 | while IFS= read -r line; do
+            echo "::error title=unit assertion::$line"
           done
           exit 0
