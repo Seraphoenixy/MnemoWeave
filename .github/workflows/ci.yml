@@ -65,6 +65,13 @@ jobs:
       - name: Check documentation links and public plugin catalog
         run: pnpm run verify:docs
 
+      # Some component modules import their own package subpaths
+      # (dsh-mnemo-weave/extension-sdk, dsh-mnemo-weave/source-skills/contracts),
+      # which resolve to the built entries under dist/. The unit suite therefore
+      # runs after a build, not against a bare checkout.
+      - name: Build root package
+        run: pnpm run build
+
       - name: Run unit tests
         run: pnpm run test
 
