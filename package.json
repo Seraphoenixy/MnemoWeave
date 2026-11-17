@@ -1,6 +1,6 @@
 {
   "name": "dsh-mnemo-weave",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "MnemoWeave memory plugin for DeepSeek Harness and local MCP for Codex and ZCode.",
   "keywords": [
     "deepseek-harness",
