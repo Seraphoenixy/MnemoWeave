@@ -102,7 +102,14 @@ export function clearMemoryActivity(input: {
     stores.push(['workspace', workspaceActivityStore(input.workspace.root, input.workspace.path)])
   }
   stores.push(['working rules', workingRulesActivityStore()])
-  const before = Date.now()
+  // The boundary is the newest event either stream holds, so every event this
+  // call could see is behind it. Using the clock alone would leave an event
+  // recorded in the same millisecond in front of the clear while a slightly
+  // later one stayed behind it.
+  let before = 0
+  for (const [, store] of stores) {
+    for (const event of streamEvents(store).values()) before = Math.max(before, event.at ?? 0)
+  }
   let workspace = 0
   let rules = 0
   for (const [stream, store] of stores) {
