@@ -85,12 +85,13 @@ export const MNEMON_RPC_ENDPOINTS = {
     'status', 'status-summary', 'memory-system', 'versions', 'task-agent-models', 'runtime-memory', 'documents', 'document', 'document-search',
     'graph', 'bodies', 'body-directory', 'body-reconnect', 'provider-services', 'embedding-status', 'list', 'entities', 'search', 'agent-search', 'related',
     'turn-activities', 'turn-activity', 'skill-activity', 'assistant-message', 'source-management-catalog', 'source-management-read', 'source-assistance',
-    'diagnostics',
+    'diagnostics', 'memory-activity',
   ],
   [MNEMON_ACTIVATION_CHANNEL]: ['body', 'source-assistance'],
   [MNEMON_WRITE_CHANNEL]: [
     'runtime-memory', 'document', 'supervise', 'remember', 'link', 'forget', 'body-create', 'body-update', 'body-delete', 'body-merge',
     'body-metadata-maintain', 'provider-service-update', 'embedding-fill', 'source-management-mutate', 'source-assistance', 'version-update',
+    'memory-activity-clear',
   ],
   [MNEMON_PACK_CHANNEL]: ['target', 'export', 'inspect', 'import'],
   [MNEMON_SYNC_CHANNEL]: ['connection', 'save-connection', 'progress', 'sync-all', 'server-sync', 'server-sync-rules', 'server-sync-activity'],
@@ -144,6 +145,34 @@ export interface DiagnosticEntry {
   message: string
   /** Extra facts that help without being prose, such as a scope name or a duration. */
   detail?: string
+}
+
+/** One recorded memory activity event, as the Status page lists it. */
+export interface ActivityRecordView {
+  /** Milliseconds since the epoch, so the page formats it in its own locale. */
+  at: number
+  kind: 'memory' | 'subagent'
+  source?: string
+  operation: string
+  outcome: string
+  trigger?: string
+  skipReason?: string
+  results?: number
+  /** A delegated child's task type shares `operation`; these describe its run. */
+  durationMs?: number
+  committedWrites?: number
+  /** Which stream the event was recorded in: the selected workspace, or the global Working Rules stream. */
+  stream: 'workspace' | 'working rules'
+}
+
+/**
+ * How many events one clear stopped showing, per stream. The events themselves
+ * stay on disk as immutable records; a retraction hides them here and, after a
+ * sync, on every other client.
+ */
+export interface ActivityClearResult {
+  workspace: number
+  rules: number
 }
 
 /** A server sync in flight, and the one before it. */

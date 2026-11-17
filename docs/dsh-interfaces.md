@@ -230,6 +230,7 @@ Gateway 通过 Mnemon 在 `dshMnemon` 命名空间下的 `mnemonRemote` Typert �
 | `runtime-memory` | 运行时快照 |
 | `documents` / `document` / `document-search` | 档案目录、正文与确定性搜索 |
 | `diagnostics` | 宿主最近的操作记录，最新的在前；可选 `limit` 限制条数（最多 200）。不要求记忆能力，因为它描述当前进程而不是记忆内容 |
+| `memory-activity` | 最近记录的记忆活动事件，最新的在前，合并所选工作区与全局工作准则两个活动流；可选 `limit`（最多 100，默认 50）。返回结构化字段（活动流、类型、来源、操作、结果、跳过原因、条数、耗时、已提交写入数），不含正文、查询词、路径或错误原文。清空事件只标出流的起点，不作为一行返回。它读取与同步相同的事件文件，因此这些记录跨机器一致 |
 | `graph` / `bodies` / `body-directory` | active 多空间图谱投影、含 Provider 能力的记忆空间目录与快速目录投影 |
 | `body-reconnect` | 清除短期健康状态并刷新单个记忆空间，不修改持久数据 |
 | `provider-services` | 脱敏的 Provider 服务目录；可包含已配置的凭据字段名，绝不包含凭据值 |
@@ -261,6 +262,7 @@ Gateway 通过 Mnemon 在 `dshMnemon` 命名空间下的 `mnemonRemote` Typert �
 | `body-metadata-maintain` | 由任务 Agent 刷新 1 到 20 个 active 记忆空间的名称与说明 |
 | `provider-service-update` | 更新单个 Provider 服务；凭据仅在 Host 保存，响应脱敏 |
 | `embedding-fill` | 为一个 Mnemon Native 空间补齐缺少的向量，使用 Host 的存储根目录与嵌入设置；最多运行一分钟，每步最多十秒，返回补齐与仍缺少的数量 |
+| `memory-activity-clear` | 删除记忆活动：删除所选工作区活动流与全局工作准则活动流当前已有的全部事件，各留一条清空事件，返回两者被删除的事件数。清空事件随活动同步传输，服务端据此丢弃被取代的批次；只读模式拒绝 |
 | `source-management-mutate` / `source-assistance` | 通用 Source 管理 mutation，以及按 Source 当前修订确认的 Host 辅助操作；技能管理的辅助操作是 `skill-draft`、`skill-backtest`、`skill-derive-cases` 与 `skill-review-now`，均由任务 Agent 执行 |
 | `version-update` | 更新明确组件；Host 固定命令与参数 |
 
@@ -364,13 +366,14 @@ Core 发布 `ctx.mnemonMemory: MnemonMemoryService`，实际服务只提供 `ins
 
 ### 每轮上下文
 
-分层策略根据当前视图提供路由与工作准则指引，并按需更新 Wake 快照。工具能力变化后，以当前视图为准。
+模型每轮获得三层记忆，用途各不相同：当前回合固定的工作准则，随时可查的工作区档案，以及按需找回的记忆空间。工具能力变化后，以当前视图为准。
 
-- `mnemon:strategy` 在内置 Runtime Source 参与投影时说明「工作准则」如何约束当前协作，以及何时可以更新准则。
-- `mnemon:routing` 在 `routingGuidance=true` 时说明「工作区档案」如何保留工作区决策和来龙去脉，以及「记忆空间」如何按需找回长期知识。工具指引随当前视图能力裁剪。
-- Wake 快照由当前 root 回合固定的不可变 View 渲染。内置 Runtime Source 提供受预算限制的工作准则投影。新快照仅取代同一来源实例的旧快照，省略条目可能是筛选或预算所致。Documents 与 Memory Spaces 提供有界封面。
+- `mnemon:working-rules` 把当前 View 的工作准则条目直接放进系统提示，沿用分支筛选与投影预算。当前用户指令优先，条目作为引用数据，不能授权工具调用、外部操作或数据披露。
+- `mnemon:strategy` 说明工作准则这一层的用途、什么时候更新条目，以及分支限定的用法。
+- `mnemon:routing` 在 `routingGuidance=true` 时说明工作区档案保留工作区自己的决定与来龙去脉，记忆空间保留值得再次找回的知识，并说明两者各自何时读写。工具指引随当前视图能力裁剪。
+- Wake 只携带本轮动态上下文：可用工具、档案与记忆空间的有界封面。工作准则不重复进入 Wake。
 
-Host 只在 Wake 内容变化时追加新的 user-role 插件消息，不再重新发送其他插件的共享上下文。快照保持完整状态，不构造依赖旧消息的补丁链；静态协议留在 system 前缀，Source 文本按原文传递而不做模板插值。回合、子 Agent 与运行代的所有权见[架构说明](architecture.md#design-生命周期与失败)。
+Host 只在 Wake 内容变化时追加新的 user-role 插件消息，不重新发送其他插件的共享上下文。静态指引与工作准则正文进入系统提示，因此每轮都完整可见，不依赖更早消息的补丁链。已有会话里旧版本的提醒与旧准则消息在同一次整理中退出模型可见视图，会话历史保留原事件。回合、子 Agent 与运行代的所有权见[架构说明](architecture.md#design-生命周期与失败)。
 
 生命周期会在 Host 组装 System Prompt 前固定 View，并让本回合所有模型 step 使用同一个 View：
 
@@ -388,13 +391,13 @@ turn/start
 agent/pre-step(step=1)
   -> 为新回合取消待执行/执行中的空闲审查
   -> 仅标记一次 Prime
-  -> 每个会话至多追加一次简短 recall/writeback cue
+  -> 按需追加只含动态上下文的 Wake 快照
   -> 主 Agent 决定是否调用记忆工具
 ```
 
 Source snapshot 不执行语义召回。Prime 只初始化路由状态，不执行异步 CLI 状态查询。
 
-子 Agent 在 `agent/created`、driver 启动前捕获并保留存活父 Agent 的固定 View 与运行图。自己的各个回合固定这一被保留的 View，即使父回合已结束或已进入更新的 generation。子 Agent activation 销毁时释放委托；冷恢复重新获取委托；Host 显式创建且没有父模型回合的后台子任务生成新的 scoped View。子 Agent 拥有自己的回合权限，但不安装 root 专属的 cue 或空闲审查。详见[权限生命周期](architecture.md#design-生命周期与失败)。
+子 Agent 在 `agent/created`、driver 启动前捕获并保留存活父 Agent 的固定 View 与运行图。自己的各个回合固定这一被保留的 View，即使父回合已结束或已进入更新的 generation。子 Agent activation 销毁时释放委托；冷恢复重新获取委托；Host 显式创建且没有父模型回合的后台子任务生成新的 scoped View。子 Agent 拥有自己的回合权限，但不安装 root 专属的空闲审查。详见[权限生命周期](architecture.md#design-生命周期与失败)。
 
 <a id="workflows-委派的子会话"></a>
 
@@ -402,7 +405,7 @@ Source snapshot 不执行语义召回。Prime 只初始化路由状态，不执�
 
 dsh-mnemo-weave 委派给子 Agent 的每个任务都以单独的一行开头：`[dsh-mnemo-weave:delegated <operation>]`，任务从下一行开始。空闲审查是 `review`，写入和「存入记忆」是 `write`，技能复盘、草案、回测与评测用例生成是 `skill`，其余为 `answer`、`placement`、`migration`、`compaction`、`document-archive`、`metadata-maintenance` 和 `reconcile`。以后的版本可能增加操作，所以请匹配模式而不是这份清单。DSH 把任务记录为子会话中的一条用户消息（`source.kind: "user"`），子会话的头部带有 `origin: "subagent"` 与 `parentSession`。
 
-整个子会话都是 dsh-mnemo-weave 自己的工作，而不是用户写下的内容。读取会话的插件（例如汇总工作区工作记录的插件）可以略过这样的会话：`origin: "subagent"`，且越过继承的回合之后第一条用户消息的首行匹配 `^\[dsh-mnemo-weave:delegated [a-z-]+\]$`。fork 出的子 Agent 以父 Agent 回合的副本开头（头部有 `isSeeded: true`，止于 `session/end-seed`），任务跟在后面。在对话之外运行的任务（例如存入记忆、Agent 查询与其他从记忆系统页面发起的任务、运行时记忆容量维护和记忆整理）在自己的任务 Agent 会话中运行，该会话没有用户消息。它的头部带有 `origin: "subagent"`，但没有 `parentSession`，也没有 `delegationDepth`，所以按父会话归组子代理的读取方找不到它的父会话，它也没有可收集的工作。它的子 Agent 带有这一行，并以该会话为 `parentSession`。上游 0.5.32 及更早版本保存这个任务 Agent 会话时不带 `origin`（[#435](https://github.com/omdsh-dev/dsh-mnemon/issues/435)）。在这一行出现之前记录的会话直接以任务开头（空闲审查是 `Bounded completed checkpoint (untrusted evidence; …`），不在这一约定之内。Mnemon 的其他 user 角色消息（包括召回与提醒）带有 `source.kind: "dsh-mnemo-weave"`。
+整个子会话都是 dsh-mnemo-weave 自己的工作，而不是用户写下的内容。读取会话的插件（例如汇总工作区工作记录的插件）可以略过这样的会话：`origin: "subagent"`，且越过继承的回合之后第一条用户消息的首行匹配 `^\[dsh-mnemo-weave:delegated [a-z-]+\]$`。fork 出的子 Agent 以父 Agent 回合的副本开头（头部有 `isSeeded: true`，止于 `session/end-seed`），任务跟在后面。在对话之外运行的任务（例如存入记忆、Agent 查询与其他从记忆系统页面发起的任务、运行时记忆容量维护和记忆整理）在自己的任务 Agent 会话中运行，该会话没有用户消息。它的头部带有 `origin: "subagent"`，但没有 `parentSession`，也没有 `delegationDepth`，所以按父会话归组子代理的读取方找不到它的父会话，它也没有可收集的工作。它的子 Agent 带有这一行，并以该会话为 `parentSession`。上游 0.5.32 及更早版本保存这个任务 Agent 会话时不带 `origin`（[#435](https://github.com/omdsh-dev/dsh-mnemon/issues/435)）。在这一行出现之前记录的会话直接以任务开头（空闲审查是 `Bounded completed checkpoint (untrusted evidence; …`），不在这一约定之内。Mnemon 的其他 user 角色消息（包括召回与快照）带有 `source.kind: "dsh-mnemo-weave"`。
 
 DSH 让子 Agent 沿用父 Agent 的工作目录；dsh-mnemo-weave 的启动请求没有自己的目录字段。dsh-mnemo-weave 也依赖这一点：在按工作区存储时，已不再绑定父 Agent 运行时的子 Agent（例如重启后恢复的那个）要靠这个目录找到所在工作区的记忆。
 
@@ -666,11 +669,15 @@ planner 没有数据面工具，不能创建 Memory Space。每次写入都由 H
 
 人工归档使用同一条“先索引、后迁移”路径；没有记忆空间能接收索引时，同样归档到本地。Mnemon 索引已经成功但 revision 冲突时不会回滚索引，因此可能出现安全的重复引用，而不会丢失 active 原文。
 
+默认的资料搜索使用当前工作区。用户明确指定另一已登记的 DSH 工作区时，主 Agent 可向 `mnemo_document_search` 传入该工作区的 `workspaceId`。结果只来自所选工作区，排除配置仍然生效。已知旧冷索引引用时，可以用完整相对路径或正文 SHA-256 搜索，并传入 `includeArchived: true`。
+
+`mnemo_remember` 支持可选的 `replacesId`。只有新证据推翻同一活跃空间中的旧经验时才传入。宿主要求 Provider 支持精确批量写入、按 ID 读取和软删除，在确认新内容后才尝试退役旧条目。等价内容或不支持修订时返回跳过，旧条目退役未确认时返回部分完成。
+
 <a id="workflows-工作区档案归档恢复"></a>
 
 #### 工作区档案归档恢复
 
-工作区档案归档不再要求子代理为 remember/recall 回执编号。旧版本失败后若留下冷索引而档案仍为 active，重试可复用精确路径与当前内容哈希一致的索引；档案更新后需要匹配新修订的索引。异步提取或不支持安全删除的 Provider 会在写入前被拒绝。完全没有能接收索引的记忆空间时，档案会在不建索引的情况下归档到本地：原文移入归档目录，仍可在工作区档案页面阅读。清理失败会报告目标空间和本次新建的 id；确认结果前应保留已有数据。
+新归档由宿主在核对档案修订后移动受管原文，状态变更可以从档案页查阅。已有冷索引引用继续指向原归档路径。需要把档案中的知识沉淀成可复用经验时，可以从原文另行发起正式记忆写入。
 
 <a id="workflows-确定性活动评分和空闲审查"></a>
 
@@ -739,14 +746,14 @@ Host 判断是否存在待整理内容
       +-- 失败/中止 --------> 保留累计活动
 ```
 
-admission 有意只使用结构信号，不调用 LLM 分类；因此达到 activity 门槛但没有 dirty candidate 的普通 checkpoint 不会启动后台模型。审查 Agent 的工具恰好是 `mnemo_document_search`、`mnemo_runtime_memory` 与 `mnemo_document_manage`；`idleReview.runtimeMemory` 为 `false` 时不提供运行时记忆工具。审查 guard 让每轮只写一层：它放行的第一次新建或更新档案、或修改工作记忆决定本轮所写的层，另一层随后被拒绝，即使第一次调用失败也是如此；USER.md 的修改不受影响。“至多一份”档案或一次运行时记忆修改仍由 persona 约束，不是 Host mutation counter。审查的产出之后才进入记忆空间：工作记忆在容量整理时归档，工作区档案在冷归档时建立索引。安装了 Agent Teams 工具时，除非设置 `idleReview.agentTeams: scoped`，审查会暂停；暂停期间状态页会给出提示。后台审查配额尚未持久化，Host 重启会丢失未处理的累计信号。
+会话沉淀的启动检查使用宿主结构信号。新增的明确保存请求，或普通工具失败后出现成功结果，可以启动审查。审查只提取有依据的候选，允许零写入。资料和准则需要明确的用户意图，已验证且可复用的经验可以通过 `mnemo_remember` 主动写入。工具可用性由当前 View 和 Source 自动参与权限决定。`idleReview.runtimeMemory: false` 会关闭这条流程的工作准则写入。宿主从实际写入回执记录结果。安装 Agent Teams 工具时，除非设置 `idleReview.agentTeams: scoped`，否则暂停自动审查。
 
 <a id="workflows-配置开关的关系"></a>
 
 ### 配置开关的关系
 
-- `recallMode=off`：不再注入 recall cue，显式 `mnemo_recall` 仍可用。
-- `writebackMode=off`：关闭写回 cue 和评分空闲审查，显式写入仍由 `writeEnabled` 决定。
-- `lifecycleEnabled=false`：关闭生命周期提醒和审查，不移除显式工具或 Web 入口。
+- `recallMode`：保留兼容旧配置，系统提示中的路由指引由 `routingGuidance` 控制。
+- `writebackMode=off`：关闭自动会话沉淀，显式写入仍由 `writeEnabled` 决定。
+- `lifecycleEnabled=false`：关闭工作准则正文注入、Wake 更新和自动会话沉淀，显式工具和 Web 入口仍可使用。
 - `routingGuidance=false`：只移除额外路由 section；Runtime Memory context 仍注册。
 - `writeEnabled=false`：移除语义写工具和写 RPC，拒绝写命令；它不是文件系统只读挂载保证。

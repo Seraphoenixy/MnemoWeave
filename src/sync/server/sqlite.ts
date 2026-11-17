@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import { isActivityScope } from '../activity-protocol.ts'
 import { SYNC_MAX_BATCH_BYTES, SYNC_PAGE_LIMIT, type SyncPage, type SyncPush } from '../protocol.ts'
-import { SyncConflict, type SyncStore } from './store.ts'
+import { carriesActivityClear, SyncConflict, type SyncStore } from './store.ts'
 
 interface StoredBatch {
   cursor: number
@@ -175,6 +175,24 @@ export class SqliteSyncStore implements SyncStore {
     return Number(this.db.prepare('SELECT COALESCE(MAX(cursor), 0) AS cursor FROM sync_batches WHERE scope = ?').get(scope)!.cursor)
   }
 
+  /**
+   * End this scope's history before `keepFrom`, dropping the batches that came
+   * before it.
+   *
+   * An activity clear says the events before it are no longer wanted, so the
+   * batches that carried them are deleted rather than kept as tombstones: a
+   * server that only hid them would grow by exactly what each clear was meant to
+   * remove. The surviving batch keeps its own cursor, so a replica that already
+   * passed it is not shown anything twice, and one that had not reached it picks
+   * the clear up from the gap it finds.
+   */
+  private compactActivity(scope: string, keepFrom: number): void {
+    this.db.prepare('DELETE FROM sync_batches WHERE scope = ? AND cursor < ?').run(scope, keepFrom)
+    // Event IDs from the dropped batches went with them; only the ones still
+    // named by a surviving batch have to stay reserved against replay.
+    this.db.prepare('DELETE FROM sync_activity_events WHERE scope = ? AND event_id NOT IN (SELECT json_extract(value, \'$.key\') FROM sync_batches, json_each(changes) WHERE sync_batches.scope = ?)').run(scope, scope)
+  }
+
   push(scope: string, input: SyncPush): { cursor: number } {
     const changes = JSON.stringify(input.changes)
     const digest = createHash('sha256').update(String(input.baseCursor)).update('\0').update(changes).digest('hex')
@@ -204,6 +222,9 @@ export class SqliteSyncStore implements SyncStore {
         }
         this.db.prepare('INSERT INTO sync_batches (scope, cursor, request_id, digest, changes) VALUES (?, ?, ?, ?, ?)')
           .run(scope, head + 1, input.requestId, digest, changes)
+        // A clear ends everything before it, so the batches that carried those
+        // events are dropped and this one remains their replacement.
+        if (carriesActivityClear(input.changes)) this.compactActivity(scope, head + 1)
       }
       this.db.exec('COMMIT')
       // Collection runs after the commit, never inside it: the manifest that
@@ -221,6 +242,10 @@ export class SqliteSyncStore implements SyncStore {
 
   pull(scope: string, cursor: number): SyncPage {
     const head = this.head(scope)
+    // An activity stream is compacted by its clears, so the oldest batch it holds
+    // may be later than the cursor a replica recorded. That replica keeps
+    // pulling: the gap only means the events it was waiting for were cleared.
+    if (cursor > head && isActivityScope(scope)) cursor = 0
     if (cursor > head) throw new SyncConflict(head, 'Cursor is ahead of the server')
     const batches: SyncPage['batches'] = []
     let bytes = 0
@@ -234,6 +259,9 @@ export class SqliteSyncStore implements SyncStore {
       if (bytes > SYNC_MAX_BATCH_BYTES && batches.length > 0) break
       batches.push({ cursor: batch.cursor, requestId: batch.requestId, changes: JSON.parse(batch.changes) as SyncPush['changes'] })
     }
-    return { cursor: batches.at(-1)?.cursor ?? cursor, head, batches }
+    // A compacted activity stream may hold nothing after this cursor at all. The
+    // page still has to reach the head, or a reader would ask again forever.
+    const next = batches.at(-1)?.cursor ?? (isActivityScope(scope) ? head : cursor)
+    return { cursor: next, head, batches }
   }
 }

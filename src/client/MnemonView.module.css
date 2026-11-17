@@ -384,7 +384,6 @@
    installed: cards share each row, and the hairlines between them fall on
    the first row and column outside the clip. */
 .healthStrip { position: relative; display: flex; flex-wrap: wrap; margin-bottom: 16px; overflow: hidden; border: .5px solid var(--mn-card-line); border-radius: var(--dsw-radius-lg); }
-.asyncStatusBlock { position: relative; min-width: 0; min-height: 36px; }
 .healthStrip article { display: flex; min-width: 0; min-height: 76px; box-sizing: border-box; flex: 1 1 150px; align-items: flex-start; gap: 10px; margin: -.5px 0 0 -.5px; padding: 14px 16px; border-top: .5px solid var(--mn-line); border-left: .5px solid var(--mn-line); }
 .healthStrip article > div { min-width: 0; }
 .healthStrip small { display: block; margin-bottom: 2px; color: var(--mn-faint); font-size: 12px; line-height: 18px; }
@@ -394,51 +393,6 @@
 .healthGood { background: var(--mn-success); }
 .healthBad { background: var(--mn-danger); }
 .healthMuted { background: var(--mn-idle); }
-/* Provider rows follow the DSH plugin list: 36px mark, 14px title, tertiary detail. */
-.providerHealth { margin-bottom: 16px; padding: 16px; border: .5px solid var(--mn-card-line); border-radius: var(--dsw-radius-lg); }
-.providerHealthList { margin-top: 8px; }
-.providerHealthList article { display: flex; min-width: 0; min-height: 56px; align-items: center; gap: 12px; padding: 8px 0; }
-.providerHealthList article + article { border-top: .5px solid var(--mn-line); }
-.providerHealthOff { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 12px; margin-top: 4px; padding-top: 10px; border-top: .5px solid var(--mn-line); color: var(--mn-faint); font-size: 12px; line-height: 18px; }
-.providerHealthMark { display: grid; width: 36px; height: 36px; box-sizing: border-box; flex: 0 0 auto; place-items: center; overflow: hidden; border: .5px solid var(--mn-line-strong); border-radius: var(--dsw-radius-md); padding: 6px; }
-.providerHealthMark > img, .providerHealthMark > svg { display: block; width: 100%; height: 100%; border-radius: 4px; object-fit: contain; }
-.providerHealthCopy { display: grid; min-width: 0; flex: 1; gap: 0; }
-.providerHealthCopy strong { overflow: hidden; font-size: 14px; font-weight: 500; line-height: 20px; text-overflow: ellipsis; white-space: nowrap; }
-.providerHealthCopy small { color: var(--mn-faint); font-size: 12px; line-height: 18px; }
-.providerHealthCopy p { margin: 2px 0 0; overflow: hidden; color: var(--mn-danger); font-size: 12px; line-height: 18px; text-overflow: ellipsis; white-space: nowrap; }
-.providerHealthMeta { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; }
-.providerHealthMeta small { color: var(--mn-faint); font-size: 12px; line-height: 18px; font-variant-numeric: tabular-nums; }
-.providerHealthSignal { width: 6px; height: 6px; border-radius: 50%; background: var(--mn-idle); }
-.providerHealthList article[data-status='healthy'] .providerHealthSignal { background: var(--mn-success); }
-.providerHealthList article[data-status='unhealthy'] .providerHealthSignal { background: var(--mn-danger); }
-.providerHealthList article[data-status='idle'] .providerHealthSignal { background: var(--mn-idle); }
-.storageDomains { margin-bottom: 16px; padding: 16px; border: .5px solid var(--mn-card-line); border-radius: var(--dsw-radius-lg); }
-.storageRoot { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 16px; margin-top: 12px; padding: 10px 12px; border-radius: var(--dsw-radius-md); background: var(--mn-fill); }
-.storageRoot > div:first-child { display: grid; min-width: 0; gap: 2px; }
-.storageRoot span, .storageRoot small { color: var(--mn-faint); font-size: 12px; line-height: 18px; }
-.storageRoot code { overflow: hidden; color: var(--mn-muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.storageRoot > div:last-child { display: grid; flex: 0 0 auto; gap: 2px; justify-items: end; }
-.storageRoot strong { font-size: 13px; font-weight: 500; font-variant-numeric: tabular-nums; }
-.storageAreaGrid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }
-.storageAreaGrid article { display: flex; min-width: 0; min-height: 148px; box-sizing: border-box; flex-direction: column; padding: 12px 14px; border: .5px solid var(--mn-line); border-radius: var(--dsw-radius-md); }
-.storageAreaGrid article > header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.storageAreaGrid article > header > div { display: flex; min-width: 0; align-items: center; gap: 8px; }
-.storageAreaGrid article > header span { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: var(--mn-idle); }
-.storageAreaGrid article[data-status="ready"] > header span { background: var(--mn-success); }
-.storageAreaGrid article[data-status="invalid"] > header span { background: var(--mn-danger); }
-.storageAreaGrid article > header strong { overflow: hidden; font-size: 13px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
-.storageAreaGrid article > header em { color: var(--mn-faint); font-size: 11px; font-style: normal; line-height: 14px; white-space: nowrap; }
-.storageAreaMetric { display: flex; align-items: baseline; gap: 6px; margin-top: 12px; }
-.storageAreaMetric strong { font-size: 20px; font-weight: 500; line-height: 28px; font-variant-numeric: tabular-nums; }
-.storageAreaMetric span { color: var(--mn-faint); font-size: 12px; }
-.storageAreaMetric code { margin-left: auto; color: var(--mn-faint); font-size: 11px; }
-.storageAreaGrid article > p { min-height: 36px; margin: 6px 0 8px; color: var(--mn-faint); font-size: 12px; line-height: 18px; }
-.storagePath { display: block; overflow: hidden; margin-top: auto; padding-top: 8px; border-top: .5px solid var(--mn-line); color: var(--mn-faint); font-size: 11px; line-height: 16px; text-overflow: ellipsis; white-space: nowrap; }
-.storageAreaGrid article > small { display: block; margin-top: 6px; color: var(--mn-danger); font-size: 12px; line-height: 18px; }
-.storageUnavailable { display: grid; min-height: 120px; place-content: center; gap: 4px; margin-top: 12px; border-radius: var(--dsw-radius-md); color: var(--mn-muted); background: var(--mn-fill); text-align: center; }
-.storageUnavailable strong { font-size: 13px; font-weight: 500; }
-.storageUnavailable p { max-width: 520px; margin: 0; color: var(--mn-faint); font-size: 12px; line-height: 18px; }
-.storageFootnote { margin: 12px 0 0; color: var(--mn-faint); font-size: 12px; line-height: 18px; }
 /* The Host's recent activity: a list read after a failure, not a band over the workspace. */
 .diagnostics { margin-top: 20px; }
 .diagnostics > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
@@ -461,11 +415,27 @@
 .diagnosticsEmpty, .diagnosticsFailure, .diagnosticsFootnote { margin: 10px 0 0; color: var(--mn-faint); font-size: 12px; line-height: 18px; }
 .diagnosticsFailure { color: var(--mn-danger); }
 .diagnosticsFootnote { margin-top: 8px; }
-.statusSectionHeader { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
-.statusSectionHeader h3 { margin: 0; font-size: 14px; font-weight: 500; line-height: 22px; }
-.statusSectionHeader p { max-width: 640px; margin: 2px 0 0; color: var(--mn-faint); font-size: 12px; line-height: 18px; }
+/* The structured memory events, beside the run log and shaped like it. */
+.memoryActivity { margin-top: 20px; }
+.memoryActivity > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.memoryActivity > header h2 { margin: 0; font-size: 14px; font-weight: 500; line-height: 22px; }
+.memoryActivity > header p { max-width: 640px; margin: 2px 0 0; color: var(--mn-faint); font-size: 12px; line-height: 18px; }
+.activityList { max-height: 320px; margin: 10px 0 0; padding: 0; overflow-y: auto; border: .5px solid var(--mn-line); border-radius: var(--dsw-radius-md); list-style: none; }
+.activityList li { display: flex; align-items: baseline; gap: 10px; padding: 7px 12px; border-top: .5px solid var(--mn-line); font-size: 12px; line-height: 18px; }
+.activityList li:first-child { border-top: 0; }
+.activityList time { flex: 0 0 auto; color: var(--mn-faint); font-variant-numeric: tabular-nums; }
+.activityStream { flex: 0 0 60px; overflow: hidden; color: var(--mn-faint); text-overflow: ellipsis; white-space: nowrap; }
+.activityList li > div { display: flex; min-width: 0; flex: 1 1 auto; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; }
+.activityList em { flex: 0 0 auto; color: var(--mn-muted); font-size: 11px; font-style: normal; }
+.activityList code { min-width: 0; overflow-wrap: anywhere; color: var(--mn-faint); font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 11px; }
+/* Only an outcome that says something went wrong is coloured; a miss is not a failure. */
+.activityList li[data-outcome='failed'] em { color: var(--mn-danger); }
+.activityList li[data-outcome='empty'] em,
+.activityList li[data-outcome='skipped'] em { color: var(--mn-faint); }
+/* The clear dialog states what a retraction does and does not change. */
+.activityClearSummary { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
+.activityClearSummary p { margin: 0; color: var(--mn-muted); font-size: 13px; line-height: 20px; }
 /* DSH Tag, neutral tone. */
-.phaseBadge { flex: 0 0 auto; padding: 1px 8px; border-radius: 999px; color: var(--mn-muted); background: var(--mn-fill); font-size: 11px; font-weight: 500; line-height: 17px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .statusHeaderActions { display: flex; align-items: center; gap: 8px; }
 /* Single shrinkable columns: a long install path truncates instead of widening the dialog. */
 .versionDialogBody { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
@@ -530,7 +500,6 @@
 @media (max-width: 1000px) {
   .sourceManagementSummary { grid-template-columns: 1fr 1fr; }
   .sourceManagementCapabilities { grid-column: 1 / -1; }
-  .storageAreaGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 760px) {
@@ -563,10 +532,6 @@
   .pageHeader { display: grid; gap: 10px; }
   .pageHeaderMeta { justify-content: flex-start; }
   .healthStrip article { flex-basis: 100%; }
-  .providerHealthMeta { align-items: flex-end; flex-direction: column; gap: 4px; }
-  .storageRoot { align-items: flex-start; flex-direction: column; }
-  .storageRoot > div:last-child { justify-items: start; }
-  .storageAreaGrid { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 520px) {

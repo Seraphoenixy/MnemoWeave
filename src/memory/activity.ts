@@ -48,6 +48,69 @@ export class ActivityStore {
     try { this.save(value) } catch { console.error('MnemoWeave could not persist a memory activity event') }
   }
 
+  /**
+   * End the activity recorded at or before `before`, and publish the clear so
+   * another client ends the same events.
+   *
+   * The files go: keeping them while only hiding them makes every later clean-up
+   * larger than the problem it solves, and old activity stops being useful once
+   * it is read. What remains is one small `clear` event, which the sync carries
+   * and which is what tells the other machine (and the server) where the stream
+   * now starts.
+   *
+   * A clear newer than the newest event still publishes: the streams must agree
+   * on where they end even when this machine had nothing to remove.
+   */
+  clear(before: number): number {
+    let removed = 0
+    let boundary = 0
+    const superseded: string[] = []
+    for (const id of this.activityIds()) {
+      let event: ActivityEvent
+      try { event = this.read(id) } catch { continue }
+      if (event.kind === 'clear') {
+        boundary = Math.max(boundary, event.before)
+        // One boundary is enough: an older clear says nothing the newer one
+        // does not, so only the newest is kept.
+        if (event.before < before) superseded.push(id)
+        continue
+      }
+      if ((event.at ?? 0) > before) continue
+      rmSync(this.eventFile(id), { force: true })
+      rmSync(join(this.directory, 'local', id), { force: true })
+      removed += 1
+    }
+    // Only a clear that removed something, or that moves the boundary later,
+    // publishes: pressing the action twice must not keep appending events to the
+    // stream it just emptied.
+    if (removed > 0 || boundary < before) {
+      for (const id of superseded) {
+        rmSync(this.eventFile(id), { force: true })
+        rmSync(join(this.directory, 'local', id), { force: true })
+      }
+      this.save({ version: 1, kind: 'clear', id: activityKey('clear', randomUUID()), at: before, before })
+    }
+    return removed
+  }
+
+  /**
+   * Apply another machine's clear: the events it ended stop being kept here too,
+   * so both copies hold the same small stream rather than one copy growing
+   * forever. Newer activity is left alone.
+   */
+  applyClear(before: number): number {
+    let removed = 0
+    for (const id of this.activityIds()) {
+      let event: ActivityEvent
+      try { event = this.read(id) } catch { continue }
+      if (event.kind === 'clear' || (event.at ?? 0) > before) continue
+      rmSync(this.eventFile(id), { force: true })
+      rmSync(join(this.directory, 'local', id), { force: true })
+      removed += 1
+    }
+    return removed
+  }
+
   activityIds(): string[] {
     try {
       return readdirSync(join(this.directory, 'events')).flatMap(name => /^[a-f0-9]{64}\.json$/u.test(name) ? [name.slice(0, -5)] : []).sort()

@@ -46,6 +46,10 @@ async function mergeActivity(client: Pick<SyncRemote, 'pull' | 'push'>, store: A
         if (change.operation !== 'put') throw new Error('Activity sync cannot delete events')
         const event = activityEvent.parse(change.value)
         if (event.id !== change.key) throw new Error('Activity event ID does not match its sync key')
+        // Another machine's clear ends the events it named here too, so both
+        // copies hold the same short stream instead of this one keeping a
+        // history the other already dropped.
+        if (event.kind === 'clear') store.applyClear(event.before)
         store.merge(event)
         if (!existsSync(marker(event.id))) {
           acknowledge(event.id)
@@ -60,20 +64,25 @@ async function mergeActivity(client: Pick<SyncRemote, 'pull' | 'push'>, store: A
     const pending: string[] = []
     while (end < candidates.length && pending.length < BATCH_SIZE) {
       const id = candidates[end++]!
-      if (!existsSync(marker(id))) pending.push(id)
+      // A clear removes the local marker with its event; a candidate whose file
+      // is gone was cleared since this run read the list.
+      if (!existsSync(marker(id)) && existsSync(join(store.directory, 'events', id + '.json'))) pending.push(id)
     }
     if (pending.length === 0) return { cursor, pulled, pushed }
     try {
-      await client.push({
+      const accepted = await client.push({
         requestId: randomUUID(), baseCursor: cursor,
         changes: pending.map(id => ({ key: id, operation: 'put', value: z.json().parse(store.read(id)) })),
       }, signal)
+      // A clear compacts the scope, so the server answers with the cursor that
+      // remains rather than one after the batch it replaced.
+      cursor = accepted
+      position = end
     } catch (error) {
       if (!(error instanceof RemoteSyncConflict) || ++conflicts >= 8) throw error
       continue
     }
     for (const id of pending) acknowledge(id)
-    position = end
     pushed += pending.length
     conflicts = 0
   }

@@ -7,6 +7,8 @@ import {
   MNEMON_WRITE_CHANNEL,
   MNEMON_VIEW_CHANNEL,
   MNEMON_VIEW_WRITE_CHANNEL,
+  type ActivityClearResult,
+  type ActivityRecordView,
   type MemoryViewDashboard,
   type MemoryViewConfigurationRequest,
   type AssistantMessageText,
@@ -112,6 +114,21 @@ export class MnemonClient {
     return this.call(MNEMON_READ_CHANNEL, 'diagnostics', limit === undefined ? {} : { limit })
   }
 
+  /** The structured memory events this Host recorded, newest first, for the Status page. */
+  memoryActivity(limit?: number): Promise<{ records: ActivityRecordView[] }> {
+    return this.call(MNEMON_READ_CHANNEL, 'memory-activity', this.scoped(limit === undefined ? {} : { limit }))
+  }
+
+  /**
+   * Delete every activity event the selected workspace's stream and the global
+   * Working Rules stream hold now. Each stream keeps one boundary event, which
+   * travels through the sync so the server and other clients drop the same
+   * records instead of keeping a history this machine no longer has.
+   */
+  clearMemoryActivity(): Promise<ActivityClearResult> {
+    return this.call(MNEMON_WRITE_CHANNEL, 'memory-activity-clear', this.scoped())
+  }
+
   status(): Promise<StatusView> {
     return this.call(MNEMON_READ_CHANNEL, 'status', this.scoped())
   }
@@ -137,12 +154,12 @@ export class MnemonClient {
     return this.call(MNEMON_READ_CHANNEL, 'source-management-read', this.scoped({ sourceInstanceKey, operation, input }))
   }
 
-  mutateSourceManagement(sourceInstanceKey: string, operation: string, input: JsonValue, expectedRevision: string, confirmed: boolean): Promise<MemorySourceManagementResult> {
-    return this.call(MNEMON_WRITE_CHANNEL, 'source-management-mutate', this.scoped({ sourceInstanceKey, operation, input, expectedRevision, confirmed }))
+  mutateSourceManagement(sourceInstanceKey: string, operation: string, input: JsonValue, expectedRevision: string, confirmed: boolean, trigger?: 'manual-save'): Promise<MemorySourceManagementResult> {
+    return this.call(MNEMON_WRITE_CHANNEL, 'source-management-mutate', this.scoped({ sourceInstanceKey, operation, input, expectedRevision, confirmed, ...(trigger === undefined ? {} : { trigger }) }))
   }
 
-  assistSource(sourceInstanceKey: string, operation: string, input: JsonValue, expectedRevision: string, confirmed: boolean): Promise<MemorySourceManagementResult> {
-    return this.call(operation === 'activation' ? MNEMON_ACTIVATION_CHANNEL : confirmed ? MNEMON_WRITE_CHANNEL : MNEMON_READ_CHANNEL, 'source-assistance', this.scoped({ sourceInstanceKey, operation, input, expectedRevision, confirmed }))
+  assistSource(sourceInstanceKey: string, operation: string, input: JsonValue, expectedRevision: string, confirmed: boolean, trigger?: 'manual-save'): Promise<MemorySourceManagementResult> {
+    return this.call(operation === 'activation' ? MNEMON_ACTIVATION_CHANNEL : confirmed ? MNEMON_WRITE_CHANNEL : MNEMON_READ_CHANNEL, 'source-assistance', this.scoped({ sourceInstanceKey, operation, input, expectedRevision, confirmed, ...(trigger === undefined ? {} : { trigger }) }))
   }
 
   /** A session-scoped call reports the route that conversation's background work uses. */

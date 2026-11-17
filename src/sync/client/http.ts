@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { isActivityScope } from '../activity-protocol.ts'
 import { validateSyncPassword } from '../auth-protocol.ts'
 import { SYNC_BLOB_BYTES, SYNC_MAX_BATCH_BYTES, syncCursor, syncDigest, syncPage, syncScope, type SyncPage, type SyncPush } from '../protocol.ts'
 import { loginToSyncServer } from './auth.ts'
@@ -41,6 +42,7 @@ function wait(ms: number, signal: AbortSignal | null): Promise<void> {
 export class SyncClient implements SyncRemote {
   private readonly base: URL
   private readonly endpoint: URL
+  private readonly scope: string
   constructor(url: string, scope: string, private readonly password: string, private readonly session: SyncSession = {}) {
     const base = new URL(url)
     const loopback = ['127.0.0.1', 'localhost', '[::1]'].includes(base.hostname)
@@ -50,8 +52,9 @@ export class SyncClient implements SyncRemote {
     }
     validateSyncPassword(password)
     this.base = base
+    this.scope = syncScope.parse(scope)
     this.endpoint = new URL(base)
-    this.endpoint.pathname = base.pathname.replace(/\/+$/u, '') + '/v1/sync/' + syncScope.parse(scope) + '/changes'
+    this.endpoint.pathname = base.pathname.replace(/\/+$/u, '') + '/v1/sync/' + this.scope + '/changes'
   }
 
   async authenticate(signal?: AbortSignal): Promise<void> {
@@ -62,9 +65,15 @@ export class SyncClient implements SyncRemote {
     const url = new URL(this.endpoint)
     url.searchParams.set('cursor', String(syncCursor.parse(cursor)))
     const page = syncPage.parse(await this.request(url, { signal: signal ?? null }))
-    if (page.cursor !== cursor + page.batches.length || page.cursor > page.head
-      || (page.cursor < page.head && page.batches.length === 0)
-      || page.batches.some((batch, index) => batch.cursor !== cursor + index + 1)) {
+    // A snapshot scope publishes every batch in turn. An activity scope is
+    // compacted by its clears, so it may hand back a batch whose cursor is not
+    // the one after the requested cursor, or none at all while still reporting a
+    // later head; both mean "the events in between were cleared".
+    const activity = isActivityScope(this.scope)
+    if (page.cursor > page.head || page.batches.some((batch, index) => index > 0 && batch.cursor <= page.batches[index - 1]!.cursor)
+      || (!activity && (page.cursor !== cursor + page.batches.length
+        || (page.cursor < page.head && page.batches.length === 0)
+        || page.batches.some((batch, index) => batch.cursor !== cursor + index + 1)))) {
       throw new Error('Sync server returned a non-contiguous change page')
     }
     return page
@@ -141,11 +150,24 @@ export class SyncClient implements SyncRemote {
 
   private async request(url: URL, init: RequestInit): Promise<unknown> {
     const response = await this.fetch(url, init)
-    const data = await response.json() as { cursor?: unknown; error?: unknown }
+    const body = await response.text()
+    let data: unknown
+    let readable = true
+    try { data = JSON.parse(body) } catch { readable = false }
+    // The server's own `error` is the only thing that says why a batch was
+    // refused; reporting the status alone turns a fixable rejection into a
+    // number. A response that is not JSON at all — a proxy's error page, say —
+    // names its source instead of failing later as a parse error.
+    const reason = typeof data === 'object' && data !== null && typeof (data as { error?: unknown }).error === 'string'
+      ? (data as { error: string }).error : undefined
     if (response.status === 409) {
-      throw new RemoteSyncConflict(syncCursor.parse(data.cursor), typeof data.error === 'string' ? data.error : 'Sync conflict')
+      if (!readable) throw new Error('Sync server returned an unreadable conflict response')
+      throw new RemoteSyncConflict(syncCursor.parse((data as { cursor?: unknown }).cursor), reason ?? 'Sync conflict')
     }
-    if (!response.ok) throw new Error('Sync server returned HTTP ' + response.status)
+    if (!response.ok) {
+      throw new Error('Sync server returned HTTP ' + response.status + (reason === undefined ? '' : ': ' + reason))
+    }
+    if (!readable) throw new Error('Sync server returned a response that is not JSON')
     return data
   }
 }

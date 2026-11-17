@@ -1,9 +1,13 @@
 import { hostSyncEndpoint, saveSyncConnection, syncConnectionView, type SyncCredentialStore } from '../configuration/sync-settings.ts'
 import { GlobalSyncConflict, syncAllMemory } from '../engine/server-sync.ts'
 import { syncProgress } from '../engine/sync-progress.ts'
-import { openWorkingRules } from '../../memory/working-rules.ts'
+import { openWorkingRules, workingRulesActivityStore } from '../../memory/working-rules.ts'
+import { activityKey } from '../../memory/activity.ts'
+import { randomUUID } from 'node:crypto'
+import { mutationResultCommitted } from '../engine/receipts.ts'
 import { activityScope, connectActivitySync } from '../../sync/client/activity.ts'
 import { workspaceActivityStore } from '../review/activity-history.ts'
+import { clearMemoryActivity, recentMemoryActivity } from '../review/memory-activity.ts'
 import { localSnapshotSync } from '../../sync/client/filesystem.ts'
 import { SnapshotConflict, type SnapshotSync } from '../../sync/client/snapshot.ts'
 import { isDefaultSourceInstance, isWorkspaceStorageScope } from '../contracts/protocol.ts'
@@ -53,6 +57,32 @@ function scoped(runtime: LiveMnemonRuntime, payload: Record<string, unknown>, li
   return { ...route, scope, source: (typeId: string) => route.graph.source(typeId, scope) }
 }
 type ScopedRuntime = ReturnType<typeof scoped>
+
+async function manualSaveActivity<T>(
+  runtime: ScopedRuntime, payload: Record<string, unknown>, source: string | undefined, operation: string, perform: () => Promise<T>,
+): Promise<T> {
+  if (payload.trigger !== 'manual-save' || (source === 'runtime' ? operation !== 'mutate' : !(source === 'memory-spaces' && operation === 'remember'))) return perform()
+  const workspace = runtime.scope.workspaceId
+  if (source !== 'runtime' && workspace === undefined) return perform()
+  const store = source === 'runtime' ? workingRulesActivityStore() : workspaceActivityStore(runtime.graph.directory, workspace!)
+  const write = (outcome: 'committed' | 'skipped' | 'unconfirmed' | 'failed') => {
+    try {
+      store.save({
+        version: 1, kind: 'memory', id: activityKey('manual-save', randomUUID()), at: Date.now(),
+        source: source === 'runtime' ? 'runtime' : 'memory-spaces', operation: source === 'runtime' ? 'mutate' : 'remember', outcome, trigger: 'manual-save',
+        ...(runtime.scope.sessionId === undefined ? {} : { session: activityKey('session', runtime.scope.sessionId) }),
+      })
+    } catch { console.error('MnemoWeave could not collect manual save activity') }
+  }
+  try {
+    const result = await perform()
+    const value = result as { value?: unknown } | null | undefined
+    const receipt = (value?.value ?? result) as { action?: unknown; message?: unknown; added?: unknown } | null | undefined
+    const skipped = receipt?.action === 'skipped' || typeof receipt?.message === 'string' && receipt.message.startsWith('Entry already exists')
+    write(skipped ? 'skipped' : mutationResultCommitted(receipt) || typeof receipt?.added === 'string' ? 'committed' : 'unconfirmed')
+    return result
+  } catch (error) { write('failed'); throw error }
+}
 function requireAligned(runtime: ScopedRuntime): void {
   if (runtime.participation.excluded) throw new Error(WORKSPACE_MEMORY_EXCLUDED)
   if (!runtime.aligned) throw new Error('the selected memory workspace differs from the current session; align the workbench before running an Agent-backed operation')
@@ -304,6 +334,18 @@ export function createReadHandler(input: LiveMnemonRuntime, lifecycle?: MnemonLi
           ? Math.min(payload.limit, 200) : 200
         return success({ entries: diagnostics.recent(limit) })
       }
+      // What memory did recently: the structured events the activity sync
+      // publishes, read for the selected workspace and the global stream.
+      if (endpoint === 'memory-activity') {
+        const runtime = scoped(input, payload, lifecycle)
+        const workspace = runtime.scope.workspaceId
+        return success({
+          records: recentMemoryActivity({
+            ...(workspace === undefined || runtime.participation.excluded ? {} : { workspace: { root: runtime.graph.directory, path: workspace } }),
+            ...(typeof payload.limit === 'number' && Number.isInteger(payload.limit) && payload.limit > 0 ? { limit: payload.limit } : {}),
+          }),
+        })
+      }
       if (endpoint === 'versions') {
         if (versions === undefined) throw new Error('version checks are unavailable')
         return success(await versions.check())
@@ -461,6 +503,15 @@ export function createWriteHandler(input: LiveMnemonRuntime, lifecycle?: MnemonL
       }
       const runtime = scoped(input, payload, lifecycle)
       requireWritable(runtime)
+      if (endpoint === 'memory-activity-clear') {
+        // The page lists the selected workspace beside the global stream, so a
+        // clear stops showing both of them. Clearing the global stream is part
+        // of the request and cannot be narrowed by a payload field.
+        const workspace = runtime.scope.workspaceId
+        return success(clearMemoryActivity({
+          ...(workspace === undefined || runtime.participation.excluded ? {} : { workspace: { root: runtime.graph.directory, path: workspace } }),
+        }))
+      }
       if (endpoint === 'source-management-mutate') {
         const request: MemorySourceManagementRequest = {
           scope: runtime.scope, sourceInstanceKey: String(payload.sourceInstanceKey ?? ''), mode: 'mutate',
@@ -475,11 +526,12 @@ export function createWriteHandler(input: LiveMnemonRuntime, lifecycle?: MnemonL
           (request.operation === 'mutate' || request.operation === 'pin') && 'target' in object(request.input)) {
           throw new Error('Working Rules mutations no longer accept target')
         }
-        if (lifecycle !== undefined) return success(await lifecycle.manageSource(runtime.graph, request))
-        const lease = runtime.graph.memoryComposition.acquire()
-        try {
-          return success(await lease.generation.executeManagement(request))
-        } finally { lease.release() }
+        return success(await manualSaveActivity(runtime, payload, typeId, request.operation, async () => {
+          if (lifecycle !== undefined) return lifecycle.manageSource(runtime.graph, request)
+          const lease = runtime.graph.memoryComposition.acquire()
+          try { return await lease.generation.executeManagement(request) }
+          finally { lease.release() }
+        }))
       }
       if (endpoint === 'source-assistance') {
         if (lifecycle === undefined) throw new Error('Host assistance is unavailable')
@@ -488,7 +540,8 @@ export function createWriteHandler(input: LiveMnemonRuntime, lifecycle?: MnemonL
         if (source === undefined || !source.assistance.includes(operation)) throw new Error('Host assistance is not available for this Source instance')
         requireLayerOn(runtime, source.sourceTypeId)
         if (operation !== 'agent-search' && (payload.confirmed !== true || payload.expectedRevision !== source.revision)) throw new Error('Host assistance requires confirmation of the current Source revision')
-        const value = await assisted(runtime, lifecycle, source.sourceTypeId, operation, object(payload.input), signal, { sourceInstanceKey: source.sourceInstanceKey, expectedRevision: source.revision })
+        const value = await manualSaveActivity(runtime, payload, source.sourceTypeId, operation, () =>
+          assisted(runtime, lifecycle, source.sourceTypeId, operation, object(payload.input), signal, { sourceInstanceKey: source.sourceInstanceKey, expectedRevision: source.revision }))
         if (source.sourceTypeId === 'runtime') return success({ revision: object(value).revision, value })
         const current = (await catalog(runtime)).sources.find(item => item.sourceInstanceKey === source.sourceInstanceKey)
         return success({ revision: current?.revision ?? source.revision, value })
