@@ -240,7 +240,7 @@ try {
   if (JSON.stringify(mnemonOrder) !== JSON.stringify(mnemonWireOrder)) throw new Error(`Headless Mnemon wire tool order changed: ${mnemonOrder.join(', ')}`)
   if (extensionsEnabled) {
     const prompt = JSON.stringify([toolRequest.system, toolRequest.messages])
-    for (const expected of ['MNEMON OPTIONAL AUTO CAPTURE']) {
+    for (const expected of ['MNEMON OPTIONAL AUTO CAPTURE', 'a standing preference or working convention belongs to Working Rules through mnemo_runtime_memory']) {
       if (!prompt.includes(expected)) throw new Error(`Optional Strategy contribution did not reach the real DSH prompt: ${expected}`)
     }
   }
@@ -249,6 +249,13 @@ try {
   // The layer is a system-prompt section: the heading and the generated working
   // rules file must both reach the real prompt, and the Wake must not repeat it.
   if (!JSON.stringify(toolRequest.system).includes('### Working Rules')) throw new Error('Working Rules did not reach the real DSH prompt')
+  // The protocol has to say what to do with the entries, not only where they are
+  // stored: applying them, and reading an absent entry as possibly hidden or
+  // budgeted out, are the two behaviours a reader otherwise gets wrong.
+  const rulesSystem = JSON.stringify(toolRequest.system)
+  for (const expected of ['apply the ones that bear on the current task', 'absence alone does not show that a rule was deleted']) {
+    if (!rulesSystem.includes(expected)) throw new Error(`Working Rules protocol did not reach the real DSH prompt: ${expected}`)
+  }
   if (JSON.stringify(toolRequest.system).includes('工作准则.md')) throw new Error('Working Rules still reach the prompt as a quoted snapshot file')
   if (upgradeMemory !== undefined && await readFile(join(storageRoot, 'runtime', 'memories.json'), 'utf8') !== upgradeMemory) throw new Error('Package upgrade changed existing Runtime Memory bytes')
   if (upgradeMemory !== undefined && !JSON.stringify(toolRequest).includes(upgradeMemoryMarker)) throw new Error('Upgraded Headless did not read the retained synthetic Runtime entry')

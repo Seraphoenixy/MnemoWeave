@@ -16,7 +16,7 @@ export const memoryPlugin = defineMemoryPlugin({
   provides: [{ id: 'strategy.capture', exclusive: true }],
   requires: ['strategy', 'source.durable-evidence'],
 })
-const instruction = 'During the current conversation, consider recording new durable user-supplied preferences, corrections, or established project facts that will help future tasks. Compare existing memory first; skip duplicates, secrets, transient progress, guesses, assistant-authored claims and facts merely retrieved from memory. Respect a request not to remember. Keep details that form one fact together. Add each distinct, independently useful fact to one eligible durable Source. Do not copy the same fact into multiple layers. Continue without writing when no candidate qualifies.'
+const instruction = 'During the current conversation, consider recording new durable user-supplied facts that will help future tasks. Choose the destination before writing: a standing preference or working convention belongs to Working Rules through mnemo_runtime_memory when that tool is available, and only facts that do not belong there qualify for an eligible Source listed here. Compare existing memory first; skip duplicates, secrets, transient progress, guesses, assistant-authored claims and facts merely retrieved from memory. Respect a request not to remember. Keep details that form one fact together. Add each distinct, independently useful fact to one eligible durable Source. Do not copy the same fact into multiple layers. Continue without writing when no candidate qualifies.'
 
 export function createAutoCaptureExtension(config: Config = {}) {
   const capture = validateMemoryViewExtension('capture', { instruction: config.instruction ?? instruction,

@@ -55,3 +55,34 @@ test('the boundary permits revision while leaving deletion to the user', () => {
   const text = captureText().replace(/\\n/gu, ' ')
   assert.match(text, /capturing corrects what this conversation changed, and nothing else/u)
 })
+
+// The Strategy protocol sends preferences to Working Rules while active capture
+// writes to a durable Source. Naming the split keeps the two from claiming the
+// same input.
+test('active capture defers preferences to Working Rules', () => {
+  const text = captureText().replace(/\\n/gu, ' ')
+  assert.match(text, /a standing preference or working convention belongs to Working Rules through mnemo_runtime_memory/u)
+  assert.match(text, /only facts that do not belong there qualify for an eligible Source/u)
+})
+
+// The Working Rules layer ends its own instructions expecting the entries to
+// follow. A capture block placed after it would sit between that heading and the
+// entries, so the capture policy goes first. The runtime Source supplies the
+// Working Rules protocol; without it the composition has no such section.
+test('the capture policy precedes the Working Rules protocol', () => {
+  const runtime = {
+    sourceInstanceKey: 'source:include:mnemon-source-runtime', sourceTypeId: 'runtime', role: 'working-context',
+    availability: 'ready', capabilities: ['status', 'project', 'write'], consistency: 'exact-snapshot',
+    routeIds: [], actionIds: ['mutate'], actions: [{ id: 'mutate', capability: 'write' }],
+  }
+  const spec = DEFAULT_THREE_TIER_VIEW_STRATEGY.compose(request, [runtime, sourceFacts()], [captureContribution()])
+  const system = spec.guidance.system
+  assert.ok(system.includes('### Working Rules'))
+  assert.ok(system.indexOf('MNEMON OPTIONAL AUTO CAPTURE') < system.indexOf('### Working Rules'))
+})
+
+// The capture list has moved above the entries, so the block may not point the
+// reader at a location below it.
+test('the capture policy does not point at a position below itself', () => {
+  assert.doesNotMatch(captureText(), /qualify for an eligible Source below/u)
+})

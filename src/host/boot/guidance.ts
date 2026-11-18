@@ -22,12 +22,16 @@ export function applyMemoryViewGuidance<T extends { sections: Array<{ name: stri
   if (view === undefined) return withoutMemoryViewContext({ ...assembly, sections: assembly.sections.filter(section => !managed.includes(section.name)) })
   const sections = assembly.sections.filter(section => !managed.includes(section.name))
   if (view.guidance?.system) sections.push({ name: STRATEGY_SECTION_NAME, text: view.guidance.system })
-  if (routingEnabled) sections.push({ name: GUIDANCE_SECTION_NAME, text: view.guidance?.routing ?? ROUTING_GUIDANCE })
+  // The entries follow the section that describes them. They stay their own
+  // section because they are the user's quoted words and are never
+  // interpolated; keeping them next to the protocol means the heading a reader
+  // meets is immediately backed by the entries it announces.
   if (workingRules !== undefined && workingRules.trim() !== '') sections.push({
     name: WORKING_RULES_SECTION_NAME,
     interpolate: false,
     text: WORKING_RULES_INTRO + '\n\n' + workingRules,
   })
+  if (routingEnabled) sections.push({ name: GUIDANCE_SECTION_NAME, text: view.guidance?.routing ?? ROUTING_GUIDANCE })
   return withoutMemoryViewContext({ ...assembly, sections })
 }
 

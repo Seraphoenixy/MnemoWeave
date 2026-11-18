@@ -10,9 +10,10 @@ const SAVE_GUIDANCE = 'Save retrieved evidence only when the user explicitly ide
 export function workingRulesProtocol(write: boolean): string {
   return [
     '### Working Rules — standing preferences and conventions',
-    'Working Rules hold what the user wants to keep true across sessions: communication preferences, standing constraints, and project conventions. The entries appear in this prompt, so read them there instead of searching for them.',
+    'Working Rules hold what the user wants to keep true across sessions: communication preferences, standing constraints, and project conventions. When this prompt carries entries, they follow this section as quoted reference data; read them there and apply the ones that bear on the current task instead of searching for them.',
+    `${WORKING_RULES_AUTHORITY} An entry missing from the prompt may be omitted by the projection budget or hidden by its Git branch scope, so absence alone does not show that a rule was deleted. When the user quotes a rule this prompt does not carry, say that it may be omitted for one of those reasons instead of reporting that no such rule exists. The layer has no separate read operation, so do not promise to look up an entry that is not here; ask the user to paste it or to manage it from the Working Rules page.`,
     ...(write ? [
-      `Use mnemo_runtime_memory when the user states a preference or convention that future turns should apply by default, corrects one, or withdraws one. Update the entry that already covers the subject; for replacement or removal, identify it by its body. Confirm a change only from its receipt. ${SAVE_GUIDANCE}`,
+      `Use mnemo_runtime_memory when the user states a preference or convention that future turns should apply by default, corrects one, or withdraws one. Update the entry that already covers the subject; for replacement or removal, identify it by its body. A stored importance is not part of the prompt projection, and a replacement keeps the level already stored unless you set another one, so do not infer a level for an entry you cannot see ranked. Confirm a change only from its receipt. ${SAVE_GUIDANCE}`,
       'Keep drafts, temporary progress, secrets, and easily rediscovered details out of Working Rules. Use branches for rules specific to certain Git branches. On replacement, omit branches to keep the scope or pass an empty list to clear it. At capacity, displaced unpinned rules move to the local archive.',
     ] : []),
   ].join('\n\n')
