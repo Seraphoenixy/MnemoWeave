@@ -26,12 +26,6 @@ const SEARCH_FROM = 8
 type View = { store: MnemonViewStore; state: MnemonViewState }
 type Name = (entry: MemoryPluginEntryView) => string
 
-/** The settings components contribute to their own pages. */
-export interface ComponentSettingsRenderer {
-  has(packageName: string): boolean
-  render(entry: MemoryPluginEntryView, writable: boolean): ReactNode
-}
-
 /**
  * The component pages open, newest last. A page opened from another page can
  * go back to it; one opened from the configuration starts a new trail.
@@ -188,8 +182,6 @@ export interface CompositionBoardProps {
   layers: LayerSettings
   /** While the saved memory layers are still being read. */
   systemPending?: boolean
-  /** The settings components contribute to their pages. */
-  componentSettings?: ComponentSettingsRenderer
   /** The pages open, when the configuration opens them from elsewhere too. */
   pages?: PageTrail
   readOnly: boolean
@@ -203,8 +195,8 @@ export interface CompositionBoardProps {
  * other components declare. Shipped components and installed extensions are
  * named, related and configured the same way, from their own declarations.
  * Every switch applies at once and brings or takes along what depends on it;
- * a component's page says what that would be and holds its options. The
- * board speaks up only when memory is not composed as chosen.
+ * a component's page says what that would be and holds the options it declares.
+ * The board speaks up only when memory is not composed as chosen.
  */
 export function CompositionBoard(props: CompositionBoardProps): JSX.Element | null {
   const { view, system, t, language } = props
@@ -328,8 +320,10 @@ export function CompositionBoard(props: CompositionBoardProps): JSX.Element | nu
   const needle = query.trim().toLowerCase()
   const matches = (item: BoardItem): boolean => needle === '' || [item.label, item.hint, item.entry?.packageName ?? ''].some(text => text.toLowerCase().includes(needle))
   const openRow = (entry: MemoryPluginEntryView | undefined): (() => void) | undefined => entry === undefined ? undefined : () => pages.open(entry.entryId, 'configuration')
-  // A gear marks a component with settings of its own: declared options, or settings it contributed.
-  const configurable = (entry: MemoryPluginEntryView | undefined): boolean => entry !== undefined && (entry.fields.length > 0 || props.componentSettings?.has(entry.componentId) === true)
+  // A gear marks a component whose page carries options to write. Settings a
+  // component contributed are on the settings page itself, so they do not put a
+  // gear here: that page would offer nothing to change.
+  const configurable = (entry: MemoryPluginEntryView | undefined): boolean => entry !== undefined && entry.fields.length > 0
   const rows = (items: readonly BoardItem[]): JSX.Element[] => items.filter(matches).map(item => <BoardRow key={item.key} item={item} configurable={configurable(item.entry)} t={t} onOpen={openRow(item.entry)} />)
   const count = (items: readonly BoardItem[]): string => t('board.enabledCount', { on: items.filter(item => item.checked).length, total: items.length })
   const otherItems = others.map(entry => componentItem(entry, 'enhancement:' + entry.entryId))
@@ -367,7 +361,11 @@ export function CompositionBoard(props: CompositionBoardProps): JSX.Element | nu
     if (entry === model?.composing) return { tone: 'done', text: t('board.composing') }
     return entry.enabled ? { tone: 'warning', text: t('board.notRunning') } : { tone: 'idle', text: t('board.off') }
   }
-  /** A component's page: its state and control, as its row has them, and what it declares and contributed. */
+  /**
+   * A component's page: its state and control, as its row has them, and what it
+   * declares. The settings it contributed are not repeated here: they live on the
+   * settings page itself, so each one has a single control to write it.
+   */
   const pageOf = (entry: MemoryPluginEntryView, board: MemoryViewDashboard): Omit<ComponentDetailsProps, 'onClose' | 'onOpen' | 'back'> => {
     const isMain = entry.roles.includes('strategy')
     const item = isMain ? undefined : [...sourceItems, ...otherItems].find(candidate => candidate.entry === entry)
@@ -377,7 +375,6 @@ export function CompositionBoard(props: CompositionBoardProps): JSX.Element | nu
     return {
       entry, dashboard: board, name, hint: componentCopy(entry, language).hint,
       state: isMain ? mainState(entry) : item?.state, control, writable: !locked, applying: working?.key === 'options:' + entry.entryId, language, t,
-      settings: props.componentSettings?.has(entry.componentId) === true ? props.componentSettings.render(entry, !props.readOnly) : undefined,
       onApply: config => view.store.configure('options:' + entry.entryId, entry, config),
     }
   }

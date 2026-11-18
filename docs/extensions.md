@@ -157,7 +157,7 @@ export function apply(ctx) {
 }
 ```
 
-设置渲染在 `mnemon.component.settings` 区域，以组件声明中的 `componentId` 为键，位于组件页的状态、关系与声明的选项之后；该组件的行会出现打开它们的齿轮。一个包随附多个组件时，组件各自以自己的 `componentId` 注册，不按包名。它只接收页面知道的信息：`component`（`componentId`、`packageName`、`label`、`enabled`）、`writable`、`language`，以及存在时对话的 `sessionId` 与 `workspace`；所需的服务请通过自己的注册注入。注册会等待 dsh-mnemo-weave 的配置出现，调用返回的函数即结束。请遵循页面的交互规则：开关与下拉选择改动即生效，需要输入的值等待你自己的**应用**，且不并入其他分组的保存。
+设置渲染在 `mnemon.component.settings` 区域，以组件声明中的 `componentId` 为键。dsh-mnemo-weave 在记忆系统**设置**页的**组件设置**一节按组件分组绘制它们，与记忆组合、存储并列；组件页（状态、关系与声明的选项）不再重复这些设置，因此一项配置只有一处可写。该组件的行仍会出现齿轮打开组件页。一个包随附多个组件时，组件各自以自己的 `componentId` 注册，不按包名。它只接收页面知道的信息：`component`（`componentId`、`packageName`、`label`、`enabled`）、`writable`、`language`，以及存在时对话的 `sessionId` 与 `workspace`；所需的服务请通过自己的注册注入。注册会等待 dsh-mnemo-weave 的配置出现，调用返回的函数即结束。请遵循页面的交互规则：开关与下拉选择改动即生效，需要输入的值等待你自己的**应用**，且不并入其他分组的保存。
 
 `dsh-mnemo-weave/client` 还导出记忆空间自己的设置所用的控件与样式，即 dsh-mnemo-weave 绘制这些设置时所用的：`ToggleRow`，`useLive`、`useStaged` 以及 `PanelActions`、`WriteFailure`（一组设置的两种保存方式），`Callout`、`Reveal`、`GlobalLocationSetting`，以及配置页的类名表 `memorySettingsStyles`。类名表的键是一组固定的类名，属于 API：比 Starter 更旧或更新的已安装组件按名称查找它们，因此任何版本都不会重命名其中的类。配置页不会在组件的设置外层设置翻译，所以 `PanelActions` 与 `WriteFailure` 接收你传入的 `t`。
 

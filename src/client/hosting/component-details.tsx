@@ -29,8 +29,6 @@ export interface ComponentDetailsProps {
   applying: boolean
   language: string
   t: MnemonTranslate
-  /** The settings the component contributed, rendered after what its declarations give. */
-  settings?: ReactNode | undefined
   /** The page this one was opened from, to go back to. */
   back?: { name: string; go: () => void } | undefined
   /** Open a related component's page in place of this one. */
@@ -50,7 +48,8 @@ export function ComponentDetails(props: ComponentDetailsProps): JSX.Element {
 /**
  * Everything one component brings, in one place: what it is and where it
  * came from, how it relates to the other components installed and what its
- * switch would move, the options it declares and the settings it contributed.
+ * switch would move, and the options it declares. The settings it contributed are
+ * on the settings page itself, beside the rest of the configuration.
  * Relations and options are drawn from the component's own declarations, so an
  * installed extension gets the same page as a shipped component.
  */
@@ -73,8 +72,7 @@ function ComponentPage(props: Omit<ComponentDetailsProps, 'onClose'>): JSX.Eleme
     <StateDot state={on ? 'done' : 'idle'} /><span>{name(other)}</span>
   </button>
 
-  return <div className={`${css.surface} ${css.detailsBody}`}>
-    {props.back !== undefined && <button type="button" className={css.detailsBack} onClick={props.back.go}>
+  return <div className={`${css.surface} ${css.detailsBody}`}>    {props.back !== undefined && <button type="button" className={css.detailsBack} onClick={props.back.go}>
       <IconChevronLeftOutlineRegular size={12} aria-hidden="true" />{t('details.back', { component: props.back.name })}
     </button>}
     <div className={css.detailsHead}>
@@ -115,7 +113,6 @@ function ComponentPage(props: Omit<ComponentDetailsProps, 'onClose'>): JSX.Eleme
       <ComponentOptions key={entry.entryId + JSON.stringify(entry.config)} entry={entry} name={name(entry)} dashboard={dashboard} language={props.language} t={t}
         disabled={!props.writable || !entry.writable} pending={props.applying} onApply={props.onApply} />
     </section>}
-    {props.settings !== undefined && props.settings !== null && <div className={css.detailsContributed}>{props.settings}</div>}
   </div>
 }
 

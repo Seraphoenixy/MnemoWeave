@@ -8,7 +8,8 @@ import {
 import type { MemoryPluginEntryView } from '../../host/contracts/view-protocol.ts'
 import { MnemonClient } from '../connection/api.ts'
 import { isRemoteConnection } from '../connection/remote-rpc.ts'
-import { CompositionBoard, usePageTrail, type ComponentSettingsRenderer, type LayerSettings } from './CompositionBoard.tsx'
+import { CompositionBoard, usePageTrail, type LayerSettings } from './CompositionBoard.tsx'
+import { ComponentSettingsSection, type ComponentSettingsRenderer } from './ComponentSettingsSection.tsx'
 import { subscribeComponentPage, takeComponentPage } from '../hosting/component-page-request.ts'
 import { componentCopy } from '../hosting/component-copy.ts'
 import { useViewFeedback } from '../kit/view-feedback.tsx'
@@ -152,7 +153,13 @@ export function MnemonSettingsCard({ scope, connection, directoryPicker, session
         {/* Like DSH's own settings forms, a read-only document says so above its controls. */}
         {!writable && <p className={css.readOnlyNotice}>{readOnlyNotice}</p>}
         <CompositionBoard view={view} system={memorySystem} systemPending={memorySystemState === 'loading'} layers={layerSettings} readOnly={!coreSnapshot.writable} language={language} t={t}
-          pages={pages} {...(settingsRenderer === undefined ? {} : { componentSettings: settingsRenderer })} />
+          pages={pages} />
+
+        {/* A component's own settings belong here with the rest of the configuration, not
+            only behind its page: they are what it reads while it runs. The board keeps
+            what describes the component and the page keeps that; this is the one place
+            these settings are written. */}
+        <ComponentSettingsSection dashboard={view.state.dashboard} settings={settingsRenderer} readOnly={!coreSnapshot.writable} language={language} t={t} />
 
         <MnemonStorageSection scope={scope} value={coreSnapshot.value} user={coreUser} disabled={coreDisabled} dashboard={view.state.dashboard} target={target}
           {...(directoryPicker === undefined ? {} : { directoryPicker })}

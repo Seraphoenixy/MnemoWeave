@@ -130,8 +130,16 @@
 .detailsBody .optionsPanel { margin: 0; border-radius: 0; padding: 0; background: transparent; }
 /* A component's page on DSH's own row page, under the title DSH draws. */
 /* What a component contributed to its page, after what its declarations give. */
-.detailsContributed { display: flex; min-width: 0; flex-direction: column; gap: 16px; border-top: .5px solid var(--dsw-alias-border-l2); padding-top: 14px; }
 .panelSection { display: flex; min-width: 0; flex-direction: column; gap: 8px; }
+.componentSettingsGroup { display: flex; min-width: 0; flex-direction: column; }
+.componentSettingsHead { display: flex; min-width: 0; align-items: center; gap: 6px; width: 100%; padding: 10px 0; border: 0; border-bottom: .5px solid var(--dsw-alias-border-l2); background: none; color: var(--dsw-alias-label-primary); font-size: 13px; line-height: 20px; text-align: left; cursor: pointer; }
+.componentSettingsHead:hover { color: var(--dsw-alias-label-primary); }
+.componentSettingsHead svg { flex: none; color: var(--dsw-alias-label-tertiary); transition: transform .15s ease; }
+.componentSettingsHead[aria-expanded="true"] svg { transform: rotate(180deg); }
+.componentSettingsName { min-width: 0; overflow: hidden; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.componentSettingsState { flex: none; margin-left: auto; color: var(--dsw-alias-label-tertiary); font-size: 12px; line-height: 18px; }
+.componentSettingsBody { display: flex; min-width: 0; flex-direction: column; gap: 8px; padding: 10px 0 4px; }
+.componentSettingsBody > .panelNote { padding-bottom: 2px; }
 .panelHeading { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr) auto; column-gap: 12px; }
 .panelHeading h3 { margin: 0; color: var(--dsw-alias-label-primary); font-size: 13px; font-weight: 500; line-height: 20px; }
 .panelHeading p { grid-column: 1; margin: 2px 0 0; color: var(--dsw-alias-label-tertiary); font-size: 12px; line-height: 18px; }
