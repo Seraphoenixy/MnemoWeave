@@ -18,7 +18,8 @@
 | `pnpm verify:build` | 校验根包构建可复现 |
 | `pnpm verify:headless` | 使用隔离 DSH profile 检查插件启停和工具 |
 | `pnpm verify:sync` | 构建后验证独立同步服务、PAKE 握手和 MCP 跨进程同步 |
-| `pnpm verify:package` | 检查打包文件和公开入口 |
+| `pnpm verify:package` | 检查打包文件清单、公开入口可导入性与 `publint` / `attw` 类型声明 |
+| `pnpm verify:windows-pnpm` | Windows 专用：验证桌面 PATH 之外的 pnpm 全局 shim 发现 |
 | `pnpm verify` | 依次运行文档、类型、单元测试、构建、Headless、同步和打包验证 |
 
 测试与仓库自身的校验闸门都放在 `tests/`：`unit/` 放单模块用例，`integration/` 放组合用例，`checks/` 放需要包管理器、已构建产物或已安装 DSH 的闸门，`support/` 放共用夹具。`scripts/` 只保留产出构建产物的工具。用例使用 Node 内置的 `node:test`，通过 `--experimental-transform-types` 直接引用 `src/` 下的 TypeScript 模块，不额外安装测试框架。详见 [tests/README.md](../tests/README.md)（英文）。
@@ -65,13 +66,15 @@ src/
     panels/         设置卡片、组合面板与各 Source 设置
     hosting/        组件宿主、区域目录与 Source 页面
     turn/           会话内的回合尾部、保存动作与用量
-  components/    各 Source / Strategy / Provider 的独立模块
+  components/    各 Source / Strategy / Provider 的独立模块：
+                 source-runtime, source-documents, source-memory-spaces,
+                 source-skills, strategy-auto-capture, provider-mnemon-native
   memory/        MCP 与 DSH 共用的本机目录、工作准则和同步配置
   sync/
     protocol.ts  服务端与客户端共用的同步协议
     server/      HTTP 请求处理、存储接口、SQLite 实现
     client/      快照协调、远端接口、HTTP 客户端、本地状态文件
-scripts/         build-time tooling: bundle declarations, component assets
+scripts/         build-time tooling: bundle declarations, component assets, Antigravity installer
 tests/           unit, integration and check cases (see tests/README.md)
 cordis.patch.yml   default Starter composition
 ```

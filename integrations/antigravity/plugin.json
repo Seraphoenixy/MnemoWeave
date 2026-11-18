@@ -1,0 +1,10 @@
+{
+  "name": "mnemo-weave",
+  "displayName": "MnemoWeave",
+  "description": "Composable memory system for Antigravity: shared Working Rules, managed Workspace Documents, and Memory Spaces via MnemoWeave MCP.",
+  "suggestedPrompts": [
+    "Read my shared Working Rules with mnemo_working_rules",
+    "Search workspace documents or recall relevant lessons from Memory Spaces",
+    "Save this standing preference to Working Rules"
+  ]
+}

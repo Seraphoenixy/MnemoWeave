@@ -11,9 +11,9 @@ $DSH_HOME/profiles/<profile>/cordis.patch.yml
 
 Web profile 的 patch 通常是 `~/.dsh/profiles/web/cordis.patch.yml`。当前全部配置标记为 `live` 生效；改动生效时会先初始化候选运行图，再原子切换 Host 服务。
 
-执行中的回合保留已固定的运行图。已经派发的子 Agent 保留委托运行图直到本次 activation 销毁，即使父回合已结束；后续父回合和新委托的 activation 使用新 generation。保存设置不会静默扩大既有任务的 Recall 权限。
+执行中的回合保留已固定的运行图。已经派发的子 Agent 保留委托运行图直到本次 activation 销毁，即使父回合已结束；后续父回合和新委托的 activation 使用新 generation。保存设置不扩大既有任务的 Recall 权限。
 
-与 DSH 对所有自带配置的插件一样，Web 界面在“插件”中该插件自己的页面编辑 Mnemon 的设置，而不在 DSH 的“设置”中；其中**界面**在这个页面上，**记忆组合**与**存储**在记忆系统自己的**设置**页上。[界面指南](dsh-workbench.md#ui-在插件页中)展示了每个部分。
+与 DSH 对所有自带配置的插件一样，Web 界面在“插件”中该插件自己的页面编辑 Mnemon 的设置，而不在 DSH 的“设置”中；其中**界面**在这个页面上，**记忆组合**与**存储**在记忆系统自己的**设置**页上。[界面指南](workbench.md#ui-在插件页中)展示了每个部分。
 
 | 界面位置 | 设置 | 保存为 |
 |---|---|---|
@@ -23,11 +23,11 @@ Web profile 的 patch 通常是 `~/.dsh/profiles/web/cordis.patch.yml`。当前�
 | **设置 → 工作准则** | 本机共享容量 | `runtimeMemory.userLimitBytes` 与 `runtimeMemory.memoryLimitBytes` 之和 |
 | **设置 → 记忆空间** | 记忆 Provider；Mnemon Native 嵌入（自动、Ollama 或 OpenAI 兼容） | `state/memory-providers.json` 中的 Provider 注册表；`embedding` |
 | **设置 → 分层策略** | 任务 Agent 模型；空闲审查 | `taskAgentModel`；`idleReview` |
-| **设置 → 技能管理** | 自进化、草案自动回测、复盘参数、对话提示、侧边栏入口 | `skills`；见[技能管理设置](dsh-configuration.md#技能管理设置) |
+| **设置 → 技能管理** | 自进化、草案自动回测、复盘参数、对话提示、侧边栏入口 | `skills`；见[技能管理设置](configuration.md#技能管理设置) |
 
 开关与选择器立即生效；存储目录、嵌入连接、审查参数与组件选项等需要输入的值要点击**应用**。Provider 可复用的服务字段（服务地址、凭据、可执行文件）保存在 Provider 注册表中，而不是 Mnemon 的 YAML；启用或保存 Provider 时，会把它已有的命名空间发现到**记忆空间 → 概览**，关闭时只移除这些本地映射。其他高级项需要直接修改 YAML。
 
-Mnemon Native 的服务设置由 CLI 配置管理，不保存在 Mnemon 顶层 YAML 中。参见 [Provider 运维边界](dsh-operations.md#providers-运维边界)。
+Mnemon Native 的服务设置由 CLI 配置管理，不保存在 Mnemon 顶层 YAML 中。参见 [Provider 运维边界](operations.md#providers-运维边界)。
 
 ## 完整示例
 
@@ -136,12 +136,12 @@ mnemon:
 | `displayMode` | `sidebar` | `sidebar` / `builtin`；兼容旧值 `buildin` | 记忆系统入口：独立 Sidebar 或会话内标签页，共用同一工作台；旧拼写自动迁移为 `builtin` |
 | `tabEnabled` | `true` | boolean | 是否挂载所选入口和工作台；关闭后 Host RPC、命令和 Agent 工具保持注册 |
 | `writeEnabled` | `true` | boolean | 是否暴露语义写工具、写 RPC 和写命令 |
-| `taskAgentModel` | `{ mode: inherit }` | `inherit` / `fixed`；`followConversation`：boolean | 独立任务 Agent 与空闲审查 worker 的模型路由：`inherit`（**跟随全局**）、`inherit` 加 `followConversation: true`（**跟随会话**），或必须同时保存 `provider` 与 `model` 的 `fixed`（**自定义**）。见[后台任务 Agent 的模型路由](dsh-configuration.md#后台任务-agent-的模型路由) |
+| `taskAgentModel` | `{ mode: inherit }` | `inherit` / `fixed`；`followConversation`：boolean | 独立任务 Agent 与空闲审查 worker 的模型路由：`inherit`（**跟随全局**）、`inherit` 加 `followConversation: true`（**跟随会话**），或必须同时保存 `provider` 与 `model` 的 `fixed`（**自定义**）。见[后台任务 Agent 的模型路由](configuration.md#后台任务-agent-的模型路由) |
 | `subagentProviderNames` | `[]` | 最多 32 个非空名称，每个最多 128 字符 | Host 不再支持枚举且自定义插件把名称隐藏在代码中时，提供额外子 Agent Provider 候选。在 Mnemon 插件配置中填写，隔离检查仍然有效；标准 `providerName` 配置会自动发现。 |
 | `remoteAccess` | `read-only` | `read-only` / `trusted-host` | 非 loopback Mnemon 管理授权，仅启动时读取，由 API Gateway 映射执行 |
 | `conversationInteraction.turnBar` | `true` | boolean | 回复下方的回合记忆栏，立即生效 |
 | `conversationInteraction.saveAction` | `true` | boolean | 已完成回复上的**存入记忆**操作及其确认框，立即生效 |
-| `skills` | 见[技能管理设置](dsh-configuration.md#技能管理设置) | 该节列出的各键 | 技能管理的自进化、复盘参数、对话提示与侧边栏入口；立即生效，不重建记忆运行图 |
+| `skills` | 见[技能管理设置](configuration.md#技能管理设置) | 该节列出的各键 | 技能管理的自进化、复盘参数、对话提示与侧边栏入口；立即生效，不重建记忆运行图 |
 
 所有值都保存在 `mnemon` 条目下并实时生效：界面的 `mnemon-ui` 设置范围保存为 `conversationInteraction`，`mnemon-view` 设置范围保存为 `memoryView`，`mnemon-skills` 设置范围保存为 `skills`。存储根只会在新运行图初始化成功后原子切换。
 
@@ -232,13 +232,13 @@ WebUI 从实时管理目录读取 Source 实例，新增 Source 无须修改前�
 
 DSH 负责浏览器认证或配对，以及 Host/Origin 校验。远程页面使用命名空间 API Gateway，本地回环客户端与 DSH 桌面版窗口（`dsh-app://app/`）使用各自的通道；只有 DSH 为页面声明了不持有 Host 的传输方式时，应用页面才按远程页面处理。Mnemon 网关映射单独执行 `remoteAccess`：`read-only` 允许普通读取、小范围激活和设置查看，但拒绝写入、ZIP 操作、View 变更与设置修改；没有 `trusted-host` 授权时，设置快照报告 `writable: false`。修改这项仅在启动时读取的策略后请重启 DSH。DSH `trustedHosts` 不能代替 HTTPS 或部署层访问控制。`writeEnabled=false` 是产品级只读模式，不能代替传输层认证。
 
-完整的代理、启动 token、可信 authority、重启与验证流程见[云端 WebUI](dsh-operations.md#ops-cloud-hosted-webui)。
+完整的代理、启动 token、可信 authority、重启与验证流程见[云端 WebUI](operations.md#ops-cloud-hosted-webui)。
 
 ### 按工作区排除记忆
 
 在**设置**页的 **存储 → 排除记忆的工作区** 中每行填写一个路径并应用。默认空列表不改变现有行为。路径支持 `~`，经真实路径规范化后精确匹配工作区目录（包括符号链接别名），不支持通配符或递归目录规则。工作区身份取自 DSH 会话头，与存储范围设置无关。子代理即使改变 cwd，也继承父会话的工作区决策；父 Agent 未加载时，可通过 DSH 的工作区与会话目录识别父会话所属工作区。
 
-被排除的会话不再获得新的记忆 View、提示词指导、召回提醒或记忆工具，也不参与自动整理、技能演化、容量维护和记忆写入。工作台标明“已排除记忆”，保留已有数据的查看，拒绝记忆写入与 Agent 辅助操作。配置仍可编辑，便于移除排除项。无效、不存在或不可访问的目录会被忽略，并在工作台提示；无法识别当前或父工作区时会给出诊断，不会静默停用无关会话。
+被排除的会话不再获得新的记忆 View、提示词指导、召回提醒或记忆工具，也不参与自动整理、技能演化、容量维护和记忆写入。工作台标明“已排除记忆”，保留已有数据的查看，拒绝记忆写入与 Agent 辅助操作。配置仍可编辑，便于移除排除项。无效、不存在或不可访问的目录会被忽略，并在工作台提示；无法识别当前或父工作区时会给出诊断，不停用无关会话。
 
 保存后对后续操作生效，不抹除已经进入会话的历史和已完成写入，也不回滚已经派发给 Provider 的操作。移除路径后，下一轮恢复记忆参与，无需迁移或删除数据。这是 Mnemon 的参与设置，不是文件系统或 Host 的安全沙箱。
 
@@ -266,7 +266,7 @@ Headless 没有 `workspaceRegistry`；其新 session 的 cwd 就是启动 `dsh -
 
 ### 全局工作准则
 
-DSH、Codex 和 ZCode 在同一全局根下共享 `working-rules/runtime/工作准则.md`。全局根取 `MNEMON_DATA_DIR`，默认是 `~/.mnemon`。首次识别旧全局或工作区存储时，从其 `runtime/memories.json` 一次性迁入条目。设置页面编辑统一的字节上限，默认按原两项配额合计为 14 KiB。后续超限写入将移出的条目归档到本地。
+DSH 与 Codex 在同一全局根下共享 `working-rules/runtime/工作准则.md`。全局根取 `MNEMON_DATA_DIR`，默认是 `~/.mnemon`。首次识别旧全局或工作区存储时，从其 `runtime/memories.json` 一次性迁入条目。设置页面编辑统一的字节上限，默认按原两项配额合计为 14 KiB。后续超限写入将移出的条目归档到本地。
 
 ### `workspaces`
 
@@ -296,13 +296,13 @@ mnemon:
 
 ### 选择跨 Agent 共享范围
 
-| 目标 | 推荐范围 | 说明 |
+| 目标 | 适用范围 | 说明 |
 |---|---|---|
 | 本机多个 Agent 共享长期记忆 | `global` | 各方统一使用 `~/.mnemon` 或同一个 `MNEMON_DATA_DIR` |
 | 多个 Agent 共享指定数据根 | `custom` | 各方显式配置同一个绝对目录，便于隔离和备份 |
 | 只在一个项目内共享 | `workspace` | 各方都需要把 Mnemon 根对齐到该项目的 `<workspace>/.mnemon` |
 
-Mnemon Native 通过 `data/<store>/mnemon.db` 与其他 Mnemon-enabled Agent 原生互操作；三方引擎通过配置的 Provider 作用域互操作。Runtime、Documents、DSH 激活状态和 UI 元数据仍属于 dsh-mnemo-weave 管理范围。见[长期记忆 Provider](dsh-operations.md)。
+Mnemon Native 通过 `data/<store>/mnemon.db` 与其他 Mnemon-enabled Agent 原生互操作；三方引擎通过配置的 Provider 作用域互操作。Runtime、Documents、DSH 激活状态和 UI 元数据仍属于 dsh-mnemo-weave 管理范围。见[长期记忆 Provider](operations.md)。
 
 第三方服务配置、记忆空间范围配置与 Secret 保存在当前范围根目录的 `state/memory-providers.json`，不会写入 profile patch。服务配置由同一 Provider 的多个记忆空间复用；运行时才与单个记忆空间配置合并。Mnemon Native 的 ZIP 只包含 Runtime、Documents 与原生记忆空间；第三方服务数据、连接凭据和本地三方 Store 不进入该 ZIP。
 
@@ -325,7 +325,7 @@ config.cliPath
            /usr/bin/mnemon
 ```
 
-显式 `cliPath` 会被采用；既可以填写完整路径，也可以填写 PATH 中的命令名（例如 `mnemon`）。状态检查与实际调用使用同一套发现规则，并在重新检查时识别安装或移除的 CLI，无需重启 DSH。若显式指定的命令不可执行，实际调用会返回启动错误，不会悄悄改用其他 CLI。Windows 自动发现接受普通 `.exe` 文件及经过验证的官方 npm/pnpm `mnemon.cmd` 启动器。包管理器启动器通过 Node 调用，全程不使用 shell；任意其他 `.cmd` 与 `.bat` wrapper 仍被排除。迁移至 npm 后，请将显式 CLI 配置指向 npm 启动器，并在“状态 → 检查版本”核对可执行文件路径。
+显式 `cliPath` 会被采用；既可以填写完整路径，也可以填写 PATH 中的命令名（例如 `mnemon`）。状态检查与实际调用使用同一套发现规则，并在重新检查时识别安装或移除的 CLI，无需重启 DSH。若显式指定的命令不可执行，实际调用会返回启动错误，不改用其他 CLI。Windows 自动发现接受普通 `.exe` 文件及经过验证的官方 npm/pnpm `mnemon.cmd` 启动器。包管理器启动器通过 Node 调用，全程不使用 shell；任意其他 `.cmd` 与 `.bat` wrapper 仍被排除。迁移至 npm 后，请将显式 CLI 配置指向 npm 启动器，并在“状态 → 检查版本”核对可执行文件路径。
 
 ## 兼容 Store 提示优先级
 
@@ -364,7 +364,7 @@ DSH 的实时模型目录会报告各模型的输入模态，选择器为支持�
 
 ## 技能管理设置
 
-技能管理的设置保存在 `mnemon` 条目的 `skills` 下，通过 `mnemon-skills` 设置范围在**设置 → 技能管理**页面上编辑。设置保存后实时生效；链接更新权限变更会刷新 Source 运行图，其他技能设置不重建运行图；目标选择、草案预算与复盘参数需要点击**应用**或**放弃**。草案预算在每次起草开始时读取。各项含义见[技能管理指南](dsh-operations.md#skills-自进化)。
+技能管理的设置保存在 `mnemon` 条目的 `skills` 下，通过 `mnemon-skills` 设置范围在**设置 → 技能管理**页面上编辑。设置保存后实时生效；链接更新权限变更会刷新 Source 运行图，其他技能设置不重建运行图；目标选择、草案预算与复盘参数需要点击**应用**或**放弃**。草案预算在每次起草开始时读取。各项含义见[技能管理](skills.md#skills-自进化)。
 
 | 键 | 默认值 | 范围 | 含义 |
 |---|---:|---|---|
@@ -393,7 +393,7 @@ DSH 的实时模型目录会报告各模型的输入模态，选择器为支持�
 
 `skills.targetScope` 默认保留 `user`，兼容现有安装：升级或修改存储范围不会把新技能写到另一个根目录。需要跟随存储范围时显式选择 `storage`。新建议记录解析后的目标；草案及重新起草保留该目标，采纳沿用草案的目标，除非用户手动选择其他位置。旧版本中没有目标字段的建议在起草时使用当前设置；已有草案保留记录的目标。改进已有技能始终写回 `baseKey` 与记录来源共同确定的原文件（包括所属项目），不受设置、所选存储范围或目标覆盖影响。
 
-项目根来自所选工作区的 Skills Source 目录，遵循 DSH 的发现规则（最近的 `.git` 祖先目录，否则为工作区本身），不使用模型任务的工作目录。缺少工作区/项目或目标不可写时，复盘/起草会显示明确错误，不静默降级到用户技能。采纳时重新检查最终选择的项目：不会重建起草后被删除的项目，用户可以明确改选用户根目录；后续文件系统错误也会显示。不会迁移技能或改变发现优先顺序，默认仍由用户手动采纳；可选的自动采纳也遵守这些 Source 校验。
+项目根来自所选工作区的 Skills Source 目录，遵循 DSH 的发现规则（最近的 `.git` 祖先目录，否则为工作区本身），不使用模型任务的工作目录。缺少工作区/项目或目标不可写时，复盘/起草会显示明确错误，不降级到用户技能。采纳时重新检查最终选择的项目：不会重建起草后被删除的项目，用户可以明确改选用户根目录；后续文件系统错误也会显示。不会迁移技能或改变发现优先顺序，默认仍由用户手动采纳；可选的自动采纳也遵守这些 Source 校验。
 
 两个建议开关默认均为 `true`，保留旧配置的行为，可分别关闭；两项均关闭时暂停自动和手动会话复盘，不再发起模型调用。开关同时约束对应的评测用例和已在运行的复盘结果。已有建议以及明确发起的生成草案、回测和采纳操作仍可使用。`skills.evolution` 继续作为自动复盘的总开关。
 
@@ -413,7 +413,7 @@ mnemon:
 
 每个子 Agent 都通过固定注册的同一个 `mnemo_subagent_result` 工具交回结果，并带上为它签发的可撤销 `requestId`：子 Agent 返回 `{ requestId, result }`，Host 按该操作的 schema 校验 `result`，拒绝过期或其他子任务提交的结果。
 
-若模型适配器在工具执行前拒绝该结果工具的不完整 JSON 实参（`MALFORMED_RESPONSE`），同一子代理会获得一次纠正请求，仅重交括号完整的结果，不重复已完成的写入。正常结果不增加请求；其他工具或错误、第二次不合法的结果仍按原有方式失败。不静默补写 JSON，不放松 schema 或守卫，不重启整个任务。额外请求使用子代理已有模型与输出上限；不保证模型必然纠正成功，取消仍会终止任务。
+若模型适配器在工具执行前拒绝该结果工具的不完整 JSON 实参（`MALFORMED_RESPONSE`），同一子代理会获得一次纠正请求，仅重交括号完整的结果，不重复已完成的写入。正常结果不增加请求；其他工具或错误、第二次不合法的结果仍按原有方式失败。不自动补写 JSON，不放松 schema 或守卫，不重启整个任务。额外请求使用子代理已有模型与输出上限；不保证模型必然纠正成功，取消仍会终止任务。
 
 空闲审查默认使用不继承父上下文的 `spawn` Provider，并从父 Agent 当前公开 surface 构建有界检查点。仅收录完整可见文本消息与成功工具结果，不重建被省略或不可用的上下文。`idleReview.provider: fork` 保留完整父上下文审查，并要求 `inheritsParentContext=true`。fork 缺失或不兼容时，`idleReview.fallback` 在启动前选择 `spawn` 或 `skip`；已启动的运行绝不通过其他 Provider 重试。
 
@@ -425,7 +425,7 @@ mnemon:
 
 在分层策略的空闲审查设置中启用**重新打开会话后保留审查限额**，或设置 `idleReview.persistWatermark: true`，即可恢复同一持久父会话的尝试次数和剩余冷却时间。身份由实际运行时存储根目录与父会话 ID 共同决定；新会话或其他根目录使用独立预算，选择 Source/View 或使用全局 USER.md 不改变身份。重建 Agent 或回退 surface 不重置已保留的额度；若 DSH 在清空/压缩时分配新会话 ID，则按新会话处理。在运行中的 Agent 打开此开关后，会立即合并该根目录已用的次数和上次尝试时间作为持久基线，不额外计次或启动工作。关闭后新增内存内尝试、再重新启用时会再次合并，不携带其他根目录的用量。每次尝试在启动子代理前先写入磁盘，失败和取消也计次；预约后崩溃可能消耗一次额度而未启动子代理。重启不重放工作、不补跑审查，仍需新的合格检查点。系统时钟回拨导致的未来时间仍保留冷却约束，并以有界定时器等待。
 
-工作区显示本会话尝试次数、配置上限、恢复次数和最早下次时间；它们是会话准入次数，不是全局完成总量。状态损坏/版本不受支持、读写失败或锁冲突会明确暂停自动审查，普通对话、召回与手动操作仍可使用。停止使用此根目录的所有 Host，检查 `state/idle-review/` 中该会话的 JSON 或废弃 `.lock` 目录，修复/恢复状态，仅删除确认已废弃的锁，然后重新打开会话。删除配额记录会明确重置预算。关闭 `persistWatermark` 会恢复内存内限额但保留文件；重新启用时可恢复已有状态。回滚到旧版本会忽略这些文件。配额记录仅保存在本机，不进入 Pack 或服务器同步，直到手动删除前一直保留；不增加自动清理、重放或 Skills 演进状态。见[存储模型](architecture.md#storage-统一根目录)。
+工作区显示本会话尝试次数、配置上限、恢复次数和最早下次时间；它们是会话准入次数，不是全局完成总量。状态损坏/版本不受支持、读写失败或锁冲突会明确暂停自动审查，普通对话、召回与手动操作仍可使用。停止使用此根目录的所有 Host，检查 `state/idle-review/` 中该会话的 JSON 或废弃 `.lock` 目录，修复/恢复状态，仅删除确认已废弃的锁，然后重新打开会话。删除配额记录会明确重置预算。关闭 `persistWatermark` 会恢复内存内限额但保留文件；重新启用时可恢复已有状态。回滚到旧版本会忽略这些文件。配额记录仅保存在本机，不进入 Pack 或服务器同步，直到手动删除前一直保留；不增加自动清理、重放或 Skills 演进状态。见[存储模型](architecture.md#storage-磁盘存储布局)。
 
 在实际打开的步骤内，可等待的 `agent/request` 钩子会通过 DSH 正常工具执行链向父会话的必需结果提交工具发送私有空操作检查。停止钩子与空闲计时器只使用本轮准入结果，不在 `step/end` 后执行父会话工具。同一轮、同一策略首次检查失败时，最多在后续步骤重试一次，不在模型传输重试时重复检查；成功结果仅在本轮、同一策略内复用，后续轮次重新检查。因此恢复后的执行器可以恢复准入，无需沿用上一轮的权限。会话守卫拒绝 `mnemo_*` 或要求审批时，仍在创建子代理、调用模型前跳过，不消耗次数或冷却时间，也不弹出审批。原生工具与 Code Mode 保留既有 schema 和守卫；Code Mode 正常的本地分发审计事件不进入模型可见对话。检查不写记忆、不结束回合。五秒超时撤销凭证并请求取消；请求钩子等待执行与审计事件收尾后才允许 `step/end`。不响应取消的扩展仍可能延迟请求。这是保守准入，不保证子代理之后的写入一定获准；显式审查及后续 Provider/写入失败行为不变。
 
@@ -512,7 +512,7 @@ routingGuidance=false
 
 包内 `cordis.patch.yml` 提供默认 config 行。DSH profile 的同 ID 配置可能整体覆盖这行。不要在 profile 的最终 patch 中只增加 `cliPath`；请改用 `MNEMON_CLI_PATH` 或用户设置 `mnemon.cliPath`。确因其他原因需要自定义 profile patch 时，应保留仍需启用的全部键，而不是假设深合并。
 
-已认证网关管理所需的 `remoteAccess` 覆盖属于这种整行自定义。请使用[远程管理操作步骤](dsh-operations.md#ops-remote-management)中的完整、可随升级核对的示例，保留当前配置的其他字段；单独的 `config: { remoteAccess: trusted-host }` 片段会替换这些字段。
+已认证网关管理所需的 `remoteAccess` 覆盖属于这种整行自定义。请使用[远程管理操作步骤](operations.md#ops-remote-management)中的完整、可随升级核对的示例，保留当前配置的其他字段；单独的 `config: { remoteAccess: trusted-host }` 片段会替换这些字段。
 
 ## 常见配置
 

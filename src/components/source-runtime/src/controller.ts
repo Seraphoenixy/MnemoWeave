@@ -520,21 +520,23 @@ export class RuntimeMemoryController {
     const visibleEntries = branchScope === undefined
       ? entries
       : entries.filter(entry => entry.target === 'user' || entryMatchesBranch(entry, branchScope))
-    // Working Rules are the user's own words: pinned entries first, then the
-    // rest, with no storage metadata, branch header, or § separator between
-    // them. The reserved prefix is the pinned lines, so truncation cannot cut
-    // them out of the projection.
+    // Working Rules are the user's standing rules: pinned entries first under an
+    // explicit priority heading, then the rest as Markdown bullets, with no
+    // storage metadata, branch header, or § separator. The reserved prefix is
+    // the pinned block so truncation cannot cut pinned rules out.
     if (this.workingRules !== undefined) {
-      const lines = (list: readonly RuntimeMemoryEntry[]) => list.map(entry => entry.content).join('\n')
+      const formatEntry = (content: string) => (/^\s*(?:[-*]|\d+\.)\s/u.test(content) ? content : `- ${content}`)
+      const lines = (list: readonly RuntimeMemoryEntry[]) => list.map(entry => formatEntry(entry.content)).join('\n')
       const pinnedRules = visibleEntries.filter(entry => entry.pinned === true)
       const plainRules = visibleEntries.filter(entry => entry.pinned !== true)
-      const reserved = lines(pinnedRules)
+      const reserved = pinnedRules.length === 0 ? '' : `#### Pinned Rules (must follow)\n${lines(pinnedRules)}`
+      const plain = plainRules.length === 0 ? '' : `${pinnedRules.length === 0 ? '' : '#### Additional Rules\n'}${lines(plainRules)}`
       return {
         minimumCharacters: reserved.length,
         revision: snapshot.revision,
         entries: visibleEntries.map(entry => ({ ...entry, ...(entry.branches === undefined ? {} : { branches: [...entry.branches] }) })),
         totalEntries: entries.length,
-        text: [reserved, lines(plainRules)].filter(Boolean).join('\n'),
+        text: [reserved, plain].filter(Boolean).join('\n\n'),
       }
     }
     const branchLine = branchScope === undefined

@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "mnemo_weave": {
+      "command": "node",
+      "args": [
+        "<MNEMOWEAVE_REPO_ROOT>/dist/mnemo-weave-mcp.js"
+      ]
+    }
+  }
+}

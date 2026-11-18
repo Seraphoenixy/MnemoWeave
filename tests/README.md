@@ -36,6 +36,7 @@ A case owns whatever it starts. Servers are stopped and temporary directories re
 | `snapshot-transfer.test.mjs` | File-by-file transfer: only changed entries move, progress counts what moved, a refused push is retried |
 | `workspace-merge.test.mjs` | The real Pack merge: both machines' Documents survive, the local path is not carried, the union settles byte-identically |
 | `delegation-activity.test.mjs` | What a delegated run records, and that it never records the answer |
+| `mcp-tools.test.mjs` | MCP Working Rules mutation contract (`add`, `replace`, `remove`, branch scoping, validation) in an isolated profile |
 | `sync-store.test.mjs` | Blob collection behind non-manifest batches, and pruning |
 
 `checks/` holds the gates that need the package manager, a built artifact, or an installed DSH:

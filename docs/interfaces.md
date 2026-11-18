@@ -1,11 +1,11 @@
-# DSH 接口与工作流
+# DSH 界面、路由与 RPC 接口
 
 <a id="interfaces-webheadless工具命令与-rpc"></a>
 
 ## Web、Headless、工具、命令与 RPC
 
 
-本页是集成参考。日常使用请先看 [Sidebar 与对话交互指南](dsh-workbench.md)。
+本页是集成参考。日常使用请先看 [Sidebar 与对话交互指南](workbench.md)。
 
 <a id="interfaces-记忆空间命名与兼容性"></a>
 
@@ -54,6 +54,8 @@ Headless 会获得完整模型工具面。它把命令行任务作为普通用�
 ### 模型工具
 
 DSH 工具统一使用 `mnemo_` 前缀。升级后，自定义提示词、Code Mode 脚本和工具白名单中的旧 `mnemon_` 工具名需同步更新。既有会话中的历史调用仍可查看。已移除 `mnemo_view_route` 和 `mnemo_view_action`，对话使用对应的具名工具。原 `mnemo_document_create` 调用请改用 `mnemo_document_manage` 并传入 `action=create`。
+
+各工具的完整参数 Schema、类型、取值范围、返回值与权限守卫见[工具与命令参考](tools.md)。
 
 <a id="interfaces-只读工具"></a>
 
@@ -213,7 +215,7 @@ RPC 是 DSH Host 与插件客户端之间的内部桥，不是稳定外部 HTTP 
 | `/dsh-mnemo-weave-view` | 记忆组合读取 | 允许 |
 | `/dsh-mnemo-weave-view-settings` | 保存记忆组合、安装组件 | 需要 `remoteAccess: trusted-host` |
 
-回环页面直接调用这些通道，由 DSH 浏览器会话认证。远程页面经 DSH API Gateway 到达同一组处理器：通道 `/api`，endpoint 为 `dshMnemon/read`、`dshMnemon/activation`、`dshMnemon/write`、`dshMnemon/pack`、`dshMnemon/settings`、`dshMnemon/view`、`dshMnemon/viewWrite`、`dshMnemon/sync` 与 `dshMnemon/review`。Gateway 负责 Host/Origin 校验、浏览器配对与响应封装；Mnemon 只额外施加上表中的 `remoteAccess` 授权，并在启动时确定。见[远程管理](dsh-operations.md#ops-远程管理)。
+回环页面直接调用这些通道，由 DSH 浏览器会话认证。远程页面经 DSH API Gateway 到达同一组处理器：通道 `/api`，endpoint 为 `dshMnemon/read`、`dshMnemon/activation`、`dshMnemon/write`、`dshMnemon/pack`、`dshMnemon/settings`、`dshMnemon/view`、`dshMnemon/viewWrite`、`dshMnemon/sync` 与 `dshMnemon/review`。Gateway 负责 Host/Origin 校验、浏览器配对与响应封装；Mnemon 只额外施加上表中的 `remoteAccess` 授权，并在启动时确定。见[远程管理](operations.md#ops-远程管理)。
 
 Gateway 通过 Mnemon 在 `dshMnemon` 命名空间下的 `mnemonRemote` Typert 服务到达这些处理器，其命名远程方法为 `read`、`activation`、`write`、`pack`、`settings`、`view`、`viewWrite`、`sync` 与 `review`。缺少该授权时，`write`、`pack`、`sync`、`review`、`viewWrite` 与 `settings` 的 `mutate` 会返回 `remote Mnemon management requires remoteAccess: trusted-host`；`read`、`activation`、`view` 与 `settings` 的 `get` 不需要。
 
@@ -293,7 +295,7 @@ Gateway 通过 Mnemon 在 `dshMnemon` 命名空间下的 `mnemonRemote` Typert �
 - `sync-all` 按游标同步工作准则、各存储根及活动。同步要求宿主可写。解决冲突时传入 `resolve: "server"` 或 `resolve: "local"`、本次冲突的 `conflictToken` 和 `confirmed: true`。同一宿主进程同时只运行一次同步，进行中再次调用会被拒绝。宿主自身在 `autoSync.enabled` 开启时按 `autoSync.intervalMs` 调用同一条路径，因此定时运行与页面点击共用同一把锁与同一份进度记录；因冲突停止时定时器暂停，其它失败按间隔重试。一次同步使用自己的时间预算（600 秒），不随发起它的 HTTP 请求结束而中止：页面跳转或连接重建只结束那次调用，同步继续在宿主中完成，结果从 `progress` 读取。
 - `server-sync-rules`、`server-sync` 和 `server-sync-activity` 继续服务旧客户端。
 
-接入说明见[服务器同步](dsh-operations.md#ops-服务器同步)。
+接入说明见[服务器同步与部署](sync.md#ops-服务器同步)。
 
 <a id="interfaces-审查通道"></a>
 
@@ -314,7 +316,7 @@ Gateway 通过 Mnemon 在 `dshMnemon` 命名空间下的 `mnemonRemote` Typert �
 
 #### 设置通道
 
-`/dsh-mnemo-weave-settings` 为三个命名空间提供 `get` 与 `mutate`：`mnemon` 管理 Host 与存储设置，`mnemon-ui` 管理 `turnBar` 与 `saveAction`，保存为 `conversationInteraction`，`mnemon-skills` 管理技能管理的设置，保存为 `skills`（见[技能管理设置](dsh-configuration.md#技能管理设置)）；`mnemon-skills` 的修改无需重建记忆运行图即可生效。mutation 携带 settings revision，防止覆盖并发编辑。插件页中的 dsh-mnemo-weave 页面（`plugins.bundle.config`）与记忆系统的**设置**页在回环页面和远程页面上都通过该通道读写。回环页面还会跟随 DSH `ctx.configForms` 中 `mnemon` 条目的 revision，在其他页面或 profile 重新加载改动它时重新读取该通道。
+`/dsh-mnemo-weave-settings` 为三个命名空间提供 `get` 与 `mutate`：`mnemon` 管理 Host 与存储设置，`mnemon-ui` 管理 `turnBar` 与 `saveAction`，保存为 `conversationInteraction`，`mnemon-skills` 管理技能管理的设置，保存为 `skills`（见[技能管理设置](configuration.md#技能管理设置)）；`mnemon-skills` 的修改无需重建记忆运行图即可生效。mutation 携带 settings revision，防止覆盖并发编辑。插件页中的 dsh-mnemo-weave 页面（`plugins.bundle.config`）与记忆系统的**设置**页在回环页面和远程页面上都通过该通道读写。回环页面还会跟随 DSH `ctx.configForms` 中 `mnemon` 条目的 revision，在其他页面或 profile 重新加载改动它时重新读取该通道。
 
 <a id="interfaces-记忆组合通道"></a>
 
@@ -328,7 +330,7 @@ Gateway 通过 Mnemon 在 `dshMnemon` 命名空间下的 `mnemonRemote` Typert �
 | `/dsh-mnemo-weave-view-settings` | `apply` | 保存经确认的组合：主策略、组件开关与选项 |
 | `/dsh-mnemo-weave-view-settings` | `install-plugin` | 用 DSH CLI 把经确认的包版本安装到当前 Profile |
 
-`apply` 把主策略与各组件选项保存在 `mnemon-view` 设置范围（保存为 `memoryView`）；组件开关由 DSH 插件管理器写入 profile patch。见[配置参考](dsh-configuration.md)。
+`apply` 把主策略与各组件选项保存在 `mnemon-view` 设置范围（保存为 `memoryView`）；组件开关由 DSH 插件管理器写入 profile patch。见[配置参考](configuration.md)。
 
 <a id="interfaces-npm-导出与扩展服务"></a>
 
@@ -354,408 +356,3 @@ Core 发布 `ctx.mnemonMemory: MnemonMemoryService`，实际服务只提供 `ins
 ### 国际化范围
 
 主要 Sidebar 工作台（含**设置**页）、插件页中的界面设置与对话内入口支持中文和英文，并跟随 DSH locale 实时切换。品牌名、工具名和配置键不翻译。`/mnemon` 命令、模型工具卡、部分 Host 错误与兼容元数据尚未完全国际化。
-
-<a id="workflows-生命周期与核心流程"></a>
-
-## 生命周期与核心流程
-
-
-本页描述 Core 内置的**分层策略**，它是唯一的策略。每个角色只组合一个 Source，因此挂载第二个同角色的 Source 会在每个回合因 "found ambiguous … Sources" 失败。具名工具服务各自的 Source。除各路由自身的上限外，它还应用每回合的召回准入信封，并承担 Runtime 容量维护、归档与空闲审查。见[策略与增强](dsh-workbench.md#capabilities-策略与增强)。
-
-<a id="workflows-每轮上下文"></a>
-
-### 每轮上下文
-
-模型每轮获得三层记忆，用途各不相同：当前回合固定的工作准则，随时可查的工作区档案，以及按需找回的记忆空间。工具能力变化后，以当前视图为准。
-
-- `mnemon:strategy` 说明工作准则这一层的用途：条目在本段之后，应当直接应用而不是另行检索；投影预算或分支范围可能省略条目，缺席不等于删除；写入时什么时候更新条目，以及分支限定的用法。
-- `mnemon:working-rules` 紧跟在 `mnemon:strategy` 之后，把当前 View 的工作准则条目正文直接放进系统提示，沿用分支筛选与投影预算。当前用户指令优先，条目作为引用数据，不能授权工具调用、外部操作或数据披露。
-- `mnemon:routing` 在 `routingGuidance=true` 时说明工作区档案保留工作区自己的决定与来龙去脉，记忆空间保留值得再次找回的知识，并说明两者各自何时读写。工具指引随当前视图能力裁剪。
-- Wake 只携带本轮动态上下文：可用工具、档案与记忆空间的有界封面。工作准则不重复进入 Wake。
-
-主动记录策略与工作准则写入同一类输入时会给出分工：固定偏好与惯例交给工作准则，只有不属于工作准则的事实才写入可写 Source。工作准则没有单独的模型读取操作，条目只来自系统提示；提示词因此要求把未出现的规则视为可能被截断或按分支隐藏，而不能断言其不存在。`importance` 不出现在投影里，因此提示词要求按正文匹配条目，并在替换时沿用已存的重要性。
-
-Host 只在 Wake 内容变化时追加新的 user-role 插件消息，不重新发送其他插件的共享上下文。静态指引与工作准则正文进入系统提示，因此每轮都完整可见，不依赖更早消息的补丁链。已有会话里旧版本的提醒与旧准则消息在同一次整理中退出模型可见视图，会话历史保留原事件。回合、子 Agent 与运行代的所有权见[架构说明](architecture.md#design-生命周期与失败)。
-
-生命周期会在 Host 组装 System Prompt 前固定 View，并让本回合所有模型 step 使用同一个 View：
-
-```text
-turn/start
-  -> 进入 system-prompt/assemble hook
-  -> beginTurn（根回合 + 操作范围）
-  -> Source 能力事实 → Strategy 提案 ViewSpec → 校验 → Source 投影
-  -> 固定 Source 修订/摘要与仅留在 Host 的权限
-  -> 生成有界 Wake
-  -> 继续 Host 提示词组装
-  -> 让静态协议 section 与已固定的 Runtime Source 对齐
-  -> 将变化后的 Wake 作为本插件的完整快照消息追加
-
-agent/pre-step(step=1)
-  -> 为新回合取消待执行/执行中的空闲审查
-  -> 仅标记一次 Prime
-  -> 按需追加只含动态上下文的 Wake 快照
-  -> 主 Agent 决定是否调用记忆工具
-```
-
-Source snapshot 不执行语义召回。Prime 只初始化路由状态，不执行异步 CLI 状态查询。
-
-子 Agent 在 `agent/created`、driver 启动前捕获并保留存活父 Agent 的固定 View 与运行图。自己的各个回合固定这一被保留的 View，即使父回合已结束或已进入更新的 generation。子 Agent activation 销毁时释放委托；冷恢复重新获取委托；Host 显式创建且没有父模型回合的后台子任务生成新的 scoped View。子 Agent 拥有自己的回合权限，但不安装 root 专属的空闲审查。详见[权限生命周期](architecture.md#design-生命周期与失败)。
-
-<a id="workflows-委派的子会话"></a>
-
-#### 委派的子会话
-
-dsh-mnemo-weave 委派给子 Agent 的每个任务都以单独的一行开头：`[dsh-mnemo-weave:delegated <operation>]`，任务从下一行开始。空闲审查是 `review`，写入和「存入记忆」是 `write`，技能复盘、草案、回测与评测用例生成是 `skill`，其余为 `answer`、`placement`、`migration`、`compaction`、`document-archive`、`metadata-maintenance` 和 `reconcile`。以后的版本可能增加操作，所以请匹配模式而不是这份清单。DSH 把任务记录为子会话中的一条用户消息（`source.kind: "user"`），子会话的头部带有 `origin: "subagent"` 与 `parentSession`。
-
-整个子会话都是 dsh-mnemo-weave 自己的工作，而不是用户写下的内容。读取会话的插件（例如汇总工作区工作记录的插件）可以略过这样的会话：`origin: "subagent"`，且越过继承的回合之后第一条用户消息的首行匹配 `^\[dsh-mnemo-weave:delegated [a-z-]+\]$`。fork 出的子 Agent 以父 Agent 回合的副本开头（头部有 `isSeeded: true`，止于 `session/end-seed`），任务跟在后面。在对话之外运行的任务（例如存入记忆、Agent 查询与其他从记忆系统页面发起的任务、运行时记忆容量维护和记忆整理）在自己的任务 Agent 会话中运行，该会话没有用户消息。它的头部带有 `origin: "subagent"`，但没有 `parentSession`，也没有 `delegationDepth`，所以按父会话归组子代理的读取方找不到它的父会话，它也没有可收集的工作。它的子 Agent 带有这一行，并以该会话为 `parentSession`。上游 0.5.32 及更早版本保存这个任务 Agent 会话时不带 `origin`（[#435](https://github.com/omdsh-dev/dsh-mnemon/issues/435)）。在这一行出现之前记录的会话直接以任务开头（空闲审查是 `Bounded completed checkpoint (untrusted evidence; …`），不在这一约定之内。Mnemon 的其他 user 角色消息（包括召回与快照）带有 `source.kind: "dsh-mnemo-weave"`。
-
-DSH 让子 Agent 沿用父 Agent 的工作目录；dsh-mnemo-weave 的启动请求没有自己的目录字段。dsh-mnemo-weave 也依赖这一点：在按工作区存储时，已不再绑定父 Agent 运行时的子 Agent（例如重启后恢复的那个）要靠这个目录找到所在工作区的记忆。
-
-<a id="workflows-agent-召回"></a>
-
-### Agent 召回
-
-```text
-根 Agent 或子 Agent 调用 mnemo_recall（query，可选 memoryBodyIds）
-          |
-          v
-解析当前执行 Agent 自己固定的回合与保留的运行时
-          |
-          v
-读取 Host 上已固定的记忆空间 Source 状态
-          |
-          v
-校验请求 ID 是已固定集合的子集；未指定时使用全部已固定的激活 ID
-          |
-          v
-记忆空间 Source 并发检索已授权的 Provider 命名空间
-          |
-          v
-质量归一化 + 倒数排名融合
-          |
-          v
-丢弃低相关项；首次最多准入 4 条 / 3,600 字符
-          |
-          v
-LLM 判断 evidence 是否足够
-          | 足够                        | 不足
-          v                             v
-直接回答，不再 Recall             显式提交一个不同查询
-                                        |
-                                        v
-                              再检索一次、去重并关闭 Recall
-          |
-          v
-两次在当前执行 Agent 回合共享至多 6 条、每条 1,200 字符、
-总正文 4,800 字符的总预算
-```
-
-这一准入信封按每回合计算。
-
-模型工具不暴露 `category`、`source` 或 `intent` 过滤器：模型猜错过滤条件不能遮住精确证据。Recall 并非强制执行，普通 root 回合是 0 次 Provider 查询。LLM 主动调用后，Host 允许一个首次查询；只有 LLM 查看 evidence 后仍认为不足，才允许再提交一个实质不同的精炼查询。同查询和并发重复请求会 join 或重放；第三个不同查询不会执行，并如实说明，不会到达 Provider。随后至多执行一次 Related，而且只能使用两次 Recall 任一已准入的 `memoryBodyId + id`；同一次遍历再调用会重放结果，不同的遍历则不会执行。
-
-默认三层策略的 Recall 首次最多返回 4 条、3,600 个正文字符，两次合计最多 6 条、4,800 个正文字符。Recall 和 Related 已执行的结果里，`truncated: true` 表示证据被省略或裁剪。`category`、`source`、`intent` 在默认 Recall 中会被拒绝，且不消耗查询预算。需要筛选时请使用查询文本或 `memoryBodyIds`。
-
-Recall、Related 和单次 Documents 搜索槽位按执行中的 Agent 回合计预算。同一回合内并发调用共享状态，兄弟任务、后续回合和冷恢复的 activation 不会共享缓存 evidence 或占用彼此的预算。子 Agent 从收到任务到最后一步算作一个回合、共用一份预算；之后继续这个子 Agent 的消息会开始另一个回合，预算重新计算。重复回合内已运行过的 Recall 或 Related 读取会重放它自己的 evidence，并限于本次请求的 Memory Space 子集。超出预算的另一次读取（包括第二次 Documents 搜索）不会执行查询，而是以它自己的查询返回 `notRun: true`、`budgetExhausted: true` 和空的 `results`，绝不返回另一次读取的 evidence；并发调用会先等正在进行的读取结束，因为失败的读取会把名额还回来。从本回合召回未准入的条目出发的 Related 遍历同样返回 `notRun: true`。Document search 另有独立边界：最多 4 条记录、每条最多 2,600 个查询附近字符、总正文最多 6,000 字符。模型侧 Memory Space 目录最多 16 项，`mnemo_status` 只返回紧凑健康汇总。完整记录、Provider 设置、路径和逐 Space 统计仍由 Web/RPC 控制面读取，不进入对话历史。
-
-如果用户已经提供当前事实，或仓库可以直接回答，Agent 不应为了“展示记忆”而召回。
-
-<a id="workflows-web-检索和-agent-查询"></a>
-
-### Web 检索和 Agent 查询
-
-Web “检索”页与模型工具路径不同：
-
-```text
-直接检索
-  -> RPC 读取通道
-  -> 限定到 Source 的管理检索
-  -> 原始证据
-
-Agent 查询
-  -> 同一条确定性直接检索路径
-  -> 派发不含 Mnemon 工具的任务 Agent
-  -> 仅根据已提供的证据回答
-  -> Host 将引用限定到实际的 memoryBodyId/id 对
-```
-
-“实体”和“内容”页也经 Source 管理协议执行确定性读取，不需要第二个模型。“内容”使用 Provider 的只读 browse 契约，不冒充语义 Recall。
-
-<a id="workflows-显式长期写入"></a>
-
-### 显式长期写入
-
-根 Agent 或 `/mnemon remember` 的长期写入流程：
-
-```text
-长期记忆候选
-       |
-       v
-派发写入任务 Agent
-       |
-       +-- 列出记忆空间
-       +-- 指定的空间，或最小的适用已激活范围
-       +-- 需要查重或检查冲突时召回
-       +-- 只有反复出现的独立领域才创建新范围
-       +-- 按请求执行 remember / link / forget / merge
-       v
-结构化回执
-```
-
-空存储根首次创建 Memory Space 时使用 Mnemon 原生 `default` ID，后续 ID 由 Host 生成。向 inactive 目标写入成功后会激活它。这里的激活只影响 DSH 路由；来源数据库的合并是非破坏性的。
-
-`mnemo_remember` 指定了记忆空间时，写入任务 Agent 只写到那里，否则不写。Host 在任务 Agent 启动前检查指定的空间：不存在的空间、Provider 已关闭或不接受写入的空间，以及已停用的空间，都会立即失败并说明原因。只有用户明确要求时，模型才使用空间管理工具。用户也可以在工作台启用空间；用户在记忆空间页上选中的停用空间会随写入重新打开。自动经验写入的任务 Agent 不提供空间管理工具。指定目标时，宿主的守卫也会拒绝写入其他空间的 `mnemo_remember` 或 `mnemo_link`。
-
-没有指定空间时，任务 Agent 在已激活的空间和它自己新建的空间中选择；守卫会拒绝写入或关联运行开始时就处于停用状态的空间，也拒绝把它打开。存入记忆从不合并空间。「存入记忆」遵循同样的规则，所以所有空间都停用时，除非任务 Agent 新建一个空间，否则不会保存任何内容。结果中的 `memoryBodyIds` 取自 Source 回执实际写入的空间，包括 Code Mode 程序中写入成功、之后程序才失败的那次写入；任务 Agent 报告了写入、却没有任何回执能证明时，结果为 `unknown`。写入打开了停用的空间时，`activatedMemoryBodyIds` 会列出它。来自不在本地运行子 Agent 的 provider 的任务 Agent，像以前一样不受守卫地运行；DSH 在守卫看不到的地方发布本地任务 Agent 时，写入会失败。运行结束后，委派的任务 Agent 不能再使用记忆工具：在 DSH 0.2.1 上，其他 Agent 给已结束的任务 Agent 发消息会让它从保存的状态恢复运行，这时它也无法再写入。
-
-嵌入没有成功时（服务不可用或缺少模型），Mnemon Native 会在没有向量的情况下保存记忆，并在回执中说明（`embedded: false`）。经由任务 Agent 的写入会在 `unembedded` 中列出这些记忆，并附上 `hint`：补齐向量之前，它们不参与语义匹配，关键词、关联与时间召回仍能找到它们；嵌入服务可用后，可在 Mnemon Native 嵌入设置的 **测试状态** 中补齐。补齐使用 DSH 的存储根目录和嵌入设置，在终端运行的 `mnemon` 命令未必一致。`/mnemon remember` 会加一行说明；对话中和记忆空间页上的 **存入记忆** 回执也一样，无论记忆由任务 Agent 写入，还是直接写入某个空间；只有写入确实存入了记忆时才显示这一行。这一行的措辞只取决于 `embedding` 设置。DSH 不管理嵌入配置时（`enabled: false`，默认值），DSH 不设置任何嵌入服务，这一行是中性的说明，并指出关键词检索不受影响；不由 DSH 管理的服务没有生成向量时也是如此，例如只在 Mnemon CLI 继承的环境中配置的服务，或 Mnemon 默认地址上没有运行或缺少模型的 Ollama。DSH 管理嵌入配置时，这一行说明嵌入没有成功，回执中以提醒的颜色显示。模型读到的 `hint` 在两种情况下相同。
-
-运行时 `add` / `replace` / `remove` 和 Document `create` / `update` 不需要模型做存储 I/O；它们通过 coordinator 进入确定性控制层。容量维护和归档才启动专用 worker。
-
-<a id="workflows-runtime-add正常路径"></a>
-
-### Runtime add：正常路径
-
-```text
-请求
-  -> 规范化内容
-  -> 获取进程内队列与文件锁
-  -> 重新加载 memories.json
-  -> 校验唯一匹配 / 重复 / 容量
-  -> 写入临时 JSON 与 Markdown 投影
-  -> 重命名投影文件
-  -> 重命名 memories.json，作为提交标记
-  -> 返回紧凑回执
-```
-
-`replace` 和 `remove` 在请求的目标内，优先用 `old_text` 唯一匹配完整正文；没有精确匹配时才使用唯一子串。重复的完整正文仍视为有歧义。只有请求中的 add 或增大正文的 replace 会超过目标上限时，才触发容量维护。
-
-<a id="workflows-usermd-容量整理"></a>
-
-### USER.md 容量整理
-
-容量整理与下文的 MEMORY.md 归档都由 Host 执行。
-
-```text
-USER 新增后超过 4 KiB
-          |
-          v
-保存修订与已提交条目的快照
-          |
-          v
-派发无工具权限的本地压缩任务
-          |
-          v
-返回压缩条目 + sourceIndexes
-          |
-          v
-Host 校验：
-  - 每个来源索引恰好出现一次
-  - 没有重复或越界索引
-  - 重要性未降低
-  - 候选符合 Host 字节预算
-  - 修订仍是当前版本
-          |
-          +-- 无效/冲突 -> 保留原始数据
-          |
-          v
-按 UTF-8 字节确定性装填
-          |
-          v
-重试待处理的新增操作
-```
-
-用户画像不会被发送到 Memory Spaces。worker 没有任何工具权限。
-
-<a id="workflows-memorymd-归档与压缩"></a>
-
-### MEMORY.md 归档与压缩
-
-```text
-分层策略下，本次 MEMORY 写入将超过配置上限（默认 10 KiB）
-          |
-          v
-snapshot revision + 可归档的已提交 entries
-（排除待提交 add，以及正被 replace/remove 的 entry）
-          |
-          v
-Host 在本次操作的 Source / 命名空间范围内选择已有、active、可写的 Memory Spaces
-          |
-          +-- 任何地方都没有（该层关闭或不接受自动写入、没有就绪的 Provider、
-          |   没有支持精确写入与安全删除的 active 空间）
-          |     -> Runtime Source 在同一把锁内把压缩舍弃的条目追加到 runtime/archived/，
-          |        再提交压缩与待提交修改；不调用模型，也不写 Provider
-          |
-          v
-单个目标：Host 直接路由
-多个目标：独立无工具 worker 只返回 source-index 路由
-  模型执行失败时，Host 在合格目标中确定性兜底
-          |
-          v
-Host 校验精确 source coverage、目标、权限与源修订
-          |
-          +-- 无效/revision 已变 -> 不写 Provider；保留 Runtime
-          |
-          v
-Host 把每条原始 entry 精确写入规划的已有 Space
-  - committed receipt -> 绑定目标 digest
-  - skipped -> 必须取得完全一致的 Recall evidence
-          |
-          v
-Host 按重要性与字节预算保留原始运行时记忆条目
-          |
-          v
-CAS compactAndMutate(revision, compaction, original mutation, lineage)
-  -> JSON 与两个 Markdown projection 作为一次本地提交落盘
-```
-
-planner 没有数据面工具，不能创建 Memory Space。每次写入都由 Host 发起；只有每条已提交来源都有可验证的 durable destination 后，Runtime 才会变化。若远端写入后发生很晚的跨进程 revision 冲突，原有的运行时记忆条目仍会保留；远端 Provider 无法共享本地文件锁，因此已提交的 durable copy 会作为安全重复保留，而不会被破坏性回滚。
-
-<a id="workflows-运行时归档恢复"></a>
-
-#### 运行时归档恢复
-
-容量归档写入已激活的记忆空间，其 Provider 必须支持精确写入和安全删除；不支持的目标会在任何归档写入前被排除。完全没有能接收归档的记忆空间时（该层已关闭或不接受自动写入、没有就绪的 Provider、没有激活的空间，或只剩不支持的 Provider），Runtime Source 会在同一把锁内、紧接着提交压缩与待写入内容之前，把压缩舍弃的条目追加到本地归档 `runtime/archived/`：`MEMORY.md` 供阅读，`memories.jsonl` 保存每个条目及其元数据。另一个记忆空间 Source 中有能接收归档的空间，或 Runtime Source 版本过旧、无法保留压缩舍弃的条目时，仍会拒绝。Mnemon Pack 不包含本地归档，导入 Pack 时会保留它。直接向 Provider 写入仍保持原有的异步行为。
-
-对话归档使用所选 Source 的写入范围：回合中激活的已知空间，以及当前 View 创建的空间，都可作为归档目标。在 View 固定之后由其他操作创建的空间，需要新回合才能使用；所以当合适的空间都在 View 写入范围之外，或当前 View 不提供对它们的写入时，写入会被拒绝，而不是归档到本地。空范围始终不授权任何空间。目标错误会区分目录为空、View 范围为空或排除了当前空间、Provider 能力不支持，并报告目录、授权和可写数量。失败时待新增内容尚未保存；修正所报告的原因后，请在新回合重试同一份工具输入。已有的运行时记忆条目会保留。
-
-归档回执或本地提交失败时，Host 仅尝试删除回执能证明由本次操作新建的条目，保留跳过或复用的既有条目。本地提交报错后，如果 Runtime 修订已变更或无法读取，则提交结果不确定：保留归档条目，避免丢失已提交的记忆。清理失败会标出剩余目标空间和条目 id。Provider 请求失败且没有返回回执时，远端结果可能不确定，因此这不是分布式事务；重试前应检查对应 Provider。
-
-<a id="workflows-documents-创建更新和归档"></a>
-
-### Documents 创建、更新和归档
-
-```text
-创建/更新请求
-          |
-          v
-按渲染后的 UTF-8 字节执行 capacityPlan
-          |
-     +----+----+
-     |         |
-   未超限     溢出
-     |         |
-     v         v
-   提交    选择最久未访问的活跃档案
-               |
-               v
-          保存档案与修订的快照
-               |
-               +-- 任何地方都没有能接收索引的记忆空间
-               |     -> 不建索引，直接将文件移入归档，不派发任务 Agent
-               |
-               v
-          派发归档任务 Agent
-               |
-               v
-       写入并验证紧凑的 Mnemon 冷引用
-       包含标题、摘要、计划路径、SHA-256
-               |
-          +----+----+
-          |         |
-         失败     回执有效
-          |         |
-          v         v
-      保持活跃    检查修订
-                    |
-               +----+----+
-               |         |
-                冲突     一致
-               |         |
-               v         v
-             保持活跃   将文件移入归档
-                             |
-                             v
-                       重试原始修改
-```
-
-人工归档使用同一条“先索引、后迁移”路径；没有记忆空间能接收索引时，同样归档到本地。Mnemon 索引已经成功但 revision 冲突时不会回滚索引，因此可能出现安全的重复引用，而不会丢失 active 原文。
-
-默认的资料搜索使用当前工作区。用户明确指定另一已登记的 DSH 工作区时，主 Agent 可向 `mnemo_document_search` 传入该工作区的 `workspaceId`。结果只来自所选工作区，排除配置仍然生效。已知旧冷索引引用时，可以用完整相对路径或正文 SHA-256 搜索，并传入 `includeArchived: true`。
-
-`mnemo_remember` 支持可选的 `replacesId`。只有新证据推翻同一活跃空间中的旧经验时才传入。宿主要求 Provider 支持精确批量写入、按 ID 读取和软删除，在确认新内容后才尝试退役旧条目。等价内容或不支持修订时返回跳过，旧条目退役未确认时返回部分完成。
-
-<a id="workflows-工作区档案归档恢复"></a>
-
-#### 工作区档案归档恢复
-
-新归档由宿主在核对档案修订后移动受管原文，状态变更可以从档案页查阅。已有冷索引引用继续指向原归档路径。需要把档案中的知识沉淀成可复用经验时，可以从原文另行发起正式记忆写入。
-
-<a id="workflows-确定性活动评分和空闲审查"></a>
-
-### 确定性活动评分和空闲审查
-
-完成的 turn 累计四种信号：
-
-```text
-score =
-  min(floor(totalUserCharacters / 50), 3)
-  + completedTurnCount
-  + min(floor(completedToolResults / 5), 2)
-  + toolDiversityScore
-
-toolDiversityScore:
-  不同工具数 < 3  -> 0
-  不同工具数 = 3  -> 1
-  不同工具数 >= 4 -> 2
-
-score >= 5 时达到门槛
-```
-
-达到门槛并不代表一定写入：
-
-```text
-已完成的回合
-      |
-      v
-score >= 5 ? -- 否 --> 为后续回合保留累计活动
-      |
-      是
-      |
-      v
-Host 判断是否存在待整理内容
-  - 当前轮明确要求不写记忆 -> 停止
-  - 持久化意图、累计 >=320 用户字符、
-    >=600 助手字符或已完成非 Mnemon 工作 -> 继续
-      |
-      v
-等待 idleReviewMs（默认 30 秒），且距上次尝试
-至少 idleReview.minIntervalMs（默认 5 分钟）
-      |
-      +-- 新回合 --> 取消定时器/任务，保留累计活动
-      |
-      v
-确认 Agent 已空闲、已有 turn/end、该回合由分层策略组合，
-且未达到 idleReview.maxPerSession
-      |
-      v
-就已完成的回合启动任务 Agent
-  - spawn（默认）：有界检查点，上限 idleReview.maxContextChars
-  - fork：继承父 Agent 上下文
-      |
-      v
-保守的整理决策，每轮只写一层
-  - 先看档案：先检索；项目记录至多新建一份独立档案，
-    不更新或归档已有档案
-  - 运行时记忆：只收录用户新提出的、明确且持久的陈述；
-    MEMORY.md 只收档案未涵盖的简短规则，不收项目记录
-    （idleReview.runtimeMemory: false 时关闭）
-  - 建了档案就不能再改工作记忆，反之亦然
-  - 不提供记忆空间写入工具
-      |
-      +-- 已完成（含跳过）--> 清空累计活动
-      |
-      +-- 失败/中止 --------> 保留累计活动
-```
-
-会话沉淀的启动检查使用宿主结构信号。新增的明确保存请求，或普通工具失败后出现成功结果，可以启动审查。审查只提取有依据的候选，允许零写入。资料和准则需要明确的用户意图，已验证且可复用的经验可以通过 `mnemo_remember` 主动写入。工具可用性由当前 View 和 Source 自动参与权限决定。`idleReview.runtimeMemory: false` 会关闭这条流程的工作准则写入。宿主从实际写入回执记录结果。安装 Agent Teams 工具时，除非设置 `idleReview.agentTeams: scoped`，否则暂停自动审查。
-
-<a id="workflows-配置开关的关系"></a>
-
-### 配置开关的关系
-
-- `recallMode`：保留兼容旧配置，系统提示中的路由指引由 `routingGuidance` 控制。
-- `writebackMode=off`：关闭自动会话沉淀，显式写入仍由 `writeEnabled` 决定。
-- `lifecycleEnabled=false`：关闭工作准则正文注入、Wake 更新和自动会话沉淀，显式工具和 Web 入口仍可使用。
-- `routingGuidance=false`：只移除额外路由 section；Runtime Memory context 仍注册。
-- `writeEnabled=false`：移除语义写工具和写 RPC，拒绝写命令；它不是文件系统只读挂载保证。

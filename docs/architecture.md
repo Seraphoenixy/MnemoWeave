@@ -1,69 +1,86 @@
 # 架构与契约
 
-Codex 和 ZCode 各自启动一个 stdio MCP 进程。MCP 和 DSH 通过 `MNEMON_DATA_DIR` 下的 `working-rules/` 共享本机工作准则，未设置时使用 `~/.mnemon`。MCP 的 `--data-dir` 用于指定旧数据的迁入目录。
+## 项目架构
 
-## 入口与依赖
+MnemoWeave 由一个根包 `dsh-mnemo-weave` 发布，内部按运行时入口、核心引擎、组件与同步协议分层组织，服务三个运行环境：
 
-入口负责读取配置、选择实现并连接宿主。库通过显式参数接收所需依赖。同步服务端和客户端各自实现一侧，通过共享协议和 HTTP 交互。
+1. **DSH 插件宿主与 WebUI**：通过 `dist/index.js`、`dist/bundle.js`、`dist/client.js` 与 `cordis.patch.yml` 接入 DeepSeek Harness（最低 `0.2.2-rc.1`），提供系统提示注入、模型工具、后台子任务、RPC 通道、工作台页面与技能管理。
+2. **stdio MCP 服务**：通过 `dist/mnemo-weave-mcp.js` 为 Codex 与 Antigravity 提供本地 stdio MCP 接口，复用同一套 Runtime Memory 控制器与 Composable Memory 运行时，暴露 `mnemo_working_rules` 及 13 个与 DSH 同名的记忆工具（参数与行为见[工具与命令参考](tools.md)）。Antigravity 另可通过 `integrations/antigravity/` 装配规则与技能插件。
+3. **HTTP 同步服务**：通过 `dist/mnemo-weave-sync-server.js` 作为独立 Node.js 24 进程运行，使用 SQLite 与 SRP-6a（PAKE）认证为 DSH 与 MCP 提供增量快照与活动流同步（协议与部署见[服务器同步与部署](sync.md)）。
 
-| 组件 | 代码 | 职责 |
+### 模块分层与依赖方向
+
+```mermaid
+flowchart TB
+  DSH["DSH 宿主入口 · src/index.ts & src/bundle.ts"] --> Host["src/host/ · 生命周期、工具、RPC、后台任务"]
+  WebUI["DSH WebUI · src/client/"] -. RPC .-> Host
+  MCP["stdio MCP · src/mcp.ts"] --> Core["src/core/ · View 编译、运行代、租约"]
+  MCP --> Memory["src/memory/ · 本机工作准则与活动流"]
+  Host --> Core
+  Host --> Memory
+  Host --> SyncClient["src/sync/client/ · 快照与活动客户端"]
+  MCP --> SyncClient
+  Components["src/components/ · 4 Source / 1 Strategy 增强 / 1 Provider"] --> SDK["src/sdk/ · 扩展注册与契约校验"]
+  SDK --> Core
+  Host --> Components
+  MCP --> Components
+  SyncServer["HTTP 同步服务 · src/sync-server.ts & src/sync/server/"] --> SyncProto["src/sync/protocol.ts & auth-protocol.ts"]
+  SyncClient --> SyncProto
+```
+
+| 层级 | 代码路径 | 职责与边界 |
 |---|---|---|
-| HTTP 同步服务入口 | [src/sync-server.ts](../src/sync-server.ts) | 读取进程配置，装配 HTTP 和 SQLite，管理监听和退出 |
-| HTTP 同步服务库 | [HTTP 请求处理](../src/sync/server/http.ts)、[存储接口](../src/sync/server/store.ts)、[SQLite 实现](../src/sync/server/sqlite.ts) | 校验请求、推进游标、存储变更和数据块 |
-| 同步协议 | [src/sync/protocol.ts](../src/sync/protocol.ts) | 定义双方共用的消息格式和校验规则 |
-| 同步客户端库 | [src/sync/client/](../src/sync/client/) | 通过远端接口协调快照同步，提供 HTTP 实现和本地同步状态文件适配 |
-| MCP 与 DSH 共用的工作准则 | [src/memory/working-rules.ts](../src/memory/working-rules.ts) | 装配本机 Runtime Memory 和工作准则快照适配 |
-| MCP 入口 | [src/mcp.ts](../src/mcp.ts) | 解析启动参数，装配工作准则，注册工具并连接 stdio |
-| Runtime Memory | [controller.ts](../src/components/source-runtime/src/controller.ts) | 读取条目、校验容量、持久化和跨进程写锁 |
-| DSH 插件入口 | [src/index.ts](../src/index.ts)、[插件装配](../src/host/boot/plugin.ts) | 注册生命周期、工具和 RPC，接入工作区运行时；同步 RPC 提供工作准则和工作区 Pack 快照 |
+| 顶层入口 | [src/index.ts](../src/index.ts)、[src/bundle.ts](../src/bundle.ts)、[src/mcp.ts](../src/mcp.ts)、[src/sync-server.ts](../src/sync-server.ts) | 解析宿主或进程参数，装配依赖并连接对应传输通道（Cordis/DSH、stdio MCP、HTTP） |
+| 核心引擎 | [src/core/](../src/core/) | 编译不可变 Memory View，管理运行代（generation）、回合租约与授权边界，不包含存储或 UI |
+| 扩展 SDK | [src/sdk/](../src/sdk/) | 暴露 `installMemory`、Source/Strategy 定义辅助与隔离测试夹具 `MemoryCompositionRunner` |
+| 内置组件 | [src/components/](../src/components/) | `source-runtime`、`source-documents`、`source-memory-spaces`、`source-skills`、`strategy-auto-capture`、`provider-mnemon-native`，各自通过 `package.json#exports` 暴露独立子路径 |
+| 本机工作准则 | [src/memory/](../src/memory/) | 封装 `working-rules` 目录装配、全局根目录解析、活动流写入与 MCP 同步配置读取 |
+| DSH 宿主 | [src/host/](../src/host/) | 按 `contracts`、`configuration`、`boot`、`engine`、`session`、`delegation`、`skills`、`review`、`surface`、`support` 划分，负责生命周期、工具注册、RPC、存储范围解析与子 Agent 调度 |
+| DSH 客户端 | [src/client/](../src/client/) | 按 `i18n`、`kit`、`connection`、`workspace`、`pages`、`panels`、`hosting`、`turn` 划分，打包为单一 `dist/client.js`（样式表留在 `src/client/` 根目录以保持 CSS 模块类名哈希稳定） |
+| 同步协议与两端 | [src/sync/](../src/sync/) | `protocol.ts` / `auth-protocol.ts` 定义共享契约；`client/` 实现文件块协调与本地游标状态；`server/` 实现 HTTP 处理与 SQLite 存储 |
 
-HTTP 请求处理接收存储接口，由独立进程入口注入 SQLite。客户端快照协调接收远端接口和本地副本接口，由 MCP 与 DSH 接入各自的数据源。
+对外仅发布 `dsh-mnemo-weave` 一个 npm 包；`src/host/contracts` 与 `src/client/` 的子目录为内部组织约定，不单独拆包发布。
 
-## 数据边界
+### 项目目录结构
 
-`runtime/memories.json` 保存条目，`runtime/MEMORY.md` 是记忆投影。MCP 读取本机工作准则中 `memory` 类型且未绑定 Git 分支的条目，追加操作也写入这一范围。DSH 的工作区记忆按宿主选择的存储范围落盘。宿主可在调用工具前对读写权限进行配置。
+```text
+MnemoWeave/
++-- .github/workflows/          # CI（ci.yml）与 Linux 同步服务归档构建（build-linux-server.yml）
++-- deploy/linux/               # Linux 同步服务部署文件：start.sh、mnemoweave-sync.service
++-- integrations/antigravity/   # Antigravity 插件模板（plugin.json、mcp_config.json、rules/AGENTS.md、skills/）
++-- docs/                       # 项目文档（架构、安装、工具、配置、工作流、同步、技能、扩展、验证）
++-- locale/                     # 插件清单多语言文案与详情（en.json、zh.json、detail.en.md、detail.zh.md）
++-- scripts/                    # 构建辅助脚本（声明链接与组件资源复制）
++-- src/
+|   +-- index.ts                # DSH 插件主入口
+|   +-- bundle.ts               # DSH bundle 装配入口
+|   +-- mcp.ts                  # Codex stdio MCP 入口
+|   +-- sync-server.ts          # 独立 HTTP 同步服务入口
+|   +-- starter-resolution.ts   # 默认 Starter 组件解析
+|   +-- message-source.ts       # 消息来源标识处理
+|   +-- core/                   # 视图编译、运行代、回合租约与内置分层策略
+|   +-- sdk/                    # 扩展 SDK（installMemory、契约校验与测试夹具）
+|   +-- memory/                 # 本机工作准则、活动存储与同步配置读取（DSH 与 MCP 共用）
+|   +-- host/                   # DSH 宿主适配（contracts/configuration/boot/engine/session/delegation/skills/review/surface/support）
+|   +-- client/                 # DSH WebUI（i18n/kit/connection/workspace/pages/panels/hosting/turn 与根目录 *.module.css）
+|   +-- components/             # 内置组件模块：
+|   |   +-- source-runtime/          # 运行时记忆 / 共享工作准则 Source
+|   |   +-- source-documents/        # 工作区档案 Source
+|   |   +-- source-memory-spaces/    # 记忆空间 Source 与 Provider SDK
+|   |   +-- source-skills/           # 技能管理 Source
+|   |   +-- strategy-auto-capture/   # 主动记录策略增强
+|   |   +-- provider-mnemon-native/  # Mnemon Native CLI Provider
+|   +-- sync/                   # 同步协议（protocol.ts/auth-protocol.ts/activity-protocol.ts）、client/ 与 server/
++-- tests/                      # unit/（单元测试）、integration/（集成测试）、checks/（构建与宿主闸门）、support/（共用夹具）
++-- dist/                       # pnpm build 构建产物（各公开 JS 入口、mnemo-weave-mcp.js、mnemo-weave-sync-server.js、components/、types/）
++-- cordis.patch.yml            # 默认 Starter 的 DSH bundle 声明与组件默认配置
++-- package.json                # 包清单、公开 exports、DSH 注入声明与构建/验证脚本
++-- tsdown.config.ts            # Host、MCP、Sync Server 与 Client 构建配置
++-- tsconfig.json               # TypeScript 类型检查配置
++-- tsconfig.types.json         # 公开类型声明生成配置
+```
 
-## 工具契约
-
-| 工具 | 输入 | 返回 |
-|---|---|---|
-| `read_workspace_memory` | 空 | JSON 字符串数组，元素为记忆正文 |
-| `append_workspace_memory` | `content`，去除首尾空白后非空，最多 8 KiB（UTF-8） | Runtime Memory 写入回执，包含条目数与容量用量 |
-
-工具以 MCP 文本内容承载 JSON。写入受上游 Runtime Memory 的容量限制。
-
-## 同步服务协议
-
-Linux 服务入口为 `dist/mnemo-weave-sync-server.js`，运行需要 Node.js 24。它默认监听 `127.0.0.1:4319`，端口可用 `MNEMOWEAVE_SYNC_PORT` 修改。跨机器访问通过 HTTPS 反向代理，客户端仅对本机回环地址允许明文 HTTP。[部署与升级](dsh-operations.md#ops-服务器同步)
-
-客户端向 `POST /v1/auth/login/challenge` 发送 SRP-6a 临时公钥，从服务端取得挑战 ID、盐和临时公钥。客户端通过 `POST /v1/auth/login/verify` 提交证明，再验证服务端返回的证明。验证通过后，客户端使用本次签发的 Bearer 令牌请求同步接口。挑战一次有效，60 秒过期；会话令牌有效期为 30 分钟，服务重启后失效。服务端持久化的认证记录只包含版本、盐和验证值，运行中的令牌以 SHA-256 摘要保存在内存中。工作准则和工作区数据经 HTTPS 传输，服务端保存其原始内容。
-
-服务按存储范围维护 SQLite 变更日志。客户端通过 `GET /v1/sync/<scope>/changes?cursor=N` 分页读取，处理完一页后才能采用该页游标。`POST` 提交带请求 ID 和基准游标的批次。服务以事务追加整个批次，重复提交同一批次返回原游标。基准过期时返回 HTTP 409 和当前游标，客户端应先读入变化，再处理冲突。删除作为日志事件保留，落后的客户端重放时也能看到删除。
-
-
-一个范围的内容按文件同步。每个文件以自身 SHA-256 为标识，通过同一范围下的 `/v1/sync/<scope>/blobs/<digest>` 上传和读取。客户端上传所有变化的文件后，以一个变更批次发布清单：清单列出这次快照包含哪些文件、各自的摘要，以及按固定顺序和固定时间戳组装后的归档摘要。
-
-接收方按清单比对，只请求内容不同的文件，其余复用本机已有内容，在本地重新组装归档并校验总摘要，然后在现有 Source 写锁内确认本机内容仍与预检一致，再替换数据。归档是确定性构建的，所以部分下载能补齐成完整快照，总摘要也能端到端校验。服务端只保留最新清单引用的文件，被替换下来的文件在宽限期后删除。两边都改动时暂停同步，保留两份内容，等待明确选择。
-
-MCP 从环境读取 `MNEMOWEAVE_SYNC_URL` 和 `MNEMOWEAVE_SYNC_PASSWORD`，已配置时在读写工作准则的入口同步。DSH 的 `sync-all` 从宿主凭据库或环境读取连接，对共享工作准则、全局或工作区 Pack、工作准则活动和工作区活动分别推进已有游标。工作区按 DSH 登记名称匹配，各个范围共用一次 PAKE 会话。
-
-记忆读写和子 Agent 的结构化活动通过独立范围追加同步。DSH 保留接收旧客户端三类同步请求的 RPC。 [记忆活动记录与同步](memory-activity.md)
-
-## DSH 组件边界
-
-| 代码 | 职责 |
-|---|---|
-| [src/core](../src/core/) | 编译 Memory View，管理代际、回合和权限 |
-| [src/sdk](../src/sdk/) | 提供 Source、Strategy 和扩展的公开接口 |
-| [src/host](../src/host/) | 装配 DSH 生命周期、工具、设置、存储范围与任务 Agent；内部按 `contracts`、`configuration`、`boot`、`engine`、`session`、`delegation`、`skills`、`review`、`surface`、`support` 分包 |
-| [src/client](../src/client/) | DSH WebUI、工作台和 Source 页面装配；内部按 `i18n`、`kit`、`connection`、`workspace`、`pages`、`panels`、`hosting`、`turn` 分包 |
-| [src/components](../src/components/) | Source 持有存储与能力，Strategy 按回合选择和组合能力，Provider 由记忆空间 Source 管理 |
-
-`src/host/contracts` 与 `src/client` 的分包名是目录约定，不是发布边界：对外仍只有 `dsh-mnemo-weave` 一个包，内部继续按组件开发和测试。WebUI 的样式表留在 `src/client` 根目录，因为 CSS 模块的类名哈希由文件路径决定，移动文件会改变已核对的类名。详见[仓库归属](development.md#verification-仓库归属)。
-
-DSH 通过 bundle 组合这些组件，单个回合使用固定的 View；写入仍由相应 Source 执行并返回回执。记忆子任务使用 DSH 托管 activation，发布子 Agent 时注册任务指令和工具限制。Codex 和 ZCode 的 MCP 工具直接复用 Runtime Memory，当前范围是显式读取和追加未绑定分支的工作区条目。
-
-根包构建产物在 `dist/`，其中 `mnemo-weave-mcp.js` 是 MCP 入口，`index.js`、`bundle.js`、`client.js` 是 DSH 入口。独立组件各自产出 `dist/`。
+各子目录的验证方式与组件独立构建命令见[开发与验证](development.md#verification-仓库归属)。
 
 <a id="design-composable-view-memory-架构"></a>
 
@@ -85,7 +102,7 @@ flowchart TB
   Starter --> Docs["dsh-mnemo-weave-source-documents"]
   Starter --> Spaces["dsh-mnemo-weave-source-memory-spaces"]
   Core --> Strategy["Core 内置分层策略"]
-  Starter --> Helpers["两种随附增强 · 默认停用"]
+  Starter --> Helpers["随附增强（strategy-auto-capture）· 默认停用"]
   Helpers -. 选择 / 投影 / 记录 .-> Strategy
   Spaces --> Providers["dsh-mnemo-weave-provider-* · 私有子 Fiber"]
 ```
@@ -155,7 +172,7 @@ flowchart LR
 
 View 包含投影片段、route、action offer 与仅留在 Host 的 ReadGrant。Wake 只渲染有界模型表示，并列出当前回合可用的具名工具；不泄露 grant 载荷、控制器或凭据。Evidence 记录来源与一致性，不是另一份持久记忆。
 
-默认三层且未启用策略增强时，Core 按固定角色直接分配投影和操作预算。启用增强时，Core 先校验组合提案的实例、能力、操作和预算。两条路径都从宿主允许的 Source 能力中选择，绑定读取范围，执行写入时再次检查当前权限。一致性明确区分：捕获内容的 `exact-snapshot`，以及只能固定命名空间、远端内容仍可变化的 `namespace-pinned-live-read`。后者不冒充历史数据库快照。
+默认三层且未启用策略增强时，Core 按固定角色直接分配投影和操作预算。启用增强时，Core 先校验组合提案的实例、能力、操作和预算。两条路径都从宿主允许的 Source 能力中选择，绑定读取范围，执行写入时再次检查当前权限。一致性明确区分：捕获内容的 `exact-snapshot`，以及只能固定命名空间、远端内容仍可变化的 `namespace-pinned-live-read`。后者不表示历史数据库快照。
 
 ```mermaid
 sequenceDiagram
@@ -184,7 +201,7 @@ sequenceDiagram
 
 Host 的 `MemoryExecutions` 统一持有 Core 回合及对应的运行时绑定。Agent 生命周期与后台协调器使用同一份所有权：并发维护共享一个 View，新回合等待子任务及工具清理完成后，再选择当前运行时。是否中止闲置整理仍由生命周期决定；执行所有者不会中止无关的已授权写入，也不会增加权限。
 
-候选组合先验证，再发布。额外候选被拒绝时，不会悄悄替换 Serving 运行代；显式移除当前依赖的贡献时，该运行代退役，不再接新回合。已开始的回合和操作持有租约，结束后再排空旧 Source 及其私有资源。
+候选组合先验证，再发布。额外候选被拒绝时，不会替换 Serving 运行代；显式移除当前依赖的贡献时，该运行代退役，不再接新回合。已开始的回合和操作持有租约，结束后再排空旧 Source 及其私有资源。
 
 每回合固定一个不可变 View。写入生成回执，后续回合读取新修订；并发父/子 Agent 不能借用另一回合的 grant。Source/Provider 故障保持局部、可观察；部分成功、失败、取消、已提交不会混为一谈。停用参与不删除数据。
 
@@ -210,7 +227,7 @@ Host 交给页面的是限定实例的管理客户端与脱敏元信息，不是
 
 ### 安全边界
 
-以下是 Host 在进程、文件、WebUI 与任务 Agent 周围保持的边界。它们不是秘密扫描器：这对你保存的数据意味着什么，见[运维指南](dsh-operations.md#ops-安全边界)；如何报告漏洞，见 [SECURITY.md](../SECURITY.md)。
+以下是 Host 在进程、文件、WebUI 与任务 Agent 周围保持的边界。它们不是秘密扫描器：这对你保存的数据意味着什么，见[运维指南](operations.md#ops-安全边界)；如何报告漏洞，见 [SECURITY.md](../SECURITY.md)。
 
 <a id="design-进程"></a>
 
@@ -271,7 +288,7 @@ RSI 的边界保持简洁：产出候选 Source/Strategy 制品，用固定 fact
 | 哪些历史事实和关系应跨会话存在？ | Memory Spaces | 独立数据库、图关系、按需召回 |
 | 长文已不常用但仍需追溯怎么办？ | archived Documents | Mnemon 留索引，冷层保留原文 |
 
-推荐查询梯度：
+查询顺序：
 
 ```text
 current request and repository facts
@@ -293,7 +310,7 @@ follow an exact cold reference when full text is required
 
 ### 工作区参与范围
 
-存储范围决定数据保存在哪里；[`excludedWorkspaces`](dsh-configuration.md#按工作区排除记忆) 决定哪些工作区会话参与 Mnemon。排除列表默认为空，对所有存储范围生效，子代理即使改变 cwd 也继承父会话的决策。已有数据和会话历史保持完整。工作台标明排除状态并允许查看；移除排除项后恢复记忆参与。
+存储范围决定数据保存在哪里；[`excludedWorkspaces`](configuration.md#按工作区排除记忆) 决定哪些工作区会话参与 Mnemon。排除列表默认为空，对所有存储范围生效，子代理即使改变 cwd 也继承父会话的决策。已有数据和会话历史保持完整。工作台标明排除状态并允许查看；移除排除项后恢复记忆参与。
 
 <a id="storage-跨-agent-共享边界"></a>
 
@@ -301,15 +318,35 @@ follow an exact cold reference when full text is required
 
 共享不意味着广播对话或文件。多个 Agent 都集成 Mnemon，且能够访问相同存储根与可识别的 Store 时，可以共享 Native 长期事实。三方 Provider 通过自己的 workspace、user、bank、project 或 container 范围共享；Runtime 与 Documents 不会自动进入其他 Agent 的上下文。
 
-哪种共享适合哪个范围，见[选择跨 Agent 共享范围](dsh-configuration.md#选择跨-agent-共享范围)。多进程并发依赖 Provider 自身的一致性保证；离线复制或直接修改本地数据库前，应停止所有使用者，参见[运维指南](dsh-operations.md#ops-备份与恢复)。
+哪种共享适合哪个范围，见[选择跨 Agent 共享范围](configuration.md#选择跨-agent-共享范围)。多进程并发依赖 Provider 自身的一致性保证；离线复制或直接修改本地数据库前，应停止所有使用者，参见[运维指南](operations.md#ops-备份与恢复)。
 
-<a id="storage-统一根目录"></a>
+<a id="storage-磁盘存储布局"></a>
 
-### 统一根目录
+### 磁盘存储布局
+
+MnemoWeave 的持久化文件分为两部分：本机共享的工作准则目录，以及按 `storageScope` 解析的数据根目录 `<storageRoot>`（具体路径解析规则见[存储范围](configuration.md#存储范围)）。
+
+#### 本机共享工作准则目录
+
+Codex 与 DSH 共用同一全局根（`MNEMON_DATA_DIR` 或 `~/.mnemon`）下的 `working-rules/`：
+
+```text
+<MNEMON_DATA_DIR 或 ~/.mnemon>/working-rules/
++-- runtime/
+|   +-- memories.json              # 工作准则事实源
+|   +-- 工作准则.md                 # 供人阅读的派生投影
+|   +-- archived/                  # 溢出时的本地归档（不进入 Pack 或同步）
++-- state/
+    +-- activity/                  # 工作准则读写活动事件（随活动流同步）
+```
+
+#### 数据根目录 `<storageRoot>`
+
+`storageScope` 决定 `<storageRoot>` 的位置（`global` 指向全局根，`workspace` 指向 `<workspace>/.mnemon`，`custom` 指向指定目录，`workspaces` 指向 `<集中根>/workspaces/<规范路径 SHA-256>/`）：
 
 ```text
 <storageRoot>/
-+-- runtime/
++-- runtime/                       # 独立 Runtime Source / 历史兼容目录
 |   +-- memories.json
 |   +-- USER.md
 |   +-- MEMORY.md
@@ -323,6 +360,8 @@ follow an exact cold reference when full text is required
 +-- skills/                        # 技能管理；不进入 Mnemon Pack
 |   +-- ledger.json
 |   +-- evals.json
+|   +-- preferences.json
+|   +-- auto-adoption-budget.json
 |   +-- trajectories/
 |   +-- versions/
 |   +-- market/
@@ -332,14 +371,15 @@ follow an exact cold reference when full text is required
 |   +-- <memory-space-id>/
 |       +-- mnemon.db
 +-- state/
-    +-- machine.json              # 本机标识与名称，0600，不进入 Mnemon Pack
-    +-- review-ledger.json        # 待决策的整理建议，0600，不进入 Mnemon Pack
-    +-- idle-review/              # 显式启用的本机会话审查配额（尝试次数与冷却时间）；不进入 Pack 或同步
-    +-- memory-providers.json     # 第三方连接控制面，0600，不进入 Mnemon Pack
-    +-- server-sync-<hash>.json   # 本机同步游标；不进入 Mnemon Pack
+    +-- activity/                  # 工作区记忆活动事件（按工作区 ID 隔离）
+    +-- machine.json               # 本机标识与名称，0600，不进入 Mnemon Pack
+    +-- review-ledger.json         # 待决策的整理建议，0600，不进入 Mnemon Pack
+    +-- idle-review/               # 显式启用的本机会话审查配额；不进入 Pack 或同步
+    +-- memory-providers.json      # Provider 连接控制面，0600，不进入 Mnemon Pack
+    +-- server-sync-<hash>.json    # 本机同步游标；不进入 Mnemon Pack
 ```
 
-`storageScope` 选择的是整个根，而不只是 Mnemon 数据库；每个范围解析到哪个根，见[存储范围](dsh-configuration.md#存储范围)。显式启用的 `runtimeUserScope=global` 是唯一的分根例外：Runtime 从全局根读取 USER.md，MEMORY.md 与其他所有组件仍留在所选根。工作台任务使用查看工作区；对话工具与生命周期使用所属会话的 cwd 和已固定的 View。Host 解析目录时不创建文件，也不修改旧根。
+显式启用的 `runtimeUserScope=global` 是分根例外：Runtime 从全局根读取 `USER.md`，`MEMORY.md` 与其他组件留在所选 `<storageRoot>`。工作台任务使用查看工作区；对话工具与生命周期使用所属会话的 `cwd` 和已固定的 View。Host 解析目录时不创建文件，也不修改旧根。
 
 `state/` 下的文件：
 
@@ -360,7 +400,7 @@ follow an exact cold reference when full text is required
 
 ### 运行时记忆
 
-内置 DSH Source 与 Codex、ZCode 现在共用本机的「工作准则」。正式数据位于全局根下的 `working-rules/runtime/memories.json`，同目录下的 `工作准则.md` 是供人阅读的唯一当前投影。读取和写入沿用 Runtime Controller 与跨进程写锁。现有 USER/MEMORY 条目按旧存储根一次性导入，包括重要性、时间、置顶和适用分支。旧工作区在新版识别到其存储路径时迁入。
+内置 DSH Source 与 Codex 共用本机的「工作准则」。正式数据位于全局根下的 `working-rules/runtime/memories.json`，同目录下的 `工作准则.md` 是供人阅读的唯一当前投影。读取和写入沿用 Runtime Controller 与跨进程写锁。现有 USER/MEMORY 条目按旧存储根一次性导入，包括重要性、时间、置顶和适用分支。旧工作区在新版识别到其存储路径时迁入。
 
 合并后的容量初始值取现有两项配置之和，默认 14 KiB。导入完整保留已有条目。后续写入超限时，优先保留置顶及高重要性条目，移出的条目归档到共享目录的 `runtime/archived/`。工作准则位于独立的本机目录，并以独立的同步范围参与服务器同步；工作区 Pack 仍作用于各自数据根。
 
@@ -437,7 +477,7 @@ Pack、同步合并、溢出装填和基于原始元数据的恢复保留可选�
 | `USER.md` | 4 KiB | 本地、无工具 worker 保守合并，不进入 Memory Space |
 | `MEMORY.md` | 10 KiB | Host 精确归档已提交条目，再确定性装填保留在运行时记忆中的余量；没有能接收它们的记忆空间时，未保留的条目移入 `runtime/archived/` |
 
-两个上限都可以通过 `runtimeMemory.userLimitBytes` 与 `runtimeMemory.memoryLimitBytes` 调整，见 [Runtime Memory 容量与维护预算](dsh-configuration.md#runtime-memory-容量与维护预算)。分层策略下，合法写入超过上限时才触发容量维护；其他策略会直接拒绝该写入。具名工具、后台子 Agent 和 Web 管理共用同一 Host 流程；Web 写入按所选存储范围执行，不要求打开用户会话。归档失败会保留运行时记忆并返回错误。完全没有能接收归档的记忆空间时，Runtime Source 改为在同一把锁内、提交之前，把未保留的条目移入 `runtime/archived/`。底层 Source 独立使用时仍只执行自己的存储操作，自定义 Strategy 不会隐式继承默认归档。
+两个上限都可以通过 `runtimeMemory.userLimitBytes` 与 `runtimeMemory.memoryLimitBytes` 调整，见 [Runtime Memory 容量与维护预算](configuration.md#runtime-memory-容量与维护预算)。分层策略下，合法写入超过上限时才触发容量维护；其他策略会直接拒绝该写入。具名工具、后台子 Agent 和 Web 管理共用同一 Host 流程；Web 写入按所选存储范围执行，不要求打开用户会话。归档失败会保留运行时记忆并返回错误。完全没有能接收归档的记忆空间时，Runtime Source 改为在同一把锁内、提交之前，把未保留的条目移入 `runtime/archived/`。底层 Source 独立使用时仍只执行自己的存储操作，自定义 Strategy 不会隐式继承默认归档。
 
 容量按存储正文和条目分隔符的实际 UTF-8 字节计算，不包含仅用于 prompt 的元数据。单条内容最大 8 KiB。当 `add`、`replace` 或 `remove` 遇到容量溢出时，Host 会在任何 Provider 写入前重新检查源 revision。只有一个可写 Memory Space 时完全不调用模型；存在多个空间时，worker 只读取有界路由摘录并返回目标 id，不重写记忆内容。Mnemon Native 先从只读命名空间快照复用完全相同的原文，合并批内相同条目，再按目标空间通过 schema-v1 draft 和 `--no-diff` 各导入一次剩余原文，避免内容相似但不同的事实被跳过或相互覆盖。其他 Provider 继续使用适配器定义的写入语义。Host 要求每个源条目都有一条精确终态回执（跳过的重复项还必须有精确 Recall 证据），随后按重要性和字节预算选择运行时记忆的保留项，并在原 revision fence 下把余量与待处理变更一次提交。Provider 无法与本地文件共享同一事务，因此稍后的 revision 冲突或并发外部写入可能留下已经归档的重复项；现有的运行时记忆条目仍受修订检查保护。
 
@@ -545,7 +585,7 @@ location      本地 Store/CLI 作用域，或远程 endpoint + Provider 作用�
 - `forget` 是按精确 ID 的软删除，不等于删除数据库文件。
 - 用户可在既有“创建记忆空间”弹窗选择 Mnemon Native 或任意已登记三方引擎，也可在智能模式中显式加入已配置候选；断开只删除本地连接登记，不删除 Provider 数据。
 - 智能 placement 的允许列表、数据边界与必需能力是 Host 强制规则；软偏好与 Prompt 只用于多个合格候选之间的语义选择，不能绕过硬规则。决策回执与记忆空间元数据一起保存。
-- 合并仍只适用于 Mnemon Native。图谱、关系、浏览、精确/异步写入以及硬/软/不支持删除都以各 Provider 声明能力为准；UI 与 Agent 不会假装补齐缺失行为。见 [Provider 能力矩阵](dsh-operations.md)。
+- 合并仍只适用于 Mnemon Native。图谱、关系、浏览、精确/异步写入以及硬/软/不支持删除都以各 Provider 声明能力为准；UI 与 Agent 不模拟或补齐缺失能力。见 [Provider 能力矩阵](operations.md)。
 
 <a id="storage-跨-agent-可见性"></a>
 
@@ -570,7 +610,7 @@ location      本地 Store/CLI 作用域，或远程 endpoint + Provider 作用�
 | `market/registries.json`、`market/cache/<id>.json` | 市场里添加的来源，以及每个来源最近一次发布的列表 | 直到移除；六小时后刷新 |
 | `trash/` | 被删除、或被更新与恢复替换下来的技能文件夹 | 直到手动删除 |
 
-该文件夹在存储锁内以原子替换方式写入，和其他 Source 一样跟随存储范围。它不属于 Mnemon Pack，因此 ZIP 备份和 服务器同步都不包含它；技能本身就是各技能目录里的普通文件。它的设置属于配置，保存在 `mnemon` 条目的 `skills` 下，见[技能管理设置](dsh-configuration.md#技能管理设置)。
+该文件夹在存储锁内以原子替换方式写入，和其他 Source 一样跟随存储范围。它不属于 Mnemon Pack，因此 ZIP 备份和 服务器同步都不包含它；技能本身就是各技能目录里的普通文件。它的设置属于配置，保存在 `mnemon` 条目的 `skills` 下，见[技能管理设置](configuration.md#技能管理设置)。
 
 改进建议和草案在版本 1 的 `ledger.json` 中新增可选 `origin`：技能文件的绝对 `path`，以及项目技能所属的 `workspace`。本地路径来自 Source 目录，不接受模型或浏览器传入的来源。旧项目记录在所引用的准确复盘轨迹能确定唯一工作区时恢复来源；无法确定时保留正文并显示恢复步骤。读取不会重写账本，也不移动技能文件。旧版本能读取新增字段，但不执行来源绑定，因此降级会恢复原来的跨工作区限制。人工管理继续要求确认和版本检查，这些元数据不授予模型 View 访问权。
 

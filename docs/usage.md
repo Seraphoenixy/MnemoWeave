@@ -1,34 +1,87 @@
 # 安装与使用
 
-先按 [README](../README.md#构建) 安装依赖和构建。
+构建前先按 [README](../README.md#构建与验证) 安装依赖并生成 `dist/` 产物。
 
-## Codex 与 ZCode
+## Codex（stdio MCP）
 
-两个客户端各自启动本机 stdio MCP，与 DSH 共享一份本机工作准则。三个宿主使用同一个 `MNEMON_DATA_DIR` 时，准则保存在该目录的 `working-rules/runtime/`。未设置时使用 `~/.mnemon/working-rules/runtime/`。
+Codex 启动本机 stdio MCP 进程（`dist/mnemo-weave-mcp.js`），与 DSH 共用同一份本机工作准则。
 
-`--data-dir` 可选。升级时保留旧配置里的绝对路径，MCP 会从该路径的 `runtime/memories.json` 迁入旧条目。新安装只需传入脚本路径。
+### 启动参数与环境变量
 
-### Codex
+| 参数 / 环境变量 | 默认值 | 说明 |
+|---|---|---|
+| `--data-dir <绝对路径>` | 未设置 | 指定旧版工作区记忆目录；启动时一次性迁入该路径 `runtime/memories.json` 中的条目，升级旧配置时可保留此参数 |
+| `--workspace <路径>` | `process.cwd()` | 指定工作区根目录，用于 `workspace` 或 `workspaces` 存储范围的目录解析 |
+| `--storage-scope` / `MNEMON_STORAGE_SCOPE` | `global` | 控制工作区档案与记忆空间的存储范围，可选 `global`、`workspace`、`custom`、`workspaces` |
+| `--storage-dir` / `MNEMON_STORAGE_DIR` | 未设置 | `--storage-scope` 为 `custom` 时必填；为 `workspaces` 时作为集中根目录 |
+| `MNEMON_DATA_DIR` | `~/.mnemon` | 全局数据根目录；共享工作准则固定保存在该目录下的 `working-rules/runtime/`（含 `memories.json` 与 `工作准则.md`） |
+| `MNEMOWEAVE_SYNC_URL` | 未设置 | 同步服务地址；与口令同时设置时，读写工作准则会触发该范围及对应活动记录的同步 |
+| `MNEMOWEAVE_SYNC_PASSWORD` / `MNEMOWEAVE_SYNC_TOKEN` | 未设置 | 同步服务 PAKE 口令；优先读取 `MNEMOWEAVE_SYNC_PASSWORD` |
+
+### 暴露的 MCP 工具
+
+MCP 进程注册 14 个工具，返回 JSON 格式的文本内容：
+
+- **工作准则**：`mnemo_working_rules`（只读，支持 `branch` 过滤）、`mnemo_runtime_memory`（`add` / `replace` / `remove`）。
+- **工作区档案**：`mnemo_document_search`（只读）、`mnemo_document_manage`（`create` / `update` / `archive`）。
+- **记忆空间**：`mnemo_memory_bodies`、`mnemo_status`、`mnemo_recall`、`mnemo_related`（以上只读）；`mnemo_remember`、`mnemo_link`、`mnemo_forget`、`mnemo_memory_body_create`、`mnemo_memory_body_update`、`mnemo_memory_body_merge`（以上写入）。
+
+### Codex 接入
 
 在 Codex 用户配置或受信任的项目配置 `.codex/config.toml` 中添加以下配置，然后重新加载客户端。[Codex MCP 文档](https://developers.openai.com/codex/mcp)
 
 ```toml
 [mcp_servers.mnemo_weave]
 command = "node"
-args = ["D:/projects/MnemoWeave/dist/mnemo-weave-mcp.js"]
-```
-
-### ZCode
-
-在「设置 → MCP 服务器 → 新建 MCP 服务器」选择工作区作用域，服务名称填 `mnemo_weave`，启动方式选 stdio，命令填 `node`，添加下面的脚本参数。[ZCode MCP 文档](https://zcode.z.ai/cn/docs/mcp-services)
-
-```text
-D:/projects/MnemoWeave/dist/mnemo-weave-mcp.js
+args = ["<仓库绝对路径>/dist/mnemo-weave-mcp.js"]
 ```
 
 ### 验收
 
-在 Codex 调用 `append_workspace_memory` 保存一条工作准则，再在 ZCode 调用 `read_workspace_memory` 读取，并在 DSH 的「工作准则」页查看同一条记录。
+在 Codex 调用 `mnemo_runtime_memory`（`action: "add"`）保存一条工作准则，再调用 `mnemo_working_rules` 读取，并在 DSH 的「工作准则」页查看同一条记录。
+
+## Antigravity（插件与 stdio MCP）
+
+Antigravity 支持通过插件包或全局 `mcp_config.json` 接入 `dist/mnemo-weave-mcp.js`，与 Codex、DSH 共用同一份本机工作准则、工作区档案与记忆空间。
+
+### 方式一：安装 Antigravity 插件（推荐）
+
+仓库在 `integrations/antigravity/` 提供完整的 Antigravity 插件模板，包含 `plugin.json`、`mcp_config.json`、常驻规则 `rules/AGENTS.md`（引导在会话开始时读取 `mnemo_working_rules` 并区分三层记忆工具）以及 `skills/mnemo-weave/SKILL.md`。
+
+先完成构建，再执行安装脚本将插件写入 `~/.gemini/config/plugins/mnemo-weave/`：
+
+```powershell
+pnpm build
+pnpm antigravity:install
+```
+
+常用可选参数（与上方 stdio MCP 参数对应）：
+
+- `--storage-scope <global|workspace|custom|workspaces>` 与 `--storage-dir <路径>`：覆盖默认存储范围。
+- `--workspace <路径>`：显式指定传给 `mnemo-weave-mcp.js` 的工作区根目录。
+- `--target <路径>`：安装到自定义插件目录（默认为 `~/.gemini/config/plugins/mnemo-weave`）。
+- `--dry-run`：仅输出目标目录与生成的 `mcp_config.json`，不写入文件。
+
+安装后在 Antigravity 的 Customizations / Plugins 页面即可看到 **MnemoWeave**（默认启用）；如需配置服务器同步，可在已安装的 `~/.gemini/config/plugins/mnemo-weave/mcp_config.json` 中为 `mnemo_weave` 补充 `env` 字段（`MNEMOWEAVE_SYNC_URL` 与 `MNEMOWEAVE_SYNC_PASSWORD`）。
+
+### 方式二：仅配置全局 MCP
+
+如果不需要插件附带的规则与技能，也可以直接在 `~/.gemini/config/mcp_config.json` 中注册 `mnemo_weave`：
+
+```json
+{
+  "mcpServers": {
+    "mnemo_weave": {
+      "command": "node",
+      "args": ["<仓库绝对路径>/dist/mnemo-weave-mcp.js"]
+    }
+  }
+}
+```
+
+### 验收
+
+在 Antigravity 中确认 `mnemo_weave` MCP 工具可用后，调用 `mnemo_working_rules` 读取共享工作准则，或调用 `mnemo_runtime_memory`（`action: "add"`）保存一条规则并在 Codex / DSH 中核对同一条记录。
 
 ## DeepSeek Harness
 
@@ -38,7 +91,7 @@ D:/projects/MnemoWeave/dist/mnemo-weave-mcp.js
 
 使用 `link:` 把 DSH 开发 profile 中的 `dsh-mnemo-weave` bundle 指向本仓库，并在支持 HMR 的 profile 中启用它。已有上游插件的开发环境可使用独立 profile，避免两套 bundle 使用相同条目 ID。首次切换到包含热重载逻辑的构建时，启动或重启一次 DSH。
 
-从仓库根目录执行以下命令。将 `web` 替换为实际使用的 profile。桌面插件界面中的本地安装路径填写仓库根目录 `D:\projects\MnemoWeave`。
+从仓库根目录执行以下命令。将 `web` 替换为实际使用的 profile。桌面插件界面中的本地安装路径填写仓库根目录路径。
 
 ```powershell
 pnpm build
@@ -48,7 +101,7 @@ dsh plugin --profile web add "link:$($PWD.Path)"
 
 内置 Source、Strategy 和 Provider 使用 `dsh-mnemo-weave-` 包名前缀，由根 bundle 装配。此前若在 profile 中手工链接过旧包名，升级后可移除这些旧的本地链接。已有的条目 ID 和记忆存储目录继续使用。
 
-此后修改根插件源码，再在仓库根目录运行 `pnpm build`。完整构建成功后，运行中的插件会请求 DSH 重新加载 bundle，结果会写入宿主日志。WebUI 资源更新后可刷新页面。宿主报告需要重启时，重启 DSH 即可加载本次构建。
+修改根插件源码后在仓库根目录运行 `pnpm build`。完整构建成功后会更新 `.cache/dsh-build-complete` 标记文件；运行中的插件每 500 毫秒检查该标记，并在变化时调用 `pluginManager.setBundleEnabled('dsh-mnemo-weave', true)` 请求 DSH 重新加载 bundle，结果写入宿主日志。WebUI 资源更新后可刷新页面。宿主报告 `restart-required` 时，重启 DSH 以加载本次构建。
 
 设置环境变量 `DSH_MNEMO_WEAVE_HOT_RELOAD=0` 后启动 DSH，可关闭本地构建监听。
 
@@ -75,13 +128,13 @@ MnemoWeave 的 DSH 插件从 **DSH 0.2.2-rc.1** 起支持。开发依赖锁定�
 
 插件从 DSH profile 的 `cordis.patch.yml` 读取配置。安装和启停以 `dsh-mnemo-weave` bundle 为单位，组件的运行状态可在记忆系统的状态页查看。`mnemon` 条目仍是核心配置和停用目标。
 
-变更插件或宿主前，可通过[备份与恢复](dsh-operations.md)保存当前记忆数据。安装新的宿主后先确认插件已启用，再核对配置和存储位置。
+变更插件或宿主前，可通过[备份与恢复](operations.md)保存当前记忆数据。安装新的宿主后先确认插件已启用，再核对配置和存储位置。
 
 <a id="host-桌面版窗口"></a>
 
 ### 桌面版窗口
 
-DSH 桌面窗口使用宿主提供的本地传输。其他设备通过 API Gateway 访问时，管理写入由 `remoteAccess` 配置控制，详见[远程访问](dsh-configuration.md)。
+DSH 桌面窗口使用宿主提供的本地传输。其他设备通过 API Gateway 访问时，管理写入由 `remoteAccess` 配置控制，详见[远程访问](configuration.md)。
 
 <a id="host-记忆任务"></a>
 
@@ -103,13 +156,19 @@ DSH 桌面窗口使用宿主提供的本地传输。其他设备通过 API Gatew
 
 ### 云端访问
 
-如果需要通过云端域名访问 Web profile，不要直接发布 3080 端口。DSH 通过 Host 启动时输出的一次性 URL 建立浏览器会话，并用它认证全部 Mnemon RPC 与 stream。请按[云端 WebUI](dsh-operations.md#ops-cloud-hosted-webui)同时配置 HTTPS 反向代理或访问网关与可信 authority，再打开该启动 URL。
+如果需要通过云端域名访问 Web profile，不要直接发布 3080 端口。DSH 通过 Host 启动时输出的一次性 URL 建立浏览器会话，并用它认证全部 Mnemon RPC 与 stream。请按[云端 WebUI](operations.md#ops-cloud-hosted-webui)同时配置 HTTPS 反向代理或访问网关与可信 authority，再打开该启动 URL。
 
 <a id="install-mnemon-cli-的其他安装方式"></a>
 
 ### Mnemon CLI 的其他安装方式
 
-只有 Mnemon Native 使用 Mnemon CLI。请在运行 DSH 的那台机器上安装。推荐使用第 1 步的 npm 命令（Node.js 22+，macOS、Linux 与 Windows 通用），之后用 `mnemon update` 更新；状态页识别到所属 npm 安装时，也可以用“检查版本”中的更新操作。从 Homebrew、Go 或下载的二进制迁移到 npm 时，让 npm 全局命令目录在 PATH 中优先于旧命令，并同步调整 `MNEMON_CLI_PATH` / `mnemon.cliPath`。改变宿主环境后重启 DSH，再在状态页核对可执行文件路径。
+只有 Mnemon Native 使用 Mnemon CLI，需安装在运行 DSH 的机器上。可通过 npm 安装（Node.js 22+，支持 macOS、Linux 与 Windows）：
+
+```sh
+npm install --global @mnemon-dev/mnemon@latest
+```
+
+之后通过 `mnemon update` 更新；状态页识别到所属 npm 安装时，可在“检查版本”中执行更新操作。从 Homebrew、Go 或下载的二进制迁移到 npm 时，需将 npm 全局命令目录置于 PATH 中旧命令之前，并同步调整 `MNEMON_CLI_PATH` / `mnemon.cliPath`。变更宿主环境后重启 DSH，并在状态页核对可执行文件路径。
 
 macOS 也可以使用 Homebrew Cask：
 
@@ -164,9 +223,9 @@ Windows 上，dsh-mnemo-weave 会从 `PATH`、导出的 `GOBIN` 或 `GOPATH`、�
 
 若自定义 `global-bin-dir` 既不在 DSH 的 PATH 中，也没有通过 `PNPM_HOME` 暴露，则无法自动推断。改变环境后重启 DSH，或将 `cliPath` 明确指向生成的启动器或原生可执行文件。`pnpm bin -g` 和 PowerShell 的 `Get-Command mnemon` 可以核对终端选中的目录与命令；桌面进程继承的环境可能不同。任意其他 `.cmd` / `.bat` wrapper 仍不受支持。
 
-DSH 内嵌在 Electron 桌面主进程时，经过验证的 npm 启动器会在子进程中以 `ELECTRON_RUN_AS_NODE=1` 运行，覆盖记忆命令、版本检查和 npm 更新，并保留已保存的 embedding 设置。桌面应用自身的环境变量不变。如果桌面壳关闭了 Electron 的 `runAsNode` fuse，请将 `mnemon.cliPath` 指向当前平台的 Mnemon 原生二进制，详见[故障排查](dsh-operations.md#ops-故障排查)。
+DSH 内嵌在 Electron 桌面主进程时，经过验证的 npm 启动器会在子进程中以 `ELECTRON_RUN_AS_NODE=1` 运行，覆盖记忆命令、版本检查和 npm 更新，并保留已保存的 embedding 设置。桌面应用自身的环境变量不变。如果桌面壳关闭了 Electron 的 `runAsNode` fuse，请将 `mnemon.cliPath` 指向当前平台的 Mnemon 原生二进制，详见[故障排查](operations.md#ops-故障排查)。
 
-如果 DSH 仍然找不到二进制，请设置 `MNEMON_CLI_PATH`，或把 `mnemon.cliPath` 写入用户设置；不要为此整体替换插件的 profile patch（参见[配置参考](dsh-configuration.md)）：
+如果 DSH 仍然找不到二进制，请设置 `MNEMON_CLI_PATH`，或把 `mnemon.cliPath` 写入用户设置；不要为此整体替换插件的 profile patch（参见[配置参考](configuration.md)）：
 
 ```yaml
 mnemon:
@@ -201,4 +260,4 @@ mnemon:
 
 #### 在另一台设备上打开时，记忆系统是只读的
 
-从另一台设备访问 DSH 时（例如通过 `--trusted-host` 配置的地址），记忆系统默认只读，页面会写明原因。确实需要远程管理时，按[运维指南](dsh-operations.md#ops-remote-management)设置 `remoteAccess: trusted-host` 并重启 DSH。桌面版窗口和本机浏览器都不属于远程页面。
+从另一台设备访问 DSH 时（例如通过 `--trusted-host` 配置的地址），记忆系统默认只读，页面会写明原因。确实需要远程管理时，按[运维指南](operations.md#ops-remote-management)设置 `remoteAccess: trusted-host` 并重启 DSH。桌面版窗口和本机浏览器都不属于远程页面。

@@ -108,7 +108,7 @@ Entry id 标识实例，type id 标识实现。不能剥掉 Loader 的 include �
 
 可以同时安装多个主策略，每个 View 只由其中一个组合：`memoryView.strategyTypeId` 负责选择；所选主策略被停用且只剩另一个主策略时，Host 改用那一个并报告 `strategy-fallback` 诊断。完整 Strategy 用可选 `extensionSlots` 声明自有的独占扩展槽。小插件使用 `defineMemoryStrategyExtension`，以 `{ strategyExtensions: [definition] }` 安装。启用后向目标 Strategy 的一个槽贡献有界 JSON，停用只撤销自身贡献；不同槽同时参与一个 View，同一目标的重复槽会拒绝注册，不按安装顺序覆盖。目标 Strategy 未被选择时，贡献保持可观察但不执行；不支持的槽会拒绝候选运行代，并保留已有 Serving。
 
-Core 只处理目标/槽身份、JSON、64,000 字符上限、确定性回放、生命周期和最终 View 的原有预算/权限；它只定义下文 `selection`、`projection` 与 `capture` 三个标准槽的取值契约，其他槽名归目标 Strategy 所有。扩展回调只接收 request 和权限过滤后的 Source facts，没有 Source 对象、grant 或写入回调。槽语义由目标 Strategy 的公开 SDK 定义。动态回调或槽值在具体回合中不合法时，该回合拒绝，不偷偷回退到忽略插件的 View。
+Core 只处理目标/槽身份、JSON、64,000 字符上限、确定性回放、生命周期和最终 View 的原有预算/权限；它只定义下文 `selection`、`projection` 与 `capture` 三个标准槽的取值契约，其他槽名归目标 Strategy 所有。扩展回调只接收 request 和权限过滤后的 Source facts，没有 Source 对象、grant 或写入回调。槽语义由目标 Strategy 的公开 SDK 定义。动态回调或槽值在具体回合中不合法时，该回合拒绝，不回退到忽略插件的 View。
 
 <a id="extensions-可选的配置声明"></a>
 
@@ -167,9 +167,9 @@ export function apply(ctx) {
 
 状态卡片渲染在 `mnemon.component.status` 区域，同样以 `componentId` 为键，在组件声明的名称下方显示 `<strong>` 中的一行要点与 `<p>` 中的一行说明。它接收 `component`、`language`，以及存在时记忆系统的 `sessionId` 与 `workspace`，并自行读取自己的 Source。无论是否提供内容，每个 Source 组件都有一张卡片：组件已关闭或其 Source 未运行时显示页面自己的说明，未提供内容时显示正在运行。标签页、卡片与页头都使用组件声明的名称。
 
-第三方插件仍走 DSH 原生 Profile/Loader 流程：用准确包名执行 `dsh plugin --profile <Profile> add <包名>@<版本> --save-exact`，检查其 `peerDependencies` 与 `dsh.bundle.patch`，重启后在 Profile 装配中明确激活。下载 npm 包本身不等于激活，Mnemon 也不会在当前进程热加载新代码。欢迎外部作者按本页契约贡献独立仓库；通用图形化管理会在接口和社区用例稳定后再评估，不是 v0.5 承诺。
+第三方插件仍走 DSH 原生 Profile/Loader 流程：用准确包名执行 `dsh plugin --profile <Profile> add <包名>@<版本> --save-exact`，检查其 `peerDependencies` 与 `dsh.bundle.patch`，重启后在 Profile 装配中明确激活。下载 npm 包本身不等于激活，Mnemon 也不会在当前进程热加载新代码。外部作者可按本页契约开发独立仓库；通用图形化管理会在接口和社区用例稳定后再评估，不属于当前版本承诺。
 
-卸载 dsh-mnemo-weave 后，第三方 bundle 行可能仍然安装着，因此入口必须能在 Mnemon 包缺席时加载：`name`、`inject`、`memoryPlugin` 保持为纯数据，模块顶层只使用类型导入，把 `dsh-mnemo-weave/*` 的运行时导入延迟到 `apply()` 内。间接导入 SDK 的本地模块也要延迟，如上面的 `source.js`。声明 `inject: ['mnemonMemory']` 后，Cordis 会等待服务出现才调用 `apply`，服务消失时清理 Source 注册，服务恢复后重新激活。构建时将这些导入保留为 external，避免把运行时依赖提升到入口顶层。不要吞掉激活错误并伪装为注册成功；服务存在时 SDK 缺失或不兼容仍应报错。除了正常激活和清理，还要把构建入口放进没有 Mnemon 依赖的独立目录验证；外部消费方的 `absent-host.spec.ts` 覆盖这两条路径。
+卸载 dsh-mnemo-weave 后，第三方 bundle 行可能仍然安装着，因此入口必须能在 Mnemon 包缺席时加载：`name`、`inject`、`memoryPlugin` 保持为纯数据，模块顶层只使用类型导入，把 `dsh-mnemo-weave/*` 的运行时导入延迟到 `apply()` 内。间接导入 SDK 的本地模块也要延迟，如上面的 `source.js`。声明 `inject: ['mnemonMemory']` 后，Cordis 会等待服务出现才调用 `apply`，服务消失时清理 Source 注册，服务恢复后重新激活。构建时将这些导入保留为 external，避免把运行时依赖提升到入口顶层。不得吞掉激活错误并返回注册成功；服务存在时 SDK 缺失或不兼容仍应报错。除了正常激活和清理，还要把构建入口放进没有 Mnemon 依赖的独立目录验证；外部消费方的 `absent-host.spec.ts` 覆盖这两条路径。
 
 <a id="extensions-默认三层扩展"></a>
 
@@ -206,11 +206,11 @@ export function apply(ctx: Context): void {
 
 分层策略插件用此钩子实现旧版 Documents 单次查询、Recall 两次查询的共享证据预算、去重与 Related 准入。具名模型工具使用这套策略。Source 保留原始检索、存储和维护能力；显式的 DSH 辅助写入/归档仍由 Host 工作流执行，不成为 Core 的通用后台任务。
 
-策略在 manifest 的 `workflows` 中声明 Host 要为它组合的回合运行哪些后台工作。`idle-review` 让 Host 在对话空闲时审查由该策略组合的回合（[工作流](dsh-interfaces.md)）。`runtime-capacity` 让 Host 接管 Runtime Source 的 `mutate` Action：写入会超出运行时记忆容量时，先归档较早的条目；具名工具、子 Agent 与浏览器管理都走这一流程。分层策略声明了这两项，其他随附的策略都不声明。以展开分层策略 manifest 的方式构造的策略会连同 `workflows` 一起复制；写 `workflows: []` 可让它两项都不参与。策略选用的空闲审查就是分层策略的空闲审查：设置项是分层策略的 `idleReview`，任务 Agent 通过运行时记忆与工作区档案工具写入。Host 会忽略自己不认识的工作流 id；0.5.10 之前的分层策略没有声明，按声明了这两项处理。分层策略插件仍导出 `threeTierActionWorkflow` 供已有调用方使用，Host 不再使用它。这些都不改变 Source 的独立管理协议，也不向 Core 添加三层存储逻辑。模型写入保留发起回合的 View、实例与权限，归档目标限定在该 View 的可写 Memory Spaces Source 及其定义的写入范围内；多个可写归档 Source 无法唯一确定目标时拒绝归档。浏览器使用已登记工作区对应的 scope、实例与确认修订，无需绑定用户会话。只有需要模型判断时才创建独立维护任务。
+策略在 manifest 的 `workflows` 中声明 Host 要为它组合的回合运行哪些后台工作。`idle-review` 让 Host 在对话空闲时审查由该策略组合的回合（[工作流](workflows.md)）。`runtime-capacity` 让 Host 接管 Runtime Source 的 `mutate` Action：写入会超出运行时记忆容量时，先归档较早的条目；具名工具、子 Agent 与浏览器管理都走这一流程。分层策略声明了这两项，其他随附的策略都不声明。以展开分层策略 manifest 的方式构造的策略会连同 `workflows` 一起复制；写 `workflows: []` 可让它两项都不参与。策略选用的空闲审查就是分层策略的空闲审查：设置项是分层策略的 `idleReview`，任务 Agent 通过运行时记忆与工作区档案工具写入。Host 会忽略自己不认识的工作流 id；0.5.10 之前的分层策略没有声明，按声明了这两项处理。分层策略插件仍导出 `threeTierActionWorkflow` 供已有调用方使用，Host 不再使用它。这些都不改变 Source 的独立管理协议，也不向 Core 添加三层存储逻辑。模型写入保留发起回合的 View、实例与权限，归档目标限定在该 View 的可写 Memory Spaces Source 及其定义的写入范围内；多个可写归档 Source 无法唯一确定目标时拒绝归档。浏览器使用已登记工作区对应的 scope、实例与确认修订，无需绑定用户会话。只有需要模型判断时才创建独立维护任务。
 
 归档预检时，Host 可向所选 Memory Spaces Source 的 `body-directory` 读取传入 `{ writeScope: { viewId, grant } }`。可选响应 `writeScope: { viewId, sourceInstanceKey, memoryBodyIds }` 与 `remember` 使用相同权限：grant 中已知的命名空间，加上该 View 创建的命名空间。Source 校验 grant 所属实例；Host 校验返回的 View 与 Source 身份，将空范围视为无授权，并在写入前复查权限与当前能力。未返回此字段的 Source 仍使用较窄的已激活命名空间固定范围。响应格式损坏时拒绝操作。Host 不会用其他 Source 或当前目录替代缺失的授权；召回保留原有命名空间固定范围。
 
-选中的 Source 默认必需；`required: false` 明确允许该实例在不可用或投影失败时被省略。必需实例失败会拒绝本轮 View，不悄悄切换策略。分层策略对可用 Source 作组合，并将它们标为可选，因此外部读取失败不会带走其他层。缺少必需实例时，Strategy 应明确拒绝，而不是返回一个空选择。
+选中的 Source 默认必需；`required: false` 明确允许该实例在不可用或投影失败时被省略。必需实例失败会拒绝本轮 View，不自动切换策略。分层策略对可用 Source 作组合，并将它们标为可选，因此外部读取失败不会带走其他层。缺少必需实例时，Strategy 应明确拒绝，而不是返回一个空选择。
 
 显式选择示例：定义 Strategy 后把它放进 `strategies` 传入 `installMemory`。安装后，它会出现在记忆系统**设置**页的**主策略**选择器中，选择结果以 `memoryView.strategyTypeId` 保存；自动化部署可在尚未保存选择时通过 `mnemon.memoryTopology.strategyId` 选择它；多个适用 Strategy 是错误，不采用“后导入覆盖前者”。Profile 显式替换默认 Entry；只安装一个包不等于允许它替换当前组合。
 
@@ -248,7 +248,7 @@ Provider 使用 Memory Spaces SDK 的 `defineMemorySpaceProvider`。模块只收
 
 声明 `entities` 的 Provider 会为实体页提供数据。默认情况下，Source 用 `list()` 为每个空间建立实体索引：请在请求的上限内返回全部记忆及其 `entities`，一个实体的计数就是列出的记忆中带有它的条数，也就是实体页列出的那些记忆。如果 Provider 的 `list()` 取不全整个空间（例如受服务端分页大小限制），或者不能列举，请实现可选的 `entityIndex(body, signal)`，返回 `{ memories, complete }`：带有实体的记忆，以及是否已包含全部。索引不完整时，实体页会标为部分。声明了 `entities`、但既不能列举也没有 `entityIndex` 的 Provider 显示为仅查询，它的记忆只会作为召回找到的相关记忆出现在实体页。只要空间的 `status()` 统计不变，Source 就沿用该空间的索引，因此统计应随每次写入变化。
 
-只有经过校准的 0–1 相关度才应在 manifest 和适配器中声明 `normalized-relevance`。分数只用于 Provider 内部排序时，在 manifest 中声明 `provider-native`，适配器中使用 `scoreSemantics: { kind: 'provider-native' }`，按预期排名返回候选。Source 按配额接纳 `ranked` 档，不伪造标准化置信度；缺少声明仍归为 `unknown`。参见[召回质量策略](dsh-configuration.md#召回质量策略)。
+只有经过校准的 0–1 相关度才应在 manifest 和适配器中声明 `normalized-relevance`。分数只用于 Provider 内部排序时，在 manifest 中声明 `provider-native`，适配器中使用 `scoreSemantics: { kind: 'provider-native' }`，按预期排名返回候选。Source 按配额接纳 `ranked` 档，不伪造标准化置信度；缺少声明仍归为 `unknown`。参见[召回质量策略](configuration.md#召回质量策略)。
 
 Provider 还可以实现可选的 `get(body, id, signal)`：返回空间中这个精确 id 对应的记忆，没有时返回 `undefined`，读取时不能有副作用。实现后，遗忘、建立关联和相关记忆遍历都可以接受当前 View 没有返回过的 id，例如 Agent 刚写入的记忆，或委派请求中点名的记忆：Source 会在 View 可读的空间中查找这个 id，只有恰好一个空间持有它时才执行。没有 `get` 时，即使指明空间，这样的 id 也要等 View 把它作为证据返回后才能使用：Provider 自己的遗忘或建立关联调用未必限定在该空间内。
 
@@ -264,7 +264,7 @@ Provider 还可以实现可选的 `get(body, id, signal)`：返回空间中这�
 
 用户每次点击工作区顶栏的**刷新**，`refreshKey` 都会变化；配置页改变了页面要显示的内容时也会变化，例如切换组件、保存 Provider、同步、合并、导入 ZIP 或执行整理方案，页面隐藏时也可能变化。页面应在它变化时重新读取数据，而不是自己放置刷新或同步按钮。只有对话中的锚点（例如回合记忆栏里的一条内容）打开页面时，`navigationInput` 才是 `{ seed, nonce }`；点击标签页打开时没有它。默认 Source 把 seed 分别理解为档案 id（工作区档案选中它）、召回查询（记忆空间打开后立即执行）或条目文本（运行时记忆高亮并滚动到它）。新的 `nonce` 表示对同一 seed 的又一次请求。
 
-`dsh-mnemo-weave/client` 还导出默认 Source 使用的控件，让安装的 Source 与它们外观和行为一致：`SearchField`（带搜索图标的 DSH 输入框）、`SelectField`（带标签的 DSH 选择菜单，支持 `inline`、`size: 'sm'`、`hideLabel` 与 `ariaLabel`）、`WriteReceipt`（写入的结果、摘要与可选的查看操作）和 `TaskAgentTag`（任务 Agent 能否接手）。它们遵循[交互约定](dsh-workbench.md#ui-交互约定)。导入这些控件或读取 `refreshKey` 的 Source，应声明对其实际使用的 `dsh-mnemo-weave` 版本的 peer 依赖。传入 `unembedded` 时，`WriteReceipt` 会多一行说明这条记忆没有向量，`embeddingManaged` 决定它的措辞：`false` 表示 DSH 不管理 Mnemon Native 嵌入配置，显示中性的说明；`true` 或不传则显示嵌入没有成功的提醒。上游 0.5.31 及更早版本会忽略 `embeddingManaged`。
+`dsh-mnemo-weave/client` 还导出默认 Source 使用的控件，让安装的 Source 与它们外观和行为一致：`SearchField`（带搜索图标的 DSH 输入框）、`SelectField`（带标签的 DSH 选择菜单，支持 `inline`、`size: 'sm'`、`hideLabel` 与 `ariaLabel`）、`WriteReceipt`（写入的结果、摘要与可选的查看操作）和 `TaskAgentTag`（任务 Agent 能否接手）。它们遵循[交互约定](workbench.md#ui-交互约定)。导入这些控件或读取 `refreshKey` 的 Source，应声明对其实际使用的 `dsh-mnemo-weave` 版本的 peer 依赖。传入 `unembedded` 时，`WriteReceipt` 会多一行说明这条记忆没有向量，`embeddingManaged` 决定它的措辞：`false` 表示 DSH 不管理 Mnemon Native 嵌入配置，显示中性的说明；`true` 或不传则显示嵌入没有成功的提醒。上游 0.5.31 及更早版本会忽略 `embeddingManaged`。
 
 <a id="extensions-独立仓库验收"></a>
 

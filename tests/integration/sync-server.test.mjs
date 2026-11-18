@@ -141,8 +141,17 @@ test('two isolated MCP processes share Working Rules through the server', async 
     }
     try {
       const content = 'Synthetic rule transferred between isolated MCP processes.'
-      await call('first', 'append_workspace_memory', { content })
-      assert.deepEqual(await call('second', 'read_workspace_memory', {}), [content])
+      const updated = 'Synthetic rule replaced between isolated MCP processes.'
+      await call('first', 'mnemo_runtime_memory', { action: 'add', content, importance: 'critical' })
+      const read = await call('second', 'mnemo_working_rules', {})
+      assert.deepEqual(read.entries, [{ content, importance: 'critical' }])
+      assert.match(read.text, new RegExp(`- ${content}`))
+      await call('second', 'mnemo_runtime_memory', { action: 'replace', old_text: content, content: updated })
+      const afterReplace = await call('first', 'mnemo_working_rules', {})
+      assert.deepEqual(afterReplace.entries, [{ content: updated, importance: 'critical' }])
+      await call('first', 'mnemo_runtime_memory', { action: 'remove', old_text: updated })
+      const afterRemove = await call('second', 'mnemo_working_rules', {})
+      assert.deepEqual(afterRemove.entries, [])
     } finally {
       await Promise.allSettled(clients.map(client => client.close()))
     }

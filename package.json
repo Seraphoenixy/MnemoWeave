@@ -1,7 +1,7 @@
 {
   "name": "dsh-mnemo-weave",
   "version": "0.1.2",
-  "description": "MnemoWeave memory plugin for DeepSeek Harness and local MCP for Codex and ZCode.",
+  "description": "MnemoWeave memory plugin for DeepSeek Harness and local MCP for Codex.",
   "keywords": [
     "deepseek-harness",
     "deepseek-harness-plugin",
@@ -168,6 +168,7 @@
   "scripts": {
     "verify:windows-pnpm": "node --experimental-strip-types tests/checks/verify-windows-pnpm.mjs",
     "build": "tsdown && tsc -p tsconfig.types.json && node scripts/link-bundle-declarations.mjs && node scripts/copy-component-assets.mjs",
+    "antigravity:install": "node scripts/install-antigravity.mjs",
     "prepublishOnly": "pnpm run verify",
     "lint:package": "publint --strict && attw --pack . --profile esm-only --quiet",
     "typecheck": "tsc -p tsconfig.json --noEmit",
