@@ -1,5 +1,5 @@
 import type { JSX } from 'react'
-import { createContext, useContext } from 'react'
+import { createContext, useContext, useEffect, useRef } from 'react'
 import { IconSearchOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
 import { translateZh, type MnemonTranslate } from '../i18n/locales.ts'
 import { MnemonDialog, type MnemonDialogProps } from './MnemonDialog.tsx'
@@ -60,11 +60,41 @@ export function SectionSpinner({ label }: { label: string }): JSX.Element {
   return <span className={css.sectionSpinner} role="status" aria-label={label} title={label}><i aria-hidden="true" /></span>
 }
 
-export function ProgressiveFooter(props: { visible: number; total: number; pageSize: number; compact?: boolean; onMore: () => void }): JSX.Element | null {
+/**
+ * The end of a list that holds more than it has shown: the next page loads as
+ * the end comes into view, so no control states how much is left. A page that
+ * returns nothing new is not asked for again until what is shown changes.
+ * `pageSize` stays part of the contract for callers written against the
+ * earlier footer.
+ */
+export function ProgressiveFooter(props: { visible: number; total: number; pageSize: number; compact?: boolean; busy?: boolean; onMore: () => void }): JSX.Element | null {
   const t = useT()
-  if (props.total === 0) return null
+  const sentinel = useRef<HTMLDivElement>(null)
+  const more = useRef(props.onMore)
+  more.current = props.onMore
+  const asked = useRef(-1)
   const remaining = Math.max(0, props.total - props.visible)
-  return <div className={props.compact === true ? css.compactListProgress : css.listProgress}><span>{t('common.showing', { visible: props.visible, total: props.total })}</span>{remaining > 0 && <button type="button" className={css.secondaryButton} onClick={props.onMore}>{t('common.showMore', { count: Math.min(props.pageSize, remaining) })}</button>}</div>
+  useEffect(() => {
+    const element = sentinel.current
+    if (element === null || remaining === 0) { asked.current = -1; return }
+    const ask = (): void => {
+      if (asked.current === props.visible) return
+      asked.current = props.visible
+      more.current()
+    }
+    const Observer = globalThis.IntersectionObserver
+    // Without an observer nothing would ever ask for the rest, so ask once.
+    if (Observer === undefined) { ask(); return }
+    const observer = new Observer(entries => {
+      if (entries.some(entry => entry.isIntersecting)) ask()
+    }, { rootMargin: '0px 0px 240px 0px' })
+    observer.observe(element)
+    return () => { observer.disconnect() }
+  }, [remaining, props.visible])
+  if (remaining === 0) return null
+  return <div ref={sentinel} className={props.compact === true ? css.autoLoadSentinelCompact : css.autoLoadSentinel} role="status" aria-live="polite">
+    {props.busy === true && <span className={css.autoLoadSpinner} aria-label={t('common.loading')}><i aria-hidden="true" /></span>}
+  </div>
 }
 
 /** DSH-style action dialog shared by Sidebar add/write flows. */

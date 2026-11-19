@@ -1,5 +1,5 @@
 import { useEffect, useId, useState, type JSX } from 'react'
-import { IconCheckCircleOutlineRegular, IconRefreshOutlineRegular, IconWarningTriangleOutlineRegular, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconCheckCircleOutlineRegular, IconClockOutlineRegular, IconGlobeOutlineRegular, IconLoadingOutlineRegular, IconWarningTriangleOutlineRegular, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SyncProgressView } from '../../host/contracts/protocol.ts'
 import type { MnemonClient } from '../connection/api.ts'
 import type { MnemonTranslate } from '../i18n/locales.ts'
@@ -85,10 +85,15 @@ export function SyncStatusIndicator(props: {
     return pulled + pushed === 0 ? t('syncStatus.syncedIdle', { time }) : t('syncStatus.synced', { time, pulled, pushed })
   })()
 
-  const glyph = state === 'syncing' ? <IconRefreshOutlineRegular size={16} className={css.syncSpinning} />
+  // Each state has its own glyph: a run in flight is the loading arc, a failure
+  // is a warning, a completed run is a check, a configured server that has not
+  // run yet is a clock, and no server at all is the globe that opens its setup.
+  // None of them repeats the header's refresh button.
+  const glyph = state === 'syncing' ? <IconLoadingOutlineRegular size={16} className={css.syncSpinning} />
     : state === 'failed' ? <IconWarningTriangleOutlineRegular size={16} />
       : state === 'synced' ? <IconCheckCircleOutlineRegular size={16} />
-        : <IconRefreshOutlineRegular size={16} />
+        : state === 'pending' ? <IconClockOutlineRegular size={16} />
+          : <IconGlobeOutlineRegular size={16} />
 
   // A configured server runs on press; an unconfigured one opens the page that
   // sets it up, because pressing it could not succeed.

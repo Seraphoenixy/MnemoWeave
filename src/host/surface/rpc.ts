@@ -138,7 +138,7 @@ const SPACE_WRITE_CAPABILITIES: Record<string, MemoryCapability> = {
 const ASSISTANCE: Record<string, readonly string[]> = {
   'runtime': ['mutate'],
   'documents': ['mutate', 'archive'],
-  'memory-spaces': ['agent-search', 'supervise', 'body-create', 'body-metadata-maintain'],
+  'memory-spaces': ['agent-search', 'supervise', 'body-create', 'body-metadata-maintain', 'suggest-entities'],
   'skills': ['skill-draft', 'skill-backtest', 'skill-derive-cases', 'skill-review-now'],
 }
 function assistance(source: MemorySourceManagementInstance, lifecycle?: MnemonLifecycle, runtime?: ScopedRuntime): readonly string[] {
@@ -232,6 +232,14 @@ async function assisted(runtime: ScopedRuntime, lifecycle: MnemonLifecycle, type
         ? await lifecycle.placeProvider(sessionId, body, prepared, signal)
         : await lifecycle.placeProviderTask(sessionId, body, prepared, workspaceRoot, signal)
       return source.mutate('body-create', { request, placementDecision }, signal)
+    }
+    case 'suggest-entities': {
+      const content = typeof input.content === 'string' ? input.content.trim() : ''
+      if (content === '') throw new Error('suggest-entities requires non-empty content')
+      const existingEntities = Array.isArray(input.existingEntities)
+        ? input.existingEntities.filter((item): item is string => typeof item === 'string' && item.trim() !== '').map(item => item.trim()).slice(0, 50)
+        : []
+      return lifecycle.suggestEntities(sessionId, content.slice(0, 8_000), existingEntities, workspaceRoot, signal)
     }
     case 'body-metadata-maintain': {
       requireCapability(runtime, typeId, 'maintain')
@@ -366,10 +374,11 @@ export function createReadHandler(input: LiveMnemonRuntime, lifecycle?: MnemonLi
       switch (endpoint) {
         case 'source-management-catalog': return success(await catalog(runtime, lifecycle))
         case 'source-assistance': {
-          if (lifecycle === undefined || payload.operation !== 'agent-search') throw new Error('Read-only Host assistance is unavailable')
+          const op = typeof payload.operation === 'string' ? payload.operation : ''
+          if (lifecycle === undefined || (op !== 'agent-search' && op !== 'suggest-entities')) throw new Error('Read-only Host assistance is unavailable')
           const source = (await catalog(runtime, lifecycle)).sources.find(item => item.sourceInstanceKey === payload.sourceInstanceKey)
-          if (source === undefined || !source.assistance.includes('agent-search')) throw new Error('Host assistance is not available for this Source instance')
-          const value = await assisted(runtime, lifecycle, source.sourceTypeId, 'agent-search', object(payload.input), signal)
+          if (source === undefined || !source.assistance.includes(op)) throw new Error('Host assistance is not available for this Source instance')
+          const value = await assisted(runtime, lifecycle, source.sourceTypeId, op, object(payload.input), signal)
           const current = (await catalog(runtime)).sources.find(item => item.sourceInstanceKey === source.sourceInstanceKey)
           return success({ revision: current?.revision ?? source.revision, value })
         }
@@ -749,22 +758,20 @@ export function createReviewHandler(input: LiveMnemonRuntime, lifecycle?: Mnemon
         // contain is still decided by the host, and nothing is applied by running this.
         const guidance = payload.guidance
         if (guidance !== undefined && typeof guidance !== 'string') throw new Error('the reconciliation guidance must be a string')
-        return success(await lifecycle.reconcile(runtime.graph, runtime.scope, signal ?? new AbortController().signal, guidance === undefined ? {} : { guidance }))
+        const rawScope = payload.scope
+        if (rawScope !== undefined && rawScope !== 'working-rules' && rawScope !== 'documents' && rawScope !== 'memory-spaces') {
+          throw new Error('the reconciliation scope must be working-rules, documents, or memory-spaces')
+        }
+        return success(await lifecycle.reconcile(runtime.graph, runtime.scope, signal ?? new AbortController().signal, {
+          ...(guidance === undefined ? {} : { guidance }),
+          ...(rawScope === undefined ? {} : { scope: rawScope }),
+        }))
       }
       if (endpoint === 'apply') {
         if (lifecycle === undefined) throw new Error('Mnemon memory reconciliation is unavailable')
         const entry = ledger.get(String(payload.id ?? ''))
         if (entry === undefined) throw new Error('unknown review entry: ' + String(payload.id ?? ''))
         if (entry.status !== 'accepted') throw new Error('accept the review before applying it: ' + entry.id)
-        requireCapability(runtime, 'runtime', 'write')
-        const sessions: MnemonReconcileSessions = {
-          runtime: runtime.source('runtime'),
-          documents: runtime.source('documents'),
-        }
-        // Omitted means every operation, which is what a caller that predates partial
-        // application sends. An index the plan does not hold is refused rather than
-        // dropped, because a caller that believes it applied the whole review must not
-        // be told a smaller subset succeeded.
         const selection = payload.operations
         if (selection !== undefined && (!Array.isArray(selection) || selection.some(index => typeof index !== 'number'))) {
           throw new Error('the operations to apply must be a list of operation indexes')
@@ -777,9 +784,25 @@ export function createReviewHandler(input: LiveMnemonRuntime, lifecycle?: Mnemon
         if (pending.length === 0) {
           throw new Error('every operation in this review has already run: ' + entry.id)
         }
-        if (pending.some(index => entry.operations[index]?.kind !== 'document-archive')) {
+        const pendingOps = pending.map(index => entry.operations[index]!)
+        const touchesRuntime = pendingOps.some(op => op.kind.startsWith('runtime-'))
+        const touchesDocuments = pendingOps.some(op => op.kind === 'document-archive')
+        const touchesSpaces = pendingOps.some(op => op.kind.startsWith('insight-'))
+        if (touchesRuntime) {
+          requireCapability(runtime, 'runtime', 'write')
           const snapshot = await runtime.source('runtime').read<RuntimeMemorySnapshot>('snapshot', null, signal)
           if (snapshot.storageKind !== entry.runtimeStorageKind) throw new Error('The review targets a different runtime store. Generate a new review before applying it.')
+        }
+        if (touchesDocuments) requireCapability(runtime, 'documents', 'write')
+        if (touchesSpaces) {
+          requireCapability(runtime, 'memory-spaces', 'write')
+          if (pendingOps.some(op => op.kind === 'insight-forget' || op.kind === 'insight-revise')) requireCapability(runtime, 'memory-spaces', 'forget')
+          if (pendingOps.some(op => op.kind === 'insight-link')) requireCapability(runtime, 'memory-spaces', 'link')
+        }
+        const sessions: MnemonReconcileSessions = {
+          runtime: runtime.source('runtime'),
+          documents: runtime.source('documents'),
+          ...(touchesSpaces ? { memorySpaces: runtime.source('memory-spaces') } : {}),
         }
         const outcome = await applyReconcileOperations(entry.operations, sourceApplier(sessions), signal ?? new AbortController().signal, pending)
         const failure = outcome.failures.length === 0 ? undefined : outcome.failures.join('; ')

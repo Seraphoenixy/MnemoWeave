@@ -77,8 +77,6 @@ export function turnItems(activity: Partial<Pick<TurnMemoryActivity, 'retrieved'
   return byTool
 }
 
-const ITEMS_PER_TOOL = 3
-
 /** One-line memory-activity bar under a completed turn; hides when the turn touched no memory. */
 export const MnemonTurnTail = memo(function MnemonTurnTail({ turn, seq, sessionId, connection, localeRuntime, t }: MnemonTurnTailProps): JSX.Element | null {
   const subscribeLocale = useCallback((listener: () => void) => localeRuntime.subscribe(listener), [localeRuntime])
@@ -146,13 +144,12 @@ export const MnemonTurnTail = memo(function MnemonTurnTail({ turn, seq, sessionI
                 </Tooltip>
                 {used.length > 0 && (
                   <span className={css.items}>
-                    {used.slice(0, ITEMS_PER_TOOL).map(item => (
+                    {used.map(item => (
                       <button key={item.key} type="button" className={css.item} title={item.text} onClick={event => openPage(item.page, item.seed, event)}>
                         <span className={css.itemText}>{item.text}</span>
                         {item.place !== undefined && <span className={css.itemPlace}>{item.place}</span>}
                       </button>
                     ))}
-                    {used.length > ITEMS_PER_TOOL && <span className={css.itemMore}>{t('turnTail.more', { count: used.length - ITEMS_PER_TOOL })}</span>}
                   </span>
                 )}
               </li>

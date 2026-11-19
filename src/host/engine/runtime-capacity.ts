@@ -374,7 +374,7 @@ ${chunk.context}
       importance: entry.importance === 'critical' ? 5 : entry.importance === 'low' ? 1 : 3,
       source: 'agent' as const,
       memoryBodyId: routed.get(source.index)!,
-      ...(entry.branches === undefined || entry.branches.length === 0 ? {} : { tags: entry.branches.map(branch => `branch:${branch}`) }),
+      ...(entry.branches === undefined || entry.branches.length === 0 ? {} : { entities: entry.branches.map(branch => `branch:${branch}`) }),
     }
   })
   const archiveResults = new Map<number, unknown>()

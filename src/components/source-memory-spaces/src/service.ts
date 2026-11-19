@@ -13,7 +13,7 @@ import { EMPTY_MEMORY_PROVIDER_CATALOG, MemoryProviderCatalog } from './provider
 import { type MemoryProviderAdapter, type ProviderSpaceStatus, type ProviderSearchResult } from './providers/adapter.ts'
 import { MemoryProviderAdapterRegistry } from './providers/registry.ts'
 import { lexicalRequiredMatchCount, lexicalSearchTokens, lexicalTokenMatchCount } from './search-tokens.ts'
-import { ENTITY_INDEX_LIST_LIMIT, ENTITY_RAIL_LIMIT, buildSpaceEntityIndex, memoriesWithEntity, mergeEntityCounts, type SpaceEntityIndex } from './entity-index.ts'
+import { ENTITY_INDEX_LIST_LIMIT, ENTITY_RAIL_LIMIT, buildSpaceEntityIndex, entityIdfWeight, matchQueryEntityKeys, memoriesWithEntity, mergeEntityCounts, type SpaceEntityIndex } from './entity-index.ts'
 import {
   applyRecallQualityPolicy,
   prepareRecallQualityPolicy,
@@ -31,6 +31,7 @@ import {
   NATIVE_PROVIDER_ID,
   SOURCES,
   isNativeProvider,
+  mergeEntitiesAndTags,
   normalizeEntityKey,
   type Category,
   type CreateMemorySpaceRequest,
@@ -236,7 +237,13 @@ function lexicalSearchRecoveryPlan(query: string): NativeSearchRecoveryPlan | un
   }
 }
 
-function recoveryMatchCount(content: string, plan: NativeSearchRecoveryPlan): number {
+function recoveryText(insight: Pick<Insight, 'content' | 'entities' | 'tags'>): string {
+  const entities = mergeEntitiesAndTags(insight.entities, insight.tags)
+  return entities === undefined ? insight.content : `${insight.content}\n${entities.join(' ')}`
+}
+
+function recoveryMatchCount(insightOrContent: string | Pick<Insight, 'content' | 'entities' | 'tags'>, plan: NativeSearchRecoveryPlan): number {
+  const content = typeof insightOrContent === 'string' ? insightOrContent : recoveryText(insightOrContent)
   if (plan.kind === 'lexical') return lexicalTokenMatchCount(content, plan.terms)
   const normalized = normalizedExactText(content)
   return plan.terms.filter(anchor => normalized.includes(anchor)).length
@@ -249,7 +256,7 @@ function mergeRecoveryResults(
   limit: number,
 ): Insight[] {
   const admitted = recovered
-    .map(insight => ({ insight, matches: recoveryMatchCount(insight.content, plan) }))
+    .map(insight => ({ insight, matches: recoveryMatchCount(insight, plan) }))
     .filter(candidate => candidate.matches >= plan.requiredMatches)
     .sort((left, right) => right.matches - left.matches || (right.insight.score ?? 0) - (left.insight.score ?? 0))
     .map(candidate => candidate.insight)
@@ -267,7 +274,7 @@ function prioritizeRecoveryEvidence(
   plan: NativeSearchRecoveryPlan,
 ): EvaluatedRecallQualityCandidate[] {
   return selected
-    .map((entry, index) => ({ entry, index, matches: recoveryMatchCount(entry.candidate.insight.content, plan) }))
+    .map((entry, index) => ({ entry, index, matches: recoveryMatchCount(entry.candidate.insight, plan) }))
     .sort((left, right) => {
       const leftAdmitted = left.matches >= plan.requiredMatches
       const rightAdmitted = right.matches >= plan.requiredMatches
@@ -844,6 +851,7 @@ export class MemorySpacesService {
     const category = allowed(request.category, CATEGORIES, 'category')
     const source = allowed(request.source, SOURCES, 'source')
     const intent = allowed(request.intent, INTENTS, 'intent')
+    const explicitEntityKeys = [...new Set((request.entities ?? []).map(normalizeEntityKey).filter(Boolean))]
     const spaces = this.readSpaces(request.memoryBodyIds)
     const normalizedRequest: SearchRequest = {
       query,
@@ -852,30 +860,162 @@ export class MemorySpacesService {
       ...(category === undefined ? {} : { category }),
       ...(source === undefined ? {} : { source }),
       ...(intent === undefined ? {} : { intent }),
+      ...(explicitEntityKeys.length === 0 ? {} : { entities: explicitEntityKeys }),
       ...(request.inspect === true ? { inspect: true } : {}),
     }
+    const entityFallbackIds = new Set<string>()
+    const entityGraphIds = new Set<string>()
     let batches = await Promise.all(spaces.map(async body => {
-      if (!body.provider.capabilities.search) {
+      let index: SpaceEntityIndex | undefined
+      if (explicitEntityKeys.length > 0 || body.provider.capabilities.entities || body.provider.capabilities.browse) {
+        try {
+          const status = await this.entitySpaceStatus(body, 2_000)
+          index = await this.entityIndexFor(body, status)
+        } catch { /* Entity index is an optional local enhancement. */ }
+      }
+      const targetEntityKeys = explicitEntityKeys.length > 0
+        ? explicitEntityKeys
+        : index === undefined ? [] : matchQueryEntityKeys(index, query)
+
+      const pathAScores = new Map<string, number>()
+      const pathAItems: Insight[] = []
+      if (index !== undefined && targetEntityKeys.length > 0) {
+        const targetSet = new Set(targetEntityKeys)
+        const candidateScores = new Map<number, number>()
+        for (const key of targetEntityKeys) {
+          const weight = entityIdfWeight(index, key)
+          for (const pos of index.byKey.get(key) ?? []) {
+            candidateScores.set(pos, (candidateScores.get(pos) ?? 0) + weight)
+          }
+        }
+        const rankedPositions = [...candidateScores.entries()]
+          .sort((left, right) => {
+            if (right[1] !== left[1]) return right[1] - left[1]
+            const leftTime = Date.parse(index!.memories[left[0]]!.createdAt ?? '') || 0
+            const rightTime = Date.parse(index!.memories[right[0]]!.createdAt ?? '') || 0
+            return rightTime - leftTime
+          })
+        for (const [pos, entityScore] of rankedPositions) {
+          const entry = index.memories[pos]!
+          if (category !== undefined && entry.category !== category) continue
+          if (source !== undefined && entry.source !== source) continue
+          if (explicitEntityKeys.length > 0) {
+            const entryKeys = new Set((mergeEntitiesAndTags(entry.entities, entry.tags) ?? []).map(normalizeEntityKey))
+            if (![...targetSet].some(key => entryKeys.has(key))) continue
+          }
+          pathAScores.set(entry.id, entityScore)
+          pathAItems.push(entry)
+          if (pathAItems.length >= preparedPolicy.candidateLimit) break
+        }
+      }
+
+      if (!body.provider.capabilities.search && pathAItems.length === 0) {
         return {
           body,
           result: { results: [], hint: 'search is not supported' } satisfies ProviderSearchResult,
           source: readSource(body, 'unsupported', 'unsupported', 0, { hint: 'This provider does not expose search.' }),
         }
       }
-      try {
-        const result = await this.providerFor(body).search(body, normalizedRequest, signal)
+
+      let providerResult: ProviderSearchResult = { results: [] }
+      let providerStatus: 'ready' | 'empty' | 'unavailable' = 'empty'
+      let providerHint: string | undefined
+      if (body.provider.capabilities.search) {
+        try {
+          providerResult = await this.providerFor(body).search(body, normalizedRequest, signal)
+          providerStatus = providerResult.results.length === 0 ? 'empty' : 'ready'
+          providerHint = providerResult.hint
+        } catch (error) {
+          const hint = error instanceof Error ? error.message : String(error)
+          if (pathAItems.length === 0) {
+            return {
+              body,
+              result: { results: [], hint: `unavailable: ${hint}` } satisfies ProviderSearchResult,
+              source: readSource(body, 'search', 'unavailable', 0, { hint }),
+            }
+          }
+          providerStatus = 'unavailable'
+          providerHint = `unavailable: ${hint}`
+        }
+      }
+
+      if (targetEntityKeys.length === 0) {
         return {
           body,
-          result,
-          source: readSource(body, 'search', result.results.length === 0 ? 'empty' : 'ready', result.results.length, result.hint === undefined ? {} : { hint: result.hint }),
+          result: providerResult,
+          source: readSource(body, 'search', providerResult.results.length === 0 ? 'empty' : 'ready', providerResult.results.length, providerResult.hint === undefined ? {} : { hint: providerResult.hint }),
         }
-      } catch (error) {
-        const hint = error instanceof Error ? error.message : String(error)
-        return {
-          body,
-          result: { results: [], hint: `unavailable: ${hint}` } satisfies ProviderSearchResult,
-          source: readSource(body, 'search', 'unavailable', 0, { hint }),
+      }
+
+      const targetKeySet = new Set(targetEntityKeys)
+      const mentionsTargetEntity = (entry: Insight): boolean => {
+        const entryKeys = (mergeEntitiesAndTags(entry.entities, entry.tags) ?? []).map(normalizeEntityKey)
+        if (entryKeys.some(key => targetKeySet.has(key))) return true
+        const normalizedContent = normalizedExactText(entry.content)
+        return targetEntityKeys.some(key => normalizedContent.includes(normalizedExactText(key)))
+      }
+
+      const pathBById = new Map(providerResult.results.map(item => [item.id, item]))
+      const bothMatched: Insight[] = []
+      const entityOnly: Insight[] = []
+      const seen = new Set<string>()
+
+      for (const entry of pathAItems) {
+        seen.add(entry.id)
+        const fromB = pathBById.get(entry.id)
+        if (fromB !== undefined) {
+          bothMatched.push({ ...fromB, matchedVia: fromB.matchedVia ?? 'entity-index' })
+        } else {
+          const entityScore = pathAScores.get(entry.id) ?? 1
+          const syntheticScore = Number(Math.min(0.95, 0.72 + Math.min(0.23, entityScore * 0.05)).toFixed(4))
+          entityOnly.push({ ...entry, score: entry.score ?? syntheticScore, matchedVia: 'entity-index' })
         }
+      }
+
+      const vectorEntityMatched: Insight[] = []
+      const vectorOnlyFallback: Insight[] = []
+      for (const entry of providerResult.results) {
+        if (seen.has(entry.id)) continue
+        seen.add(entry.id)
+        if (mentionsTargetEntity(entry)) {
+          vectorEntityMatched.push(entry)
+        } else {
+          entityFallbackIds.add(memoryKey(body.id, entry.id))
+          vectorOnlyFallback.push(entry)
+        }
+      }
+
+      const entityDirect = [...bothMatched, ...entityOnly, ...vectorEntityMatched]
+      const entityGraphExtras: Insight[] = []
+      // 3A: Expand 1-hop entity graph neighbors only when direct entity hits are fewer than limit.
+      if (entityDirect.length > 0 && entityDirect.length < limit && body.provider.capabilities.related) {
+        const provider = this.providerFor(body)
+        if (provider.related !== undefined) {
+          try {
+            const neighbors = await provider.related(body, entityDirect[0]!.id, 1, 'entity', signal)
+            for (const neighbor of neighbors) {
+              if (seen.has(neighbor.id)) continue
+              if (category !== undefined && neighbor.category !== category) continue
+              if (source !== undefined && neighbor.source !== source) continue
+              seen.add(neighbor.id)
+              entityGraphIds.add(memoryKey(body.id, neighbor.id))
+              entityGraphExtras.push({
+                ...neighbor,
+                score: neighbor.score ?? 0.65,
+                matchedVia: neighbor.matchedVia ?? 'entity-graph',
+              })
+              if (entityDirect.length + entityGraphExtras.length >= limit) break
+            }
+          } catch { /* 1-hop entity expansion is best-effort. */ }
+        }
+      }
+
+      const merged = [...entityDirect, ...entityGraphExtras, ...vectorOnlyFallback].slice(0, preparedPolicy.candidateLimit)
+      const mergedStatus = merged.length === 0 ? (providerStatus === 'unavailable' ? 'unavailable' : 'empty') : 'ready'
+      return {
+        body,
+        result: { results: merged, ...(providerHint === undefined ? {} : { hint: providerHint }) },
+        source: readSource(body, 'search', mergedStatus, merged.length, providerHint === undefined ? {} : { hint: providerHint }),
       }
     }))
     const recoveryPlan = mode === 'smart' && category === undefined && source === undefined && intent === undefined
@@ -900,14 +1040,22 @@ export class MemorySpacesService {
       const heterogeneous = new Set(spaces.map(body => body.provider.id)).size > 1
       if (heterogeneous) for (const candidate of candidates) candidate.insight.federatedScore = 1 / (60 + candidate.providerRank)
       const useProviderOrder = heterogeneous || candidates.some(candidate => candidate.scoreSemantics?.kind === 'provider-native')
-      candidates.sort((left, right) => useProviderOrder
-        ? left.providerRank - right.providerRank || left.bodyOrder - right.bodyOrder
-        : (right.insight.score ?? 0) - (left.insight.score ?? 0))
+      const entityTier = (candidate: RecallQualityCandidate): number => {
+        const key = memoryKey(candidate.memoryBodyId, candidate.insight.id)
+        return entityFallbackIds.has(key) ? 2 : entityGraphIds.has(key) ? 1 : 0
+      }
+      candidates.sort((left, right) => {
+        const tierDiff = entityTier(left) - entityTier(right)
+        if (tierDiff !== 0) return tierDiff
+        return useProviderOrder
+          ? left.providerRank - right.providerRank || left.bodyOrder - right.bodyOrder
+          : (right.insight.score ?? 0) - (left.insight.score ?? 0)
+      })
       return { hints, quality: applyRecallQualityPolicy(preparedPolicy, candidates, qualityContext) }
     }
     let evaluation = evaluate(batches)
     const hasRecoveryEvidence = recoveryPlan !== undefined && evaluation.quality.selected.some(candidate => (
-      recoveryMatchCount(candidate.candidate.insight.content, recoveryPlan) >= recoveryPlan.requiredMatches
+      recoveryMatchCount(candidate.candidate.insight, recoveryPlan) >= recoveryPlan.requiredMatches
     ))
     if (recoveryPlan !== undefined && !hasRecoveryEvidence) {
       batches = await Promise.all(batches.map(async batch => {
@@ -920,7 +1068,7 @@ export class MemorySpacesService {
             limit: Math.min(limit, preparedPolicy.candidateLimit),
             ...(request.inspect === true ? { inspect: true } : {}),
           }, signal)
-          const admitted = recovered.results.some(insight => recoveryMatchCount(insight.content, recoveryPlan) >= recoveryPlan.requiredMatches)
+          const admitted = recovered.results.some(insight => recoveryMatchCount(insight, recoveryPlan) >= recoveryPlan.requiredMatches)
           const results = mergeRecoveryResults(batch.result.results, recovered.results, recoveryPlan, preparedPolicy.candidateLimit)
           return {
             ...batch,
@@ -938,9 +1086,19 @@ export class MemorySpacesService {
       evaluation = evaluate(batches)
     }
     const { hints, quality } = evaluation
-    const selected = recoveryPlan === undefined
+    const selectedByRecovery = recoveryPlan === undefined
       ? quality.selected
       : prioritizeRecoveryEvidence(quality.selected, recoveryPlan)
+    // 2A: Keep entity-matched and 1-hop entity-graph hits ahead of pure-vector fallback hits.
+    const selected = entityFallbackIds.size === 0
+      ? selectedByRecovery
+      : [...selectedByRecovery].sort((left, right) => {
+          const leftKey = memoryKey(left.candidate.memoryBodyId, left.candidate.insight.id)
+          const rightKey = memoryKey(right.candidate.memoryBodyId, right.candidate.insight.id)
+          const leftTier = entityFallbackIds.has(leftKey) ? 2 : entityGraphIds.has(leftKey) ? 1 : 0
+          const rightTier = entityFallbackIds.has(rightKey) ? 2 : entityGraphIds.has(rightKey) ? 1 : 0
+          return leftTier - rightTier
+        })
     const qualityStats = new Map<string, RecallQualityStats>()
     for (const { body } of batches) qualityStats.set(body.id, {
       policyId: quality.policyId,
@@ -1101,7 +1259,10 @@ export class MemorySpacesService {
           : await provider.list(body, { ...request, limit }, signal)
         const items = rawItems.filter(item =>
           (category === undefined || item.category === category)
-          && (query === '' || item.content.toLocaleLowerCase().includes(query) || item.id.toLocaleLowerCase().includes(query)),
+          && (query === ''
+            || item.content.toLocaleLowerCase().includes(query)
+            || item.id.toLocaleLowerCase().includes(query)
+            || (mergeEntitiesAndTags(item.entities, item.tags) ?? []).some(entity => entity.toLocaleLowerCase().includes(query))),
         )
         return {
           body,
@@ -1614,12 +1775,12 @@ export class MemorySpacesService {
       const sourceInsights = await this.providerFor(source).list(source, { limit: 100_000 }, signal)
       const indexById = new Map(sourceInsights.map((insight, index) => [insight.id, offset + index]))
       for (const insight of sourceInsights) {
+        const mergedEntities = mergeEntitiesAndTags(insight.entities, insight.tags)
         insights.push({
           content: insight.content,
           ...(insight.category === undefined ? {} : { category: insight.category }),
           ...(insight.importance === undefined ? {} : { importance: insight.importance }),
-          ...(insight.tags === undefined ? {} : { tags: insight.tags }),
-          ...(insight.entities === undefined ? {} : { entities: insight.entities }),
+          ...(mergedEntities === undefined ? {} : { entities: mergedEntities }),
           ...(insight.source === undefined ? {} : { source: insight.source }),
           ...(insight.createdAt === undefined ? {} : { created_at: insight.createdAt }),
         })
@@ -1725,7 +1886,7 @@ export class MemorySpacesService {
     const category = allowed(request.category, CATEGORIES, 'category') ?? 'general'
     const source = allowed(request.source, SOURCES, 'source') ?? 'user'
     const tags = commaList(request.tags, 'tags', 20)?.split(',')
-    const entities = commaList(request.entities, 'entities', 50)?.split(',')
+    const entities = mergeEntitiesAndTags(commaList(request.entities, 'entities', 50)?.split(','), tags)
     return {
       body,
       request: {
@@ -1734,15 +1895,38 @@ export class MemorySpacesService {
         category,
         source,
         memoryBodyId: body.id,
-        ...(tags === undefined ? {} : { tags }),
         ...(entities === undefined ? {} : { entities }),
       },
     }
   }
 
+  /** Physically rewrite legacy tags into entities on writable spaces that support it. */
+  async migrateLegacyTags(memoryBodyId?: string, signal?: AbortSignal): Promise<{ migrated: number; spaces: string[] }> {
+    this.assertWritable()
+    const targets = memoryBodyId === undefined
+      ? this.memorySpaces.active()
+      : [this.writeSpace(memoryBodyId)]
+    let migrated = 0
+    const spaces: string[] = []
+    for (const body of targets) {
+      const provider = this.providerFor(body)
+      if (provider.migrateLegacyTags === undefined) continue
+      const result = await provider.migrateLegacyTags(body, signal)
+      if (result.migrated > 0) {
+        migrated += result.migrated
+        spaces.push(body.id)
+        this.invalidateEntityIndex(body.id)
+      }
+    }
+    return { migrated, spaces }
+  }
+
   private annotate<T extends Insight>(insight: T, body: MemorySpace): T {
+    const entities = mergeEntitiesAndTags(insight.entities, insight.tags)
+    const { tags: _legacyTags, ...rest } = insight
     return {
-      ...insight,
+      ...(rest as T),
+      ...(entities === undefined ? {} : { entities }),
       memoryBodyId: body.id,
       memoryBodyName: body.name,
       memoryProviderId: body.provider.id,

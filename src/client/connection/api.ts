@@ -230,9 +230,12 @@ export class MnemonClient {
    * the reviewer wants the plan to accomplish, in their own words; blank means the plan
    * reads the memory and the branch with no instruction beyond its own rules.
    */
-  reconcile(guidance?: string): Promise<MnemonReconcileResult> {
+  reconcile(guidance?: string, scope?: import('../../host/contracts/protocol.ts').MnemonReconcileScope): Promise<MnemonReconcileResult> {
     const text = guidance?.trim() ?? ''
-    return this.call(MNEMON_REVIEW_CHANNEL, 'reconcile', this.scoped(text === '' ? {} : { guidance: text }))
+    return this.call(MNEMON_REVIEW_CHANNEL, 'reconcile', this.scoped({
+      ...(text === '' ? {} : { guidance: text }),
+      ...(scope === undefined ? {} : { scope }),
+    }))
   }
 
   reviewOpinion(id: string, text: string, author: 'user' | 'agent' = 'user'): Promise<MnemonReviewEntry> {

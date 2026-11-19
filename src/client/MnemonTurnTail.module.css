@@ -167,13 +167,6 @@
   white-space: nowrap;
 }
 
-.itemMore {
-  padding: 0 4px;
-  color: var(--dsw-alias-label-tertiary);
-  font-size: 12px;
-  line-height: 19px;
-}
-
 /* On a phone, each tool's items sit below it and keep the full width. */
 @container (max-width: 420px) {
   .toolRow {

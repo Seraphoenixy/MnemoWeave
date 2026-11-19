@@ -152,32 +152,24 @@ const server = new McpServer({ name: 'mnemo-weave', version: '0.1.2' })
 
 // 1. Working Rules (read companion for MCP hosts without system-prompt injection + DSH mnemo_runtime_memory)
 server.registerTool('mnemo_working_rules', {
-  description: 'Read the shared Working Rules (standing preferences, constraints, and conventions). Returns the active Working Rules projection and entries, optionally filtered by Git branch.',
-  inputSchema: {
-    branch: z.string().trim().min(1).optional().describe('Optional Git branch name to include branch-scoped rules alongside cross-branch rules. Omit to read cross-branch rules only.'),
-  },
+  description: 'Read the shared Working Rules (standing preferences, constraints, and conventions). Returns the active Working Rules projection and entries.',
+  inputSchema: {},
   annotations: { readOnlyHint: true, openWorldHint: false },
-}, async ({ branch }) => {
+}, async () => {
   const sync = await syncRules()
   const started = performance.now()
   let entries
   let text: string
   try {
-    if (branch !== undefined) {
-      const projection = memory.contextProjection(branch)
-      entries = projection.entries
-      text = projection.text
-    } else {
-      const visible = memory.snapshot().entries.filter(entry => entry.target === 'memory' && !entry.branches?.length)
-      const formatEntry = (content: string) => (/^\s*(?:[-*]|\d+\.)\s/u.test(content) ? content : `- ${content}`)
-      const pinned = visible.filter(entry => entry.pinned === true).map(entry => formatEntry(entry.content)).join('\n')
-      const plain = visible.filter(entry => entry.pinned !== true).map(entry => formatEntry(entry.content)).join('\n')
-      text = [
-        pinned === '' ? '' : `#### Pinned Rules (must follow)\n${pinned}`,
-        plain === '' ? '' : `${pinned === '' ? '' : '#### Additional Rules\n'}${plain}`,
-      ].filter(Boolean).join('\n\n')
-      entries = visible
-    }
+    const visible = memory.snapshot().entries.filter(entry => entry.target === 'memory')
+    const formatEntry = (content: string) => (/^\s*(?:[-*]|\d+\.)\s/u.test(content) ? content : `- ${content}`)
+    const pinned = visible.filter(entry => entry.pinned === true).map(entry => formatEntry(entry.content)).join('\n')
+    const plain = visible.filter(entry => entry.pinned !== true).map(entry => formatEntry(entry.content)).join('\n')
+    text = [
+      pinned === '' ? '' : `#### Pinned Rules (must follow)\n${pinned}`,
+      plain === '' ? '' : `${pinned === '' ? '' : '#### Additional Rules\n'}${plain}`,
+    ].filter(Boolean).join('\n\n')
+    entries = visible
   } catch (error) {
     await recordActivity('read-working-rules', started, 'failed')
     throw error
@@ -188,7 +180,6 @@ server.registerTool('mnemo_working_rules', {
       content: entry.content,
       importance: entry.importance,
       ...(entry.pinned === true ? { pinned: true } : {}),
-      ...(entry.branches?.length ? { branches: entry.branches } : {}),
     })),
     text,
     ...(configured && !sync.synchronized ? { sync } : {}),
@@ -196,7 +187,7 @@ server.registerTool('mnemo_working_rules', {
 })
 
 server.registerTool('mnemo_runtime_memory', {
-  description: 'Maintain the shared Working Rules. Save an explicit user preference or standing behavior rule that should guide future turns by default. A general request to remember something does not determine its destination. Skip retrieved evidence unless the user explicitly asks to save it. Skip guesses, assistant-authored claims, temporary progress, secrets, easily rediscovered facts, and skill-covered guidance. Existing rules may move to the local archive when capacity is exceeded. Optional branches restrict DSH projection to sessions on those Git branches.',
+  description: 'Maintain the shared Working Rules. Save an explicit user preference or standing behavior rule that should guide future turns by default. A general request to remember something does not determine its destination. Skip retrieved evidence unless the user explicitly asks to save it. Skip guesses, assistant-authored claims, temporary progress, secrets, easily rediscovered facts, and skill-covered guidance. Existing rules may move to the local archive when capacity is exceeded.',
   inputSchema: z.strictObject({
     action: z.enum(['add', 'replace', 'remove']).describe('add a new entry, replace one uniquely matched entry, or remove one uniquely matched entry.'),
     content: z.string().trim().min(1).refine(
@@ -205,10 +196,9 @@ server.registerTool('mnemo_runtime_memory', {
     ).optional().describe('Compact entry content. Required for add and replace.'),
     old_text: z.string().trim().min(1).optional().describe('Full content of the existing entry or a unique substring. A unique full-content match takes precedence. Required for replace and remove.'),
     importance: z.enum(['critical', 'normal', 'low']).optional().describe('critical for explicit must/always/never rules; low for transient facts; normal by default.'),
-    branches: z.array(z.string()).optional().describe('On replace, omit to keep the scope or pass an empty list to clear it.'),
   }),
   annotations: { readOnlyHint: false, openWorldHint: false },
-}, async ({ action, content, old_text, importance, branches }) => {
+}, async ({ action, content, old_text, importance }) => {
   const before = await syncRules()
   const started = performance.now()
   let result
@@ -219,7 +209,6 @@ server.registerTool('mnemo_runtime_memory', {
       ...(content === undefined ? {} : { content }),
       ...(old_text === undefined ? {} : { oldText: old_text }),
       ...(importance === undefined ? {} : { importance }),
-      ...(branches === undefined ? {} : { branches }),
     })
   } catch (error) {
     await recordActivity('append-working-rules', started, 'failed')
@@ -245,6 +234,7 @@ server.registerTool('mnemo_recall', {
     query: z.string().describe('Focused natural-language memory query.'),
     mode: z.enum(['smart', 'keyword', 'basic']).optional().describe('smart=graph-enhanced default, keyword=token ranking, basic=SQL LIKE fallback.'),
     limit: z.number().int().min(1).optional().describe('Maximum requested results.'),
+    entities: z.array(z.string()).max(50).optional().describe('Optional entity names to anchor and prioritize recall.'),
     memoryBodyIds: z.array(z.string()).optional().describe('Optional known active Memory Space ids to narrow recall. Omit this field to search every pinned active space; do not list the catalog only to populate it.'),
   },
   annotations: { readOnlyHint: true, openWorldHint: false },
@@ -320,7 +310,6 @@ server.registerTool('mnemo_remember', {
     replacesId: z.string().optional().describe('A recalled insight ID in the same active Space, only when verified evidence supersedes its conclusion.'),
     category: z.enum([...CATEGORIES]).optional(),
     importance: z.number().int().min(1).max(5).optional().describe('Durable value from 1 through 5.'),
-    tags: z.array(z.string()).max(20).optional().describe('Concise tags.'),
     entities: z.array(z.string()).max(50).optional().describe('Named entities.'),
     source: z.enum([...SOURCES]).optional().describe('Defaults to agent for model-authored writeback.'),
     memoryBodyId: z.string().optional().describe('Target Memory Space id; the write goes there or nowhere. Required unless exactly one space is active.'),

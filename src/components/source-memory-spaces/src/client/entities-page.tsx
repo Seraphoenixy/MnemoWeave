@@ -1,7 +1,7 @@
 import { css, useT } from './presentation.ts'
 import type { JSX } from 'react'
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react'
-import { normalizeEntityKey, type EntityMemoriesView, type EntityRelatedView, type EntityView, type Insight, type MemorySpaceCatalog, type MemoryReadSource } from '../contracts.ts'
+import { normalizeEntityKey, type EntityMemoriesView, type EntityRelatedView, type EntityView, type Insight, type MemorySpaceCatalog, type MemoryReadSource, type RememberRequest } from '../contracts.ts'
 import type { MemorySpacesPageClient } from './api.ts'
 import { useRequestVersion, appearanceClass, message, PageHeader, SectionSpinner, ProgressiveFooter, EmptyState, SearchField } from 'dsh-mnemo-weave/client'
 import { InsightCard, ReadSourcePanel, insightKey } from './widgets.tsx'
@@ -41,12 +41,9 @@ function InsightSkeletons(props: { count: number }): JSX.Element {
   return <div aria-hidden="true" data-placeholder="">{Array.from({ length: props.count }, (_, index) => <div key={index} className={css.insightSkeleton}><span /><span /><span /></div>)}</div>
 }
 
-/** ProgressiveFooter's layout, with a busy button while the next page loads. */
+/** The end of the carrying memories: the next page loads as it comes into view. */
 function EntityFooter(props: { visible: number; total: number; pageSize: number; busy: boolean; onMore: () => void }): JSX.Element | null {
-  const t = useT()
-  if (props.total === 0) return null
-  const remaining = Math.max(0, props.total - props.visible)
-  return <div className={css.listProgress}><span>{t('common.showing', { visible: props.visible, total: props.total })}</span>{remaining > 0 && <button type="button" className={css.secondaryButton} disabled={props.busy} aria-busy={props.busy || undefined} onClick={props.onMore}>{t('common.showMore', { count: Math.min(props.pageSize, remaining) })}</button>}</div>
+  return <ProgressiveFooter visible={props.visible} total={props.total} pageSize={props.pageSize} busy={props.busy} onMore={props.onMore} />
 }
 
 /** The active spaces from the directory, shown while their entity indexes are read. */
@@ -62,7 +59,7 @@ function pendingEntitySources(catalog: MemorySpaceCatalog): MemoryReadSource[] {
   }))
 }
 
-export function EntitiesPage(props: { client: MemorySpacesPageClient; revision: number; writeEnabled: boolean; onForget: (insight: Insight) => Promise<void>; onExplore: (query: string) => void }): JSX.Element {
+export function EntitiesPage(props: { client: MemorySpacesPageClient; revision: number; writeEnabled: boolean; onForget: (insight: Insight) => Promise<void>; onEdit?: (insight: Insight, request: RememberRequest) => Promise<Insight>; onSuggestEntities?: (content: string, existingEntities: string[]) => Promise<string[]>; onExplore: (query: string) => void }): JSX.Element {
   const t = useT()
   const { client } = props
   const [rail, setRail] = useState<EntityView | null>(null)
@@ -232,6 +229,13 @@ export function EntitiesPage(props: { client: MemorySpacesPageClient; revision: 
     })
     setRelated(current => current === null ? current : { ...current, items: current.items.filter(item => insightKey(item) !== key) })
   }
+  const edit = props.onEdit === undefined ? undefined : async (insight: Insight, request: RememberRequest) => {
+    const updated = await props.onEdit!(insight, request)
+    const key = insightKey(insight)
+    const replace = (item: Insight) => insightKey(item) === key ? { ...item, ...updated } : item
+    setMemories(current => current === null ? current : { ...current, items: current.items.map(replace) })
+    setRelated(current => current === null ? current : { ...current, items: current.items.map(replace) })
+  }
 
   const submit = (event: FormEvent) => { event.preventDefault(); select(entity) }
   const items = rail?.items ?? []
@@ -254,7 +258,7 @@ export function EntitiesPage(props: { client: MemorySpacesPageClient; revision: 
   const visibleMemories = memories?.items.slice(0, visibleMemoryLimit) ?? []
   const visibleRelated = related?.items.slice(0, visibleRelatedLimit) ?? []
   const nothingFound = memories !== null && memories.total === 0 && (!split || (related !== null && related.items.length === 0))
-  const card = (insight: Insight) => <InsightCard key={insightKey(insight)} insight={insight} writeEnabled={props.writeEnabled} onForget={forget} onRelated={() => props.onExplore(insight.content)} />
+  const card = (insight: Insight) => <InsightCard key={insightKey(insight)} insight={insight} writeEnabled={props.writeEnabled} onForget={forget} {...(edit === undefined ? {} : { onEdit: edit })} {...(props.onSuggestEntities === undefined ? {} : { onSuggestEntities: props.onSuggestEntities })} onRelated={() => props.onExplore(insight.content)} />
 
   return (
     <div className={css.page}>

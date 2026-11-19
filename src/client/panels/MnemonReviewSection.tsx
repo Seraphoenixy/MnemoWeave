@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type JSX } from 'react'
 import { Button, Tag } from '@deepseek-ai/dsh-client-ui-primitives'
-import { type ClientConnectionHandle, type MnemonReconcileOperation, type MnemonReviewEntry, type MnemonReviewLedgerView, type MnemonReviewStatus } from '../../host/contracts/protocol.ts'
+import { type ClientConnectionHandle, type MnemonReconcileOperation, type MnemonReconcileScope, type MnemonReviewEntry, type MnemonReviewLedgerView, type MnemonReviewStatus } from '../../host/contracts/protocol.ts'
 import { MnemonClient } from '../connection/api.ts'
 import type { MnemonTranslate } from '../i18n/locales.ts'
 import { MnemonDialog } from '../kit/MnemonDialog.tsx'
@@ -39,6 +39,12 @@ function targetName(t: MnemonTranslate, target: 'memory' | 'user'): string {
   return target === 'user' ? t('review.targetUser') : t('review.targetMemory')
 }
 
+const SCOPE_KEY: Record<MnemonReconcileScope, 'review.scopeWorkingRules' | 'review.scopeDocuments' | 'review.scopeMemorySpaces'> = {
+  'working-rules': 'review.scopeWorkingRules',
+  documents: 'review.scopeDocuments',
+  'memory-spaces': 'review.scopeMemorySpaces',
+}
+
 /** One operation as a reviewer reads it: what changes, and to which entry. */
 export function operationText(t: MnemonTranslate, operation: MnemonReconcileOperation): string {
   switch (operation.kind) {
@@ -46,6 +52,9 @@ export function operationText(t: MnemonTranslate, operation: MnemonReconcileOper
     case 'runtime-replace': return t('review.opReplace', { target: targetName(t, operation.target), from: brief(operation.oldText, 80), to: brief(operation.content, 160) })
     case 'runtime-remove': return t('review.opRemove', { target: targetName(t, operation.target), text: brief(operation.oldText, 160) })
     case 'document-archive': return t('review.opArchive', { id: operation.documentId })
+    case 'insight-revise': return t('review.opInsightRevise', { space: operation.memoryBodyId, id: operation.replacesId, content: brief(operation.content, 160) })
+    case 'insight-forget': return t('review.opInsightForget', { space: operation.memoryBodyId, id: operation.id })
+    case 'insight-link': return t('review.opInsightLink', { space: operation.memoryBodyId, edgeType: operation.edgeType, sourceId: operation.sourceId, targetId: operation.targetId })
   }
 }
 
@@ -126,13 +135,13 @@ export function MnemonReviewSection(props: MnemonReviewSectionProps): JSX.Elemen
     keep(entry, current.includes(index) ? current.filter(item => item !== index) : [...current, index])
   }
 
-  const runReconcile = (): void => {
+  const runReconcile = (scope: MnemonReconcileScope): void => {
     if (client === null) return
-    setBusy('reconcile')
+    setBusy(`reconcile:${scope}`)
     setFailed(null)
     setComplaint(null)
     setNotice(null)
-    void client.reconcile(guidance)
+    void client.reconcile(guidance, scope)
       .then(async result => {
         // What the run was given and what it read are part of the answer: a plan
         // that never saw the branch is a different plan from one that did.
@@ -192,6 +201,7 @@ export function MnemonReviewSection(props: MnemonReviewSectionProps): JSX.Elemen
       <header>
         <div className={css.reviewTitle}>
           <strong>{entry.title}</strong>
+          {entry.reconcileScope !== undefined && <Tag tone="quiet">{t(SCOPE_KEY[entry.reconcileScope])}</Tag>}
           <Tag tone={STATUS_TONE[entry.status]}>{t(STATUS_KEY[entry.status])}</Tag>
         </div>
         <div className={css.rowActions}>
@@ -267,7 +277,11 @@ export function MnemonReviewSection(props: MnemonReviewSectionProps): JSX.Elemen
     <SettingRow title={t('config.reconcileTitle')} titleId="mnemon-review-heading" hint={t('config.reconcileDescription')}>
       <div className={css.rowActions}>
         <Button variant="outline" size="sm" disabled={props.disabled || client === null || busy !== null}
-          onClick={runReconcile}>{busy === 'reconcile' ? t('review.reconciling') : t('review.reconcile')}</Button>
+          onClick={() => { runReconcile('working-rules') }}>{busy === 'reconcile:working-rules' ? t('review.reconciling') : t('review.reconcileWorkingRules')}</Button>
+        <Button variant="outline" size="sm" disabled={props.disabled || client === null || busy !== null}
+          onClick={() => { runReconcile('documents') }}>{busy === 'reconcile:documents' ? t('review.reconciling') : t('review.reconcileDocuments')}</Button>
+        <Button variant="outline" size="sm" disabled={props.disabled || client === null || busy !== null}
+          onClick={() => { runReconcile('memory-spaces') }}>{busy === 'reconcile:memory-spaces' ? t('review.reconciling') : t('review.reconcileMemorySpaces')}</Button>
         <Button variant="ghost" size="sm" disabled={client === null || busy !== null}
           onClick={() => { submit('load', refresh) }}>{t('review.refresh')}</Button>
       </div>

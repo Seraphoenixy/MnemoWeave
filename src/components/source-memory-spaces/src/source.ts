@@ -206,6 +206,7 @@ async function manageMemorySpaces(service: MemorySpacesService, request: MemoryS
         ...(text(input.category, 'category', 30, false) === undefined ? {} : { category: text(input.category, 'category', 30, false)! as Category }),
         ...(text(input.source, 'source', 30, false) === undefined ? {} : { source: text(input.source, 'source', 30, false)! as Source }),
         ...(text(input.intent, 'intent', 30, false) === undefined ? {} : { intent: text(input.intent, 'intent', 30, false)! as Intent }),
+        ...(stringArray(input.entities, 'entities', 50) === undefined ? {} : { entities: stringArray(input.entities, 'entities', 50)! }),
         ...(stringArray(input.memoryBodyIds, 'memoryBodyIds', 10_000) === undefined ? {} : { memoryBodyIds: stringArray(input.memoryBodyIds, 'memoryBodyIds', 10_000)! }),
         ...(input.inspect === true ? { inspect: true } : {}),
       }, request.signal))
@@ -236,6 +237,7 @@ async function manageMemorySpaces(service: MemorySpacesService, request: MemoryS
   if (!request.confirmed) throw new Error('Memory Spaces management mutation requires explicit confirmation')
   switch (request.operation) {
     case 'embedding-fill': return managementResult(service, await service.embedMissing(text(input.memoryBodyId, 'memoryBodyId', 300)!, request.signal))
+    case 'migrate-legacy-tags': return managementResult(service, await service.migrateLegacyTags(text(input.memoryBodyId, 'memoryBodyId', 300, false), request.signal))
     case 'provider-service-update': {
       const providerId = text(input.providerId, 'providerId', 128)!
       await service.updateProviderService(
@@ -367,7 +369,7 @@ export function createMemorySpacesSource(providerSnapshot: MemorySpaceProviderSn
         inputSchema: {
           type: 'object', required: ['content'], additionalProperties: false,
           properties: {
-            content: { type: 'string' }, category: { type: 'string' }, importance: { type: 'number' }, tags: { type: 'array' },
+            content: { type: 'string' }, category: { type: 'string' }, importance: { type: 'number' },
             entities: { type: 'array' }, source: { type: 'string' }, memoryBodyId: { type: 'string' }, replacesId: { type: 'string' },
           },
         },
@@ -579,11 +581,13 @@ export function createMemorySpacesSource(providerSnapshot: MemorySpaceProviderSn
           const requestedSpaces = stringArray(input.memoryBodyIds, 'memoryBodyIds', 10_000) ?? allowedBodies
           if (requestedSpaces.some(id => !allowedBodies.includes(id))) throw new Error('Recall requested a Memory Space outside this View ReadGrant')
           const mode = text(input.mode, 'mode', 20, false) as 'smart' | 'keyword' | 'basic' | undefined
+          const entities = stringArray(input.entities, 'entities', 50)
           const result = await service.search({
             query: text(input.query, 'query', 2_000)!,
             ...(mode === undefined ? {} : { mode }),
             limit: Math.min(request.route.maxResults ?? 20, integer(input.limit, 10, 1, 20, 'limit')),
             memoryBodyIds: requestedSpaces,
+            ...(entities === undefined ? {} : { entities }),
             ...(category === undefined ? {} : { category }), ...(source === undefined ? {} : { source }), ...(intent === undefined ? {} : { intent }),
           }, request.signal)
           return evidence(request, result.results, result.results.length === 0 ? result.hint : undefined)

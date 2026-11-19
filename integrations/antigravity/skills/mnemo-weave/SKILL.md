@@ -12,10 +12,9 @@ MnemoWeave exposes 14 `mnemo_*` tools over the `mnemo_weave` stdio MCP server (`
 
 ## 1. Working Rules (Standing Preferences)
 
-- **Read**: Call `mnemo_working_rules` at the beginning of a session. Pass `branch` to include Git-branch-scoped rules alongside cross-branch rules.
+- **Read**: Call `mnemo_working_rules` at the beginning of a session.
 - **Write**: Call `mnemo_runtime_memory` with `action: "add" | "replace" | "remove"`.
   - Use `importance: "critical"` for explicit must/always/never rules, `"normal"` by default, `"low"` for transient facts.
-  - Use `branches` to scope a rule to specific Git branches; on `replace`, pass `branches: []` to clear branch scoping.
 
 ## 2. Workspace Documents (Substantial Records)
 

@@ -298,7 +298,9 @@ button.readSourceCard:hover { background: var(--mn-hover); }
 /* Search: a DSH Input-style query field over the controls. */
 .searchBar { margin-bottom: 16px; padding: 14px; border: .5px solid var(--mn-card-line); border-radius: var(--dsw-radius-lg); }
 .queryField { width: 100%; height: 40px; }
-.searchChoice { min-width: 160px; }
+.searchChoice { display: grid; gap: 4px; min-width: 160px; color: var(--mn-muted); font-size: 12px; font-weight: 500; line-height: 18px; }
+.searchChoice input { height: 32px; border: .5px solid var(--mn-field-line); border-radius: var(--dsw-radius-md); outline: 0; padding: 0 10px; color: var(--mn-text); background: var(--mn-input); font-size: 13px; font-weight: 400; }
+.searchChoice input:focus { border-color: var(--mn-accent); }
 .searchControls { display: flex; align-items: flex-end; justify-content: flex-end; gap: 12px; padding-top: 12px; }
 .searchActions { display: flex; align-items: center; gap: 8px; }
 .agentAnswer { margin-bottom: 16px; padding: 16px; border: .5px solid var(--mn-card-line); border-radius: var(--dsw-radius-lg); }
@@ -311,6 +313,7 @@ button.readSourceCard:hover { background: var(--mn-hover); }
 .agentCitations small { color: var(--mn-faint); font-size: 12px; line-height: 18px; }
 .agentCitations span { max-width: 100%; overflow: hidden; padding: 1px 8px; border-radius: 999px; color: var(--mn-muted); background: var(--mn-fill); font-size: 12px; line-height: 18px; text-overflow: ellipsis; white-space: nowrap; }
 .fieldWide { display: grid; gap: 6px; color: var(--mn-muted); font-size: 12px; font-weight: 500; line-height: 18px; }
+.entityFieldHeader { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .supervisedForm textarea:focus { border-color: var(--mn-accent); }
 .singleColumn { max-width: 830px; }
 .resultLayout { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(300px, .85fr); gap: 16px; align-items: start; }
@@ -320,8 +323,10 @@ button.readSourceCard:hover { background: var(--mn-hover); }
 .relatedPane { position: sticky; top: 12px; max-height: calc(100vh - 230px); max-height: calc(100dvh - 230px); overflow: auto; padding: 14px; border: .5px solid var(--mn-card-line); border-radius: var(--dsw-radius-lg); scroll-margin-top: 14px; -webkit-overflow-scrolling: touch; }
 .relatedSource { margin: 0 0 12px; padding: 10px 12px; border-radius: var(--dsw-radius-sm); color: var(--mn-muted); background: var(--mn-fill); font-size: 13px; line-height: 20px; }
 
-.insightCard { min-width: 0; margin-bottom: 8px; padding: 14px 16px; border: .5px solid var(--mn-card-line); border-radius: var(--dsw-radius-lg); transition: background-color .15s; }
+.insightCard { min-width: 0; margin-bottom: 8px; padding: 14px 16px; border: .5px solid var(--mn-card-line); border-radius: var(--dsw-radius-lg); transition: background-color .15s, border-color .15s; }
 .insightCard:hover { background: color-mix(in srgb, var(--mn-hover) 50%, transparent); }
+.insightCard[data-editable] { cursor: pointer; }
+.insightCard[data-editable]:hover { border-color: var(--mn-line-strong); }
 .cardTop { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .badges,
 .tags,

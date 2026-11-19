@@ -48,21 +48,32 @@ Antigravity 支持通过插件包或全局 `mcp_config.json` 接入 `dist/mnemo-
 
 仓库在 `integrations/antigravity/` 提供完整的 Antigravity 插件模板，包含 `plugin.json`、`mcp_config.json`、常驻规则 `rules/AGENTS.md`（引导在会话开始时读取 `mnemo_working_rules` 并区分三层记忆工具）以及 `skills/mnemo-weave/SKILL.md`。
 
-先完成构建，再执行安装脚本将插件写入 `~/.gemini/config/plugins/mnemo-weave/`：
+可直接运行一键构建并安装脚本，自动检查依赖、生成 `dist/mnemo-weave-mcp.js`，并将插件写入 `~/.gemini/config/plugins/mnemo-weave/`：
 
 ```powershell
-pnpm build
+# Windows PowerShell 一键构建 + 安装
+.\scripts\install-antigravity.ps1
+
+# 或通过 pnpm（缺省在产物不存在时自动构建，加 -- --build 强制重新构建）
 pnpm antigravity:install
+```
+
+macOS / Linux 下可执行：
+
+```sh
+sh ./scripts/install-antigravity.sh
 ```
 
 常用可选参数（与上方 stdio MCP 参数对应）：
 
-- `--storage-scope <global|workspace|custom|workspaces>` 与 `--storage-dir <路径>`：覆盖默认存储范围。
-- `--workspace <路径>`：显式指定传给 `mnemo-weave-mcp.js` 的工作区根目录。
-- `--target <路径>`：安装到自定义插件目录（默认为 `~/.gemini/config/plugins/mnemo-weave`）。
-- `--dry-run`：仅输出目标目录与生成的 `mcp_config.json`，不写入文件。
+- `--storage-scope <global|workspace|custom|workspaces>` 与 `--storage-dir <路径>`（PowerShell 下为 `-StorageScope` / `-StorageDir`）：覆盖默认存储范围。
+- `--workspace <路径>`（PowerShell 下为 `-Workspace`）：显式指定传给 `mnemo-weave-mcp.js` 的工作区根目录。
+- `--sync-url <地址>` 与 `--sync-password <口令>`（PowerShell 下为 `-SyncUrl` / `-SyncPassword`）：直接向生成的 `mcp_config.json` 写入服务器同步环境变量。
+- `--build` / `--no-build`（PowerShell 下为 `-NoBuild`）：控制安装前是否执行 `pnpm build`。
+- `--target <路径>`（PowerShell 下为 `-Target`）：安装到自定义插件目录（默认为 `~/.gemini/config/plugins/mnemo-weave`）。
+- `--dry-run`（PowerShell 下为 `-DryRun`）：仅输出目标目录与生成的 `mcp_config.json`，不写入文件。
 
-安装后在 Antigravity 的 Customizations / Plugins 页面即可看到 **MnemoWeave**（默认启用）；如需配置服务器同步，可在已安装的 `~/.gemini/config/plugins/mnemo-weave/mcp_config.json` 中为 `mnemo_weave` 补充 `env` 字段（`MNEMOWEAVE_SYNC_URL` 与 `MNEMOWEAVE_SYNC_PASSWORD`）。
+安装后在 Antigravity 的 Customizations / Plugins 页面即可看到 **MnemoWeave**（默认启用）；也可在已安装的 `~/.gemini/config/plugins/mnemo-weave/mcp_config.json` 中随时调整 `mnemo_weave` 的 `env` 字段（`MNEMOWEAVE_SYNC_URL` 与 `MNEMOWEAVE_SYNC_PASSWORD`）。
 
 ### 方式二：仅配置全局 MCP
 

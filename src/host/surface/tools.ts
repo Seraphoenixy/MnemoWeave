@@ -174,6 +174,7 @@ function registerMemorySpaceReadTools(ctx: HostContextShape, { sourceFor, requir
         query: { type: 'string', description: 'Focused natural-language memory query.' },
         mode: { type: 'string', enum: ['smart', 'keyword', 'basic'], description: 'smart=graph-enhanced default, keyword=token ranking, basic=SQL LIKE fallback.' },
         limit: { type: 'integer', minimum: 1, description: 'Maximum requested results. The initial query admits up to 4 results and 3600 content characters. Both queries share up to 6 results and 4800 content characters.' },
+        entities: { type: 'array', items: { type: 'string' }, maxItems: 50, description: 'Optional entity names to anchor and prioritize recall.' },
         memoryBodyIds: { type: 'array', items: { type: 'string' }, description: 'Optional known active Memory Space ids to narrow recall. Omit this field to search every pinned active space; do not list the catalog only to populate it. The Host rejects ids outside the pinned Source.' },
       },
       required: ['query'],
@@ -183,7 +184,7 @@ function registerMemorySpaceReadTools(ctx: HostContextShape, { sourceFor, requir
       render: (_args: unknown, value: unknown) => text(value),
       presentationMeta: namedToolPresentation('mnemo_recall'),
     },
-    async execute(args: { query: string; mode?: 'smart' | 'keyword' | 'basic'; limit?: number; memoryBodyIds?: string[] }, exec: ToolExecution) {
+    async execute(args: { query: string; mode?: 'smart' | 'keyword' | 'basic'; limit?: number; entities?: string[]; memoryBodyIds?: string[] }, exec: ToolExecution) {
       requireSource(exec, 'memory-spaces', 'recall')
       const agent = requireAgent(exec)
       return coordinator.recall(agent, args, exec.signal, { requirePinnedView: true })
@@ -304,7 +305,7 @@ function registerDocumentTools(ctx: HostContextShape, { requireSource, config, s
 function registerRuntimeTools(ctx: HostContextShape, { requireSource, config, composableTurn }: ToolHelpers, coordinator: MnemonSubagentCoordinator): void {
   ctx.tools.register(definition({
     name: 'mnemo_runtime_memory',
-    description: 'Maintain the shared Working Rules. Save an explicit user preference or standing behavior rule that should guide future turns by default. A general request to remember something does not determine its destination. Skip retrieved evidence unless the user explicitly asks to save it. Skip guesses, assistant-authored claims, temporary progress, secrets, easily rediscovered facts, and skill-covered guidance. Existing rules may move to the local archive when capacity is exceeded. Optional branches restrict DSH projection to sessions on those Git branches.',
+    description: 'Maintain the shared Working Rules. Save an explicit user preference or standing behavior rule that should guide future turns by default. A general request to remember something does not determine its destination. Skip retrieved evidence unless the user explicitly asks to save it. Skip guesses, assistant-authored claims, temporary progress, secrets, easily rediscovered facts, and skill-covered guidance. Existing rules may move to the local archive when capacity is exceeded.',
     parameters: {
       type: 'object',
       properties: {
@@ -312,14 +313,13 @@ function registerRuntimeTools(ctx: HostContextShape, { requireSource, config, co
         content: { type: 'string', description: 'Compact entry content. Required for add and replace.' },
         old_text: { type: 'string', description: 'Full content of the existing entry or a unique substring. A unique full-content match takes precedence. Required for replace and remove.' },
         importance: { type: 'string', enum: ['critical', 'normal', 'low'], description: 'critical for explicit must/always/never rules; low for transient facts; normal by default.' },
-        branches: { type: 'array', items: { type: 'string' }, description: 'On replace, omit to keep the scope or pass an empty list to clear it.' },
       },
       required: ['action'],
       additionalProperties: false,
     },
     output: { schema: JSON_OBJECT_OUTPUT, render: (_args: unknown, value: unknown) => text(value),
       presentationMeta: namedToolPresentation('mnemo_runtime_memory') },
-    execute: (args: { action: 'add' | 'replace' | 'remove'; content?: string; old_text?: string; importance?: RuntimeMemoryImportance; branches?: string[] }, exec: ToolExecution) => {
+    execute: (args: { action: 'add' | 'replace' | 'remove'; content?: string; old_text?: string; importance?: RuntimeMemoryImportance }, exec: ToolExecution) => {
       if (!config.writeEnabled) throw new Error('dsh-mnemo-weave is configured read-only (writeEnabled: false)')
       if ('target' in args) throw new Error('Working Rules mutations no longer accept target')
       requireSource(exec, 'runtime', 'write')
@@ -330,7 +330,6 @@ function registerRuntimeTools(ctx: HostContextShape, { requireSource, config, co
         ...(args.content === undefined ? {} : { content: args.content }),
         ...(args.old_text === undefined ? {} : { oldText: args.old_text }),
         ...(args.importance === undefined ? {} : { importance: args.importance }),
-        ...(args.branches === undefined ? {} : { branches: args.branches }),
       }
       return coordinator.runtime(requireAgent(exec), request, exec.signal)
     },
@@ -351,7 +350,6 @@ function registerMemorySpaceWriteTools(ctx: HostContextShape, { requireSource, s
         replacesId: { type: 'string', description: 'A recalled insight ID in the same active Space, only when verified evidence supersedes its conclusion. Unsupported Providers skip the revision.' },
         category: { type: 'string', enum: [...CATEGORIES] },
         importance: { type: 'integer', minimum: 1, maximum: 5, description: 'Durable value from 1 through 5.' },
-        tags: { type: 'array', items: { type: 'string' }, maxItems: 20, description: 'Concise tags.' },
         entities: { type: 'array', items: { type: 'string' }, maxItems: 50, description: 'Named entities.' },
         source: { type: 'string', enum: [...SOURCES], description: 'Defaults to agent for model-authored writeback.' },
         memoryBodyId: { type: 'string', description: 'Target Memory Space id; the write goes there or nowhere. Select an active space. A save request does not authorize reactivation. Required unless exactly one space is active.' },
@@ -360,7 +358,7 @@ function registerMemorySpaceWriteTools(ctx: HostContextShape, { requireSource, s
     },
     output: { schema: JSON_OBJECT_OUTPUT, render: (_args: unknown, value: unknown) => text(value),
       presentationMeta: namedToolPresentation('mnemo_remember') },
-    async execute(args: { content: string; replacesId?: string; category?: Category; importance?: number; tags?: string[]; entities?: string[]; source?: Source; memoryBodyId?: string }, exec: ToolExecution) {
+    async execute(args: { content: string; replacesId?: string; category?: Category; importance?: number; entities?: string[]; source?: Source; memoryBodyId?: string }, exec: ToolExecution) {
       requireSource(exec, 'memory-spaces', 'write')
       if (args.replacesId !== undefined) requireSource(exec, 'memory-spaces', 'forget')
       const request = { ...args, source: args.source ?? 'agent' }

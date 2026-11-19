@@ -351,6 +351,12 @@
 .listProgress { display: flex; min-height: 56px; align-items: center; justify-content: center; gap: 12px; margin-top: 12px; padding: 10px; border-top: .5px solid var(--mn-line); color: var(--mn-faint); font-size: 12px; line-height: 18px; }
 .compactListProgress { display: grid; justify-items: stretch; gap: 8px; margin-top: 8px; padding: 10px 2px 2px; border-top: .5px solid var(--mn-line); color: var(--mn-faint); font-size: 12px; line-height: 18px; text-align: center; }
 .compactListProgress button { width: 100%; }
+/* The end of a list that loads its rest as it comes into view: a hairline and
+   the spinner while the next page is read, nothing else. */
+.autoLoadSentinel { display: grid; min-height: 32px; place-items: center; margin-top: 12px; border-top: .5px solid var(--mn-line); padding: 8px; }
+.autoLoadSentinelCompact { display: grid; min-height: 20px; place-items: center; margin-top: 8px; padding: 4px 2px; }
+.autoLoadSpinner { display: grid; width: 20px; height: 20px; place-items: center; color: var(--mn-faint); }
+.autoLoadSpinner > i { width: 14px; height: 14px; border: 2px solid color-mix(in srgb, currentColor 25%, transparent); border-top-color: currentColor; border-radius: 50%; animation: mnemon-spin .9s linear infinite; }
 
 /* Dialogs follow the DSH Modal: panel radius, layer-2 fill, prominent elevation.
    They sit on DSH's modal layer (z 1000), so DSH menus, tooltips and toasts (z 1100) open above them. */

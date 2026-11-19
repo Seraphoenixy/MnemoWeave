@@ -3,7 +3,7 @@ import type { JSX } from 'react'
 import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from 'react'
 import { type RuntimeMemoryEntry, type RuntimeMemoryImportance, type RuntimeMemorySnapshot } from '../contracts.ts'
 import type { RuntimePageClient } from './api.ts'
-import { type MnemonKey, appearanceClass, useLocale, humanBytes, message, parseBranchesInput, PageHeader, ProgressiveFooter, SidebarModal, SearchField, SelectField } from 'dsh-mnemo-weave/client'
+import { type MnemonKey, appearanceClass, useLocale, humanBytes, message, PageHeader, ProgressiveFooter, SidebarModal, SearchField, SelectField } from 'dsh-mnemo-weave/client'
 
 /** Whitespace folded, as a conversation turn quotes an entry it wrote. */
 function fold(text: string): string {
@@ -26,9 +26,6 @@ export function RuntimePage(props: { client: RuntimePageClient; revision: number
   const [editing, setEditing] = useState<string | null>(null)
   const [editContent, setEditContent] = useState('')
   const [editImportance, setEditImportance] = useState<RuntimeMemoryImportance>('normal')
-  const [branches, setBranches] = useState('')
-  const [editBranches, setEditBranches] = useState('')
-  const [editBranchesOriginal, setEditBranchesOriginal] = useState('')
   const [removing, setRemoving] = useState<string | null>(null)
   const [adding, setAdding] = useState(false)
   const [filterQuery, setFilterQuery] = useState('')
@@ -79,23 +76,19 @@ export function RuntimePage(props: { client: RuntimePageClient; revision: number
     if (content.trim() === '') return
     setSaving(true)
     try {
-      const branchInput = parseBranchesInput(branches)
-      await mutate({ action: 'add', content, importance, ...(branchInput === undefined ? {} : { branches: branchInput }) })
-      setContent(''); setBranches('')
+      await mutate({ action: 'add', content, importance })
+      setContent('')
       setAdding(false)
     } catch (reason) { setError(message(reason)) } finally { setSaving(false) }
   }
   const beginEdit = (entry: RuntimeMemoryEntry) => {
-    const branchText = entry.branches?.join(', ') ?? ''
-    setEditing(entryKey(entry)); setEditContent(entry.content); setEditImportance(entry.importance); setEditBranches(branchText); setEditBranchesOriginal(branchText); setRemoving(null)
+    setEditing(entryKey(entry)); setEditContent(entry.content); setEditImportance(entry.importance); setRemoving(null)
   }
   const replace = async (entry: RuntimeMemoryEntry) => {
     if (editContent.trim() === '') return
     setSaving(true)
     try {
-      const rawBranches = editBranches.trim()
-      const branchDelta = rawBranches === editBranchesOriginal.trim() ? undefined : rawBranches === '' ? [] : parseBranchesInput(editBranches)
-      await mutate({ action: 'replace', old_text: entry.content, content: editContent, importance: editImportance, ...(branchDelta === undefined ? {} : { branches: branchDelta }) })
+      await mutate({ action: 'replace', old_text: entry.content, content: editContent, importance: editImportance })
       setEditing(null)
     } catch (reason) { setError(message(reason)) } finally { setSaving(false) }
   }
@@ -122,7 +115,7 @@ export function RuntimePage(props: { client: RuntimePageClient; revision: number
     const key = entryKey(entry)
     const isRemoving = removing === key
     return <article key={key} className={css.runtimeEntry} data-importance={entry.importance} data-target={entry.target} data-focused={focused(entry) || undefined}>
-      <div className={css.runtimeEntryMeta}><div className={css.runtimeEntryBadges}><span>{t(`runtime.importance.${entry.importance}` as MnemonKey)}</span>{entry.pinned === true && <span className={css.runtimeEntryBranch}>{t('runtime.pinned')}</span>}{entry.branches !== undefined && entry.branches.length > 0 && <span className={css.runtimeEntryBranch} title={t('runtime.branchBadge')}>{entry.branches.join(', ')}</span>}</div><time dateTime={entry.created_at}>{new Date(entry.created_at).toLocaleString(locale)}</time></div>
+      <div className={css.runtimeEntryMeta}><div className={css.runtimeEntryBadges}><span>{t(`runtime.importance.${entry.importance}` as MnemonKey)}</span>{entry.pinned === true && <span className={css.runtimeEntryBranch}>{t('runtime.pinned')}</span>}</div><time dateTime={entry.created_at}>{new Date(entry.created_at).toLocaleString(locale)}</time></div>
       {<p>{entry.content}</p>}
 
       <footer>
@@ -150,14 +143,13 @@ export function RuntimePage(props: { client: RuntimePageClient; revision: number
   const composer = <form id={runtimeAddFormId} className={css.runtimeComposer} onSubmit={event => void add(event)}>
     <div className={css.runtimeComposerHeading}><div><h3>{t('runtime.addTitle')}</h3><p>{t('runtime.addDescription')}</p></div><span>{t('runtime.hotContext')}</span></div>
     <textarea aria-label={t('runtime.content')} value={content} onChange={event => setContent(event.target.value)} rows={3} placeholder={t('runtime.placeholder')} />
-    <div className={css.runtimeComposerActions}><SelectField className={css.runtimeChoice} label={t('runtime.importance')} value={importance} options={importanceOptions} onChange={setImportance} /><label className={css.runtimeComposerBranch}>{t('runtime.branches')}<input value={branches} onChange={event => setBranches(event.target.value)} placeholder={t('runtime.branchesPlaceholder')} aria-label={t('runtime.branches')} /></label></div>
+    <div className={css.runtimeComposerActions}><SelectField className={css.runtimeChoice} label={t('runtime.importance')} value={importance} options={importanceOptions} onChange={setImportance} /></div>
   </form>
   const editingEntry = editing === null ? undefined : snapshot?.entries.find(entry => entryKey(entry) === editing)
   const removingEntry = removing === null ? undefined : snapshot?.entries.find(entry => entryKey(entry) === removing)
   const editForm = editingEntry === undefined ? null : <form id={runtimeEditFormId} className={css.bodyEdit} onSubmit={event => { event.preventDefault(); void replace(editingEntry) }}>
     <label>{t('runtime.editContent')}<textarea aria-label={t('runtime.editContent')} value={editContent} onChange={event => setEditContent(event.target.value)} rows={7} /></label>
     <SelectField className={css.runtimeChoice} label={t('runtime.importance')} value={editImportance} options={importanceOptions} onChange={setEditImportance} />
-    <label className={css.bodyEditBranch}>{t('runtime.branches')}<input value={editBranches} onChange={event => setEditBranches(event.target.value)} placeholder={t('runtime.branchesPlaceholder')} aria-label={t('runtime.branches')} /><small>{t('runtime.branchesHint')}</small></label>
   </form>
 
   return (

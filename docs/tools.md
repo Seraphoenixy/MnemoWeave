@@ -52,15 +52,11 @@ DSH 中具名工具按已提交全局注册记录的 `manifest.typeId` 动态挂
 
 ### `mnemo_working_rules`（仅 MCP）
 
-读取共享工作准则（`working-rules/runtime/memories.json` 中 `target === "memory"` 的条目）及其文本投影。配置同步服务时，读取前先尝试同步工作准则范围。
-
-| 参数 | 类型 | 必填 | 说明 |
-|---|---|---|---|
-| `branch` | `string` | 否 | Git 分支名（非空字符串）。传入时返回未绑定分支的条目及包含该分支的条目；省略时仅返回未绑定分支的条目 |
+读取共享工作准则（`working-rules/runtime/memories.json` 中 `target === "memory"` 的条目）及其文本投影。配置同步服务时，读取前先尝试同步工作准则范围。不接受输入参数。
 
 返回值（JSON 文本）：
 
-- `entries`：条目数组，每项含 `content`、`importance`（`critical` / `normal` / `low`）、可选 `pinned: true`、可选 `branches`。
+- `entries`：条目数组，每项含 `content`、`importance`（`critical` / `normal` / `low`）、可选 `pinned: true`。
 - `text`：按固定条目优先格式化的文本投影。
 - `sync`：仅在已配置同步服务且本次同步失败时返回 `{ synchronized: false, message }`。
 
@@ -74,7 +70,6 @@ DSH 中具名工具按已提交全局注册记录的 `manifest.typeId` 动态挂
 | `content` | `string` | `add` / `replace` 必填 | 条目正文，UTF-8 字节长度上限 `8192`（8 KiB） |
 | `old_text` | `string` | `replace` / `remove` 必填 | 待匹配条目的完整正文或唯一子串；完整正文精确匹配优先于子串匹配；零命中或命中多条时拒绝 |
 | `importance` | `'critical' \| 'normal' \| 'low'` | 否 | 重要性等级；`add` 默认 `normal`；`replace` 省略时保留原值，显式指定较低值时控制层保留原有较高重要度 |
-| `branches` | `string[]` | 否 | 限定 DSH 系统提示投影的 Git 分支列表；`replace` 时省略保留原范围，传 `[]` 清除分支限定 |
 
 行为说明：
 
@@ -139,6 +134,7 @@ DSH 中具名工具按已提交全局注册记录的 `manifest.typeId` 动态挂
 | `query` | `string` | 是 | 聚焦的自然语言检索词 |
 | `mode` | `'smart' \| 'keyword' \| 'basic'` | 否 | 检索模式：`smart` 为图谱增强默认模式，`keyword` 为词元排序，`basic` 为 SQL LIKE 回退 |
 | `limit` | `number`（整数 `>= 1`） | 否 | 请求最大结果数；受每回合信封上限约束 |
+| `entities` | `string[]`（最多 50 项） | 否 | 可选实体名称列表，用于锚定并优先召回关联记忆 |
 | `memoryBodyIds` | `string[]` | 否 | 限定检索的已激活记忆空间 ID 列表；省略时检索全部已固定激活空间；传入未固定 ID 会被宿主拒绝 |
 
 DSH 回合预算信封：
@@ -174,7 +170,6 @@ Root Agent 在 DSH 中调用以下 6 个工具时，宿主会启动独立的 `sp
 | `replacesId` | `string` | 否 | 同空间内被新证据推翻的旧记忆 ID；传入时要求同时具备 `forget` 权限，不支持修订的 Provider 会跳过旧条目退役 |
 | `category` | `'preference' \| 'decision' \| 'fact' \| 'insight' \| 'context' \| 'general'` | 否 | 记忆分类 |
 | `importance` | `number`（整数 `1..5`） | 否 | 持久价值评分 |
-| `tags` | `string[]`（最多 20 项） | 否 | 标签列表 |
 | `entities` | `string[]`（最多 50 项） | 否 | 命名实体列表 |
 | `source` | `'user' \| 'agent' \| 'external'` | 否 | 来源标识，模型调用默认为 `'agent'` |
 | `memoryBodyId` | `string` | 否 | 目标记忆空间 ID；激活空间数量不是 1 时必须显式指定，且必须为当前已激活空间 |

@@ -14,7 +14,6 @@ export function RememberPage(props: { client: MemorySpacesPageClient; agentAvail
   const [content, setContent] = useState(props.seed)
   const [category, setCategory] = useState<Category>('general')
   const [importance, setImportance] = useState(3)
-  const [tags, setTags] = useState('')
   const [entities, setEntities] = useState('')
   const [memoryBodyId, setMemoryBodyId] = useState('')
   const [supervising, setSupervising] = useState(false)
@@ -46,7 +45,7 @@ export function RememberPage(props: { client: MemorySpacesPageClient; agentAvail
     if (candidate === '' || busy) return
     setSaving(true); setOutcome(null)
     try {
-      const response = await props.client.remember({ content: candidate, category, importance, tags: tags.split(',').map(value => value.trim()).filter(Boolean), entities: entities.split(',').map(value => value.trim()).filter(Boolean), source: 'user', ...(memoryBodyId === '' ? {} : { memoryBodyId }) })
+      const response = await props.client.remember({ content: candidate, category, importance, entities: entities.split(',').map(value => value.trim()).filter(Boolean), source: 'user', ...(memoryBodyId === '' ? {} : { memoryBodyId }) })
       // Mnemon Native says embedded: false for a memory it saved without a vector (#388).
       setOutcome({ content: candidate, action: typeof response.action === 'string' ? response.action : 'stored', summary: typeof response.summary === 'string' ? response.summary : '', unembedded: response.embedded === false, embeddingManaged: props.embeddingManaged })
       props.onMutate()
@@ -71,7 +70,6 @@ export function RememberPage(props: { client: MemorySpacesPageClient; agentAvail
           <SelectField label={t('common.category')} value={category} options={CATEGORIES.map(value => ({ value, label: categoryLabel(t, value) }))} onChange={setCategory} />
           <SelectField label={t('common.importanceLabel')} value={String(importance)} options={[1, 2, 3, 4, 5].map(value => ({ value: String(value), label: `${value} / 5` }))} onChange={value => setImportance(Number(value))} />
           <label className={css.fieldWide}>{t('remember.entities')}<input value={entities} onChange={event => setEntities(event.target.value)} placeholder="SQLite, DSH" /></label>
-          <label className={css.fieldWide}>{t('remember.tags')}<input value={tags} onChange={event => setTags(event.target.value)} placeholder="architecture, local-first" /></label>
         </div>
         <div className={css.manualActions}><p>{t('remember.advancedText')}</p><button type="submit" className={css.secondaryButton} disabled={busy || candidate === '' || memoryBodyId === '' || answered}>{saving ? t('remember.saving') : t('remember.advancedAction')}</button></div>
       </form>

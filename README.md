@@ -2,7 +2,7 @@
 
 MnemoWeave（包名 `dsh-mnemo-weave`）为本机及多设备环境提供可组合记忆系统，支持三类宿主与一个独立同步服务：
 
-- **Codex / Antigravity**：通过 stdio MCP 入口 `dist/mnemo-weave-mcp.js` 访问共享工作准则、工作区档案与记忆空间；仓库内另提供 [Antigravity 插件包](integrations/antigravity/plugin.json) 与安装脚本 `pnpm antigravity:install`。
+- **Codex / Antigravity**：通过 stdio MCP 入口 `dist/mnemo-weave-mcp.js` 访问共享工作准则、工作区档案与记忆空间；仓库内另提供 [Antigravity 插件包](integrations/antigravity/plugin.json) 与一键安装脚本 `.\scripts\install-antigravity.ps1`（或 `pnpm antigravity:install`）。
 - **DeepSeek Harness（DSH）**：通过插件 `dsh-mnemo-weave`（最低支持 `0.2.2-rc.1`）提供系统提示注入、记忆工具、后台整理、工作台 WebUI 与技能管理。
 - **HTTP 同步服务**：通过 `dist/mnemo-weave-sync-server.js` 提供基于 SRP-6a（PAKE）与 SQLite 的增量快照和活动记录同步。
 

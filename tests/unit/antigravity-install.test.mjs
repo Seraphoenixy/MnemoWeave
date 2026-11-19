@@ -12,6 +12,8 @@ test('installAntigravityPlugin writes plugin bundle and resolved mcp_config.json
       target,
       storageScope: 'workspaces',
       storageDir: join(target, 'spaces'),
+      syncUrl: 'https://sync.example.com',
+      syncPassword: 'secret-password',
     })
 
     assert.equal(result.dryRun, false)
@@ -35,6 +37,10 @@ test('installAntigravityPlugin writes plugin bundle and resolved mcp_config.json
       '--storage-dir',
       resolve(target, 'spaces').replaceAll('\\', '/'),
     ])
+    assert.deepEqual(server.env, {
+      MNEMOWEAVE_SYNC_URL: 'https://sync.example.com',
+      MNEMOWEAVE_SYNC_PASSWORD: 'secret-password',
+    })
 
     const rules = readFileSync(join(target, 'rules', 'AGENTS.md'), 'utf8')
     assert.equal(rules.startsWith('---'), false)

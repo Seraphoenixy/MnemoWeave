@@ -970,12 +970,18 @@ export interface MnemonEntryOrigin {
   at: string
 }
 
+/** Which memory store a reconciliation run targets. */
+export type MnemonReconcileScope = 'working-rules' | 'documents' | 'memory-spaces'
+
 /** What one memory reconciliation proposes, and why. Nothing here is applied until a reviewer accepts it. */
 export type MnemonReconcileOperation =
   | { kind: 'runtime-add'; target: 'memory' | 'user'; content: string; importance: 'critical' | 'normal' | 'low'; branches?: string[]; reason: string }
   | { kind: 'runtime-replace'; target: 'memory' | 'user'; oldText: string; content: string; importance?: 'critical' | 'normal' | 'low'; branches?: string[]; reason: string }
   | { kind: 'runtime-remove'; target: 'memory' | 'user'; oldText: string; reason: string }
   | { kind: 'document-archive'; documentId: string; reason: string }
+  | { kind: 'insight-revise'; memoryBodyId: string; replacesId: string; content: string; category?: 'decision' | 'preference' | 'fact' | 'insight' | 'context' | 'general'; importance?: number; entities?: string[]; reason: string }
+  | { kind: 'insight-forget'; memoryBodyId: string; id: string; reason: string }
+  | { kind: 'insight-link'; memoryBodyId: string; sourceId: string; targetId: string; edgeType: 'temporal' | 'semantic' | 'causal' | 'entity'; weight?: number; reason: string }
 
 export type MnemonReviewStatus = 'pending' | 'accepted' | 'rejected'
 
@@ -989,6 +995,7 @@ export interface MnemonReviewOpinion {
 
 export interface MnemonReviewEntry {
   id: string
+  reconcileScope?: MnemonReconcileScope
   runtimeStorageKind?: 'working-rules'
   createdAt: string
   updatedAt: string
@@ -1037,6 +1044,7 @@ export interface MnemonReconcileOptions {
    * never widens it - the host still decides what an operation may contain.
    */
   guidance?: string
+  scope?: MnemonReconcileScope
 }
 
 /** What one reconciliation run produced. A run with no findings creates no review. */

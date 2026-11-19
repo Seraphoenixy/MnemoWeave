@@ -1,12 +1,12 @@
 import { css, sidebarCss, useT } from './presentation.ts'
-import type { JSX } from 'react'
-import { useState } from 'react'
+import type { JSX, MouseEvent } from 'react'
+import { useId, useState } from 'react'
 import { writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { Insight, MemorySpaceProvider, MemorySpaceView, MemoryProviderConfigField, MemoryProviderConnection, MemoryProviderDescriptor, MemoryProviderId, MemoryReadSource } from '../contracts.ts'
+import { CATEGORIES, type Category, type Insight, type MemorySpaceProvider, type MemorySpaceView, type MemoryProviderConfigField, type MemoryProviderConnection, type MemoryProviderDescriptor, type MemoryProviderId, type MemoryReadSource, type RememberRequest } from '../contracts.ts'
 import { ProviderIcon } from './ProviderIcon.tsx'
 import { providerSummary } from './provider-presentation.ts'
 import { ProviderField } from './provider-field.tsx'
-import { type MnemonKey, type MnemonTranslate, appearanceClass, SidebarModal } from 'dsh-mnemo-weave/client'
+import { type MnemonKey, type MnemonTranslate, appearanceClass, message, SelectField, SidebarModal } from 'dsh-mnemo-weave/client'
 
 export type ProviderDrafts = Partial<Record<MemoryProviderId, MemoryProviderConnection>>
 
@@ -116,18 +116,34 @@ export function InsightCard(props: {
   insight: Insight
   writeEnabled: boolean
   onForget: (insight: Insight) => Promise<void>
+  onEdit?: (insight: Insight, request: RememberRequest) => Promise<void>
+  onSuggestEntities?: (content: string, existingEntities: string[]) => Promise<string[]>
   onRelated?: (insight: Insight) => void
   onClone?: (insight: Insight) => void
 }): JSX.Element {
   const t = useT()
+  const editFormId = useId()
   const [confirming, setConfirming] = useState(false)
   const [forgetting, setForgetting] = useState(false)
+  const [editing, setEditing] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [suggestingEntities, setSuggestingEntities] = useState(false)
+  const [editError, setEditError] = useState<string | null>(null)
+  const [editContent, setEditContent] = useState('')
+  const [editCategory, setEditCategory] = useState<Category>('general')
+  const [editImportance, setEditImportance] = useState(3)
+  const [editEntities, setEditEntities] = useState('')
   const { insight } = props
   const neutralActionClass = appearanceClass(css.ghostButton, appearanceClass(sidebarCss.itemActionButton, sidebarCss.itemEditAction))
   const forgetActionClass = appearanceClass(css.dangerButton, appearanceClass(sidebarCss.itemActionButton, sidebarCss.itemDangerAction))
   const providerLabel = insight.memoryProviderLabel ?? insight.memoryProviderId
   const supportsRelated = insight.memoryCapabilities?.related === true
   const supportsForget = insight.memoryCapabilities?.forget === true
+  const supportsEdit = props.writeEnabled && props.onEdit !== undefined
+    && insight.memoryCapabilities?.writeMode === 'exact'
+    && insight.memoryCapabilities?.remember === true
+    && insight.memoryCapabilities?.forget === true
+    && insight.memoryCapabilities?.deletionMode === 'soft'
   const meta = [
     insight.memoryBodyName,
     providerLabel,
@@ -136,6 +152,7 @@ export function InsightCard(props: {
     insight.score !== undefined ? t('common.score', { value: insight.score.toFixed(2) }) : undefined,
     insight.depth !== undefined ? t('common.hops', { count: insight.depth }) : undefined,
   ].filter((entry): entry is string => entry !== undefined)
+  const spaceDescription = `${insight.memoryBodyName ?? insight.memoryBodyId ?? ''}${insight.memoryBodyName === undefined && insight.memoryBodyId === undefined ? '' : ' · '}${insight.id}`
 
   const forget = async () => {
     setForgetting(true)
@@ -147,27 +164,101 @@ export function InsightCard(props: {
     }
   }
 
+  const beginEdit = () => {
+    if (!supportsEdit) return
+    setEditContent(insight.content)
+    setEditCategory(CATEGORIES.includes(insight.category as Category) ? (insight.category as Category) : 'general')
+    setEditImportance(typeof insight.importance === 'number' && insight.importance >= 1 && insight.importance <= 5 ? Math.round(insight.importance) : 3)
+    setEditEntities((insight.entities ?? []).join(', '))
+    setEditError(null)
+    setEditing(true)
+  }
+
+  const handleCardClick = (event: MouseEvent<HTMLElement>) => {
+    if (!supportsEdit) return
+    const target = event.target as HTMLElement | null
+    if (target?.closest('button, a, input, textarea, select, [data-card-actions]') !== null) return
+    if (typeof window !== 'undefined' && (window.getSelection()?.toString().trim() ?? '') !== '') return
+    beginEdit()
+  }
+
+  const trimmedContent = editContent.trim()
+  const canSubmitEdit = trimmedContent !== '' && trimmedContent !== insight.content
+
+  const suggestEntities = async () => {
+    if (props.onSuggestEntities === undefined || trimmedContent === '' || saving || suggestingEntities) return
+    setSuggestingEntities(true)
+    setEditError(null)
+    try {
+      const current = editEntities.split(',').map(value => value.trim()).filter(Boolean)
+      const suggested = await props.onSuggestEntities(trimmedContent, current)
+      setEditEntities(suggested.join(', '))
+    } catch (reason) {
+      setEditError(message(reason))
+    } finally {
+      setSuggestingEntities(false)
+    }
+  }
+
+  const saveEdit = async () => {
+    if (!supportsEdit || !canSubmitEdit || saving || suggestingEntities || props.onEdit === undefined) return
+    setSaving(true)
+    setEditError(null)
+    try {
+      await props.onEdit(insight, {
+        content: trimmedContent,
+        category: editCategory,
+        importance: editImportance,
+        entities: editEntities.split(',').map(value => value.trim()).filter(Boolean),
+        source: 'user',
+        ...(insight.memoryBodyId === undefined ? {} : { memoryBodyId: insight.memoryBodyId }),
+      })
+      setEditing(false)
+    } catch (reason) {
+      setEditError(message(reason))
+    } finally {
+      setSaving(false)
+    }
+  }
+
   return (
     <>
-    <article className={css.insightCard}>
+    <article className={css.insightCard} data-editable={supportsEdit ? '' : undefined} onClick={handleCardClick}>
       <div className={css.cardTop}>
         <div className={css.badges}>{meta.map(entry => <span key={entry} className={css.badge}>{entry}</span>)}</div>
       </div>
       <p className={css.content}>{insight.content}</p>
-      {(insight.tags?.length ?? 0) > 0 && <div className={css.tags}>{insight.tags!.map(tag => <span key={tag}>#{tag}</span>)}</div>}
       {(insight.entities?.length ?? 0) > 0 && <div className={css.entities}>{insight.entities!.map(entity => <span key={entity}>{entity}</span>)}</div>}
-      <div className={css.cardActions}>
+      <div className={css.cardActions} data-card-actions="">
         {(
           <>
             {props.onRelated !== undefined && supportsRelated && <button type="button" className={neutralActionClass} onClick={() => props.onRelated?.(insight)}>{t('card.related')}</button>}
             {props.onClone !== undefined && <button type="button" className={neutralActionClass} onClick={() => props.onClone?.(insight)}>{t('card.clone')}</button>}
+            {supportsEdit && <button type="button" className={neutralActionClass} onClick={beginEdit}>{t('card.edit')}</button>}
             <button type="button" className={neutralActionClass} onClick={() => void writeClipboard(insight.id)}>{t('common.copyId')}</button>
             {props.writeEnabled && supportsForget && <button type="button" className={forgetActionClass} onClick={() => setConfirming(true)}>{t('card.forget')}</button>}
           </>
         )}
       </div>
     </article>
-    {confirming && <SidebarModal title={t('card.confirmText')} description={`${insight.memoryBodyName ?? insight.memoryBodyId ?? ''}${insight.memoryBodyName === undefined && insight.memoryBodyId === undefined ? '' : ' · '}${insight.id}`} busy={forgetting} onClose={() => setConfirming(false)} footer={<div className={css.modalFooterActions}><button type="button" data-dialog-close data-autofocus className={css.secondaryButton} disabled={forgetting} onClick={() => setConfirming(false)}>{t('common.cancel')}</button><button type="button" className={css.dangerSolidButton} disabled={forgetting} onClick={() => void forget()}>{forgetting ? t('card.processing') : t('card.confirmForget')}</button></div>}><div className={css.bodyDeleteConfirm}><div className={css.bodyDeleteSummary}><p className={css.bodyDeleteContent}>{insight.content}</p><span>{meta.join(' · ')}</span></div></div></SidebarModal>}
+    {editing && <SidebarModal title={t('card.editTitle')} description={spaceDescription} busy={saving || suggestingEntities} onClose={() => { if (!saving && !suggestingEntities) setEditing(false) }} footer={<div className={css.modalFooterActions}><button type="button" data-dialog-close className={css.secondaryButton} disabled={saving || suggestingEntities} onClick={() => setEditing(false)}>{t('common.cancel')}</button><button type="submit" form={editFormId} className={css.primaryButton} disabled={saving || suggestingEntities || !canSubmitEdit}>{saving ? t('card.saving') : t('card.saveEdit')}</button></div>}>
+      <form id={editFormId} className={css.bodyEdit} onSubmit={event => { event.preventDefault(); void saveEdit() }}>
+        {editError !== null && <div className={css.inlineError} role="alert">{editError}</div>}
+        <label>{t('card.editContent')}<textarea aria-label={t('card.editContent')} value={editContent} onChange={event => setEditContent(event.target.value)} maxLength={8000} rows={7} /></label>
+        <div className={css.formGrid}>
+          <SelectField label={t('common.category')} value={editCategory} options={CATEGORIES.map(value => ({ value, label: categoryLabel(t, value) }))} onChange={setEditCategory} />
+          <SelectField label={t('common.importanceLabel')} value={String(editImportance)} options={[1, 2, 3, 4, 5].map(value => ({ value: String(value), label: `${value} / 5` }))} onChange={value => setEditImportance(Number(value))} />
+          <div className={css.fieldWide}>
+            <div className={css.entityFieldHeader}>
+              <span>{t('remember.entities')}</span>
+              {props.onSuggestEntities !== undefined && <button type="button" className={neutralActionClass} disabled={saving || suggestingEntities || trimmedContent === ''} onClick={() => void suggestEntities()}>{suggestingEntities ? t('card.suggestingEntities') : t('card.suggestEntities')}</button>}
+            </div>
+            <input aria-label={t('remember.entities')} value={editEntities} onChange={event => setEditEntities(event.target.value)} placeholder="SQLite, DSH" />
+          </div>
+        </div>
+      </form>
+    </SidebarModal>}
+    {confirming && <SidebarModal title={t('card.confirmText')} description={spaceDescription} busy={forgetting} onClose={() => setConfirming(false)} footer={<div className={css.modalFooterActions}><button type="button" data-dialog-close data-autofocus className={css.secondaryButton} disabled={forgetting} onClick={() => setConfirming(false)}>{t('common.cancel')}</button><button type="button" className={css.dangerSolidButton} disabled={forgetting} onClick={() => void forget()}>{forgetting ? t('card.processing') : t('card.confirmForget')}</button></div>}><div className={css.bodyDeleteConfirm}><div className={css.bodyDeleteSummary}><p className={css.bodyDeleteContent}>{insight.content}</p><span>{meta.join(' · ')}</span></div></div></SidebarModal>}
     </>
   )
 }

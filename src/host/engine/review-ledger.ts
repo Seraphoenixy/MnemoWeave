@@ -110,10 +110,11 @@ export class MnemonReviewLedger {
   }
 
   /** One proposal from one reconciliation run. Every run is kept, even when it finds nothing. */
-  create(input: Pick<MnemonReviewEntry, 'title' | 'summary' | 'machine' | 'foreignMachines' | 'operations' | 'runtimeStorageKind'>): MnemonReviewEntry {
+  create(input: Pick<MnemonReviewEntry, 'title' | 'summary' | 'machine' | 'foreignMachines' | 'operations' | 'runtimeStorageKind' | 'reconcileScope'>): MnemonReviewEntry {
     const at = new Date().toISOString()
     const entry: MnemonReviewEntry = {
       id: randomUUID(),
+      ...(input.reconcileScope === undefined ? {} : { reconcileScope: input.reconcileScope }),
       ...(input.runtimeStorageKind === undefined ? {} : { runtimeStorageKind: input.runtimeStorageKind }),
       createdAt: at,
       updatedAt: at,

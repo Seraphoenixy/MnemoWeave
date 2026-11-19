@@ -1,19 +1,20 @@
 import { css, useT } from './presentation.ts'
 import type { JSX } from 'react'
 import { useEffect, useRef, useState, type FormEvent } from 'react'
-import { CATEGORIES, type Category, type Insight, type MemoryReadSource } from '../contracts.ts'
+import { CATEGORIES, type Category, type Insight, type MemoryReadSource, type RememberRequest } from '../contracts.ts'
 import type { MemorySpacesPageClient } from './api.ts'
 import { useRequestVersion, message, short, PageHeader, SectionSpinner, ProgressiveFooter, EmptyState, SearchField, SelectField } from 'dsh-mnemo-weave/client'
 import { InsightCard, ReadSourcePanel, categoryLabel, insightKey } from './widgets.tsx'
 
 export interface MemorySpacesPageStatus { defaultRecallLimit?: number }
 
-export function ExplorePage(props: { client: MemorySpacesPageClient; agentClient: MemorySpacesPageClient; agentAvailable: boolean; status: MemorySpacesPageStatus | null; seed: string; writeEnabled: boolean; onForget: (insight: Insight) => Promise<void>; onRevealElement?(element: HTMLElement): void }): JSX.Element {
+export function ExplorePage(props: { client: MemorySpacesPageClient; agentClient: MemorySpacesPageClient; agentAvailable: boolean; status: MemorySpacesPageStatus | null; seed: string; writeEnabled: boolean; onForget: (insight: Insight) => Promise<void>; onEdit?: (insight: Insight, request: RememberRequest) => Promise<Insight>; onSuggestEntities?: (content: string, existingEntities: string[]) => Promise<string[]>; onRevealElement?(element: HTMLElement): void }): JSX.Element {
   const t = useT()
   const pageSize = 6
   const [query, setQuery] = useState(props.seed)
   const [mode, setMode] = useState<'smart' | 'keyword' | 'basic'>('smart')
   const [category, setCategory] = useState<Category | ''>('')
+  const [entitiesInput, setEntitiesInput] = useState('')
   const [results, setResults] = useState<Insight[]>([])
   const [sources, setSources] = useState<MemoryReadSource[]>([])
   const [searchKind, setSearchKind] = useState<'direct' | 'agent' | null>(null)
@@ -57,7 +58,8 @@ export function ExplorePage(props: { client: MemorySpacesPageClient; agentClient
     relatedRequests.begin()
     setSearchKind(withAgent ? 'agent' : 'direct'); setSearched(true); setError(null); setRelatedTo(null); setAgentAnswer(null); setVisibleResultLimit(pageSize); setVisibleRelatedLimit(pageSize)
     try {
-      const request = { query: text, mode, ...(category === '' ? {} : { category }), limit: props.status?.defaultRecallLimit ?? 10 }
+      const entities = entitiesInput.split(',').map(value => value.trim()).filter(Boolean)
+      const request = { query: text, mode, ...(category === '' ? {} : { category }), ...(entities.length === 0 ? {} : { entities }), limit: props.status?.defaultRecallLimit ?? 10 }
       if (withAgent) {
         const response = await props.agentClient.agentSearch(request)
         setResults(response.results)
@@ -97,6 +99,14 @@ export function ExplorePage(props: { client: MemorySpacesPageClient; agentClient
     setRelated(items => items.filter(item => insightKey(item) !== insightKey(insight)))
     if (relatedTo !== null && insightKey(relatedTo.insight) === insightKey(insight)) setRelatedTo(null)
   }
+  const edit = props.onEdit === undefined ? undefined : async (insight: Insight, request: RememberRequest) => {
+    const updated = await props.onEdit!(insight, request)
+    const key = insightKey(insight)
+    const replace = (item: Insight) => insightKey(item) === key ? { ...item, ...updated } : item
+    setResults(items => items.map(replace))
+    setRelated(items => items.map(replace))
+    setRelatedTo(current => current !== null && insightKey(current.insight) === key ? { ...current, insight: updated } : current)
+  }
   const visibleResults = results.slice(0, visibleResultLimit)
   const visibleRelated = related.slice(0, visibleRelatedLimit)
 
@@ -106,6 +116,7 @@ export function ExplorePage(props: { client: MemorySpacesPageClient; agentClient
       <form className={css.searchBar} onSubmit={event => void search(event)}>
         <SearchField className={css.queryField} label={t('search.queryAria')} value={query} onChange={event => setQuery(event.target.value)} placeholder={t('search.placeholder')} />
         <div className={css.searchControls}>
+          <label className={css.searchChoice}>{t('search.entitiesLabel')}<input value={entitiesInput} onChange={event => setEntitiesInput(event.target.value)} placeholder={t('search.entitiesPlaceholder')} /></label>
           <SelectField className={css.searchChoice} label={t('common.category')} ariaLabel={t('search.categoryAria')} value={category} options={[{ value: '' as Category | '', label: t('common.allCategories') }, ...CATEGORIES.map(value => ({ value, label: categoryLabel(t, value) }))]} onChange={setCategory} />
           <SelectField className={css.searchChoice} label={t('search.strategy')} ariaLabel={t('search.modeAria')} value={mode} options={[{ value: 'smart', label: t('search.modeSmart') }, { value: 'keyword', label: t('search.modeKeyword') }, { value: 'basic', label: t('search.modeBasic') }]} onChange={setMode} />
           <div className={css.searchActions}><button type="submit" className={css.secondaryButton} disabled={searching || query.trim() === ''}>{searchKind === 'direct' ? t('search.searching') : t('search.action')}</button><button type="button" className={css.primaryButton} disabled={searching || query.trim() === '' || !props.agentAvailable} onClick={() => void runSearch(true)}>{searchKind === 'agent' ? t('search.agentSearching') : t('search.agentAction')}</button></div>
@@ -120,8 +131,8 @@ export function ExplorePage(props: { client: MemorySpacesPageClient; agentClient
       {searched && !searching && results.length === 0 && error === null && <EmptyState glyph="0" title={t('search.emptyTitle')}>{t('search.emptyText')}</EmptyState>}
       {results.length > 0 && (
         <div className={relatedTo === null ? css.singleColumn : css.resultLayout}>
-          <section className={css.results}><div className={css.sectionHeading}><div><h3>{t('search.results')}</h3></div><strong>{results.length}</strong></div>{visibleResults.map(insight => <InsightCard key={insightKey(insight)} insight={insight} writeEnabled={props.writeEnabled} onForget={forget} onRelated={item => void showRelated(item)} />)}{<ProgressiveFooter visible={visibleResults.length} total={results.length} pageSize={pageSize} onMore={() => setVisibleResultLimit(value => value + pageSize)} />}</section>
-          {relatedTo !== null && <aside ref={relatedPaneRef} className={css.relatedPane}><div className={css.sectionHeading}><div><h3>{t('search.related')}</h3></div><button type="button" onClick={() => { relatedRequests.begin(); setRelatedTo(null); setRelatedLoading(false) }} aria-label={t('search.closeRelated')}>×</button></div><p className={css.relatedSource}>{relatedTo.insight.content}</p>{relatedLoading && <div className={css.loading}>{t('search.traversing')}</div>}{!relatedLoading && related.length === 0 && <div className={css.muted}>{t('search.noRelated')}</div>}{visibleRelated.map(insight => <InsightCard key={insightKey(insight)} insight={insight} writeEnabled={props.writeEnabled} onForget={forget} onRelated={item => void showRelated(item)} />)}{!relatedLoading && <ProgressiveFooter visible={visibleRelated.length} total={related.length} pageSize={pageSize} onMore={() => setVisibleRelatedLimit(value => value + pageSize)} />}</aside>}
+          <section className={css.results}><div className={css.sectionHeading}><div><h3>{t('search.results')}</h3></div><strong>{results.length}</strong></div>{visibleResults.map(insight => <InsightCard key={insightKey(insight)} insight={insight} writeEnabled={props.writeEnabled} onForget={forget} {...(edit === undefined ? {} : { onEdit: edit })} {...(props.onSuggestEntities === undefined ? {} : { onSuggestEntities: props.onSuggestEntities })} onRelated={item => void showRelated(item)} />)}{<ProgressiveFooter visible={visibleResults.length} total={results.length} pageSize={pageSize} onMore={() => setVisibleResultLimit(value => value + pageSize)} />}</section>
+          {relatedTo !== null && <aside ref={relatedPaneRef} className={css.relatedPane}><div className={css.sectionHeading}><div><h3>{t('search.related')}</h3></div><button type="button" onClick={() => { relatedRequests.begin(); setRelatedTo(null); setRelatedLoading(false) }} aria-label={t('search.closeRelated')}>×</button></div><p className={css.relatedSource}>{relatedTo.insight.content}</p>{relatedLoading && <div className={css.loading}>{t('search.traversing')}</div>}{!relatedLoading && related.length === 0 && <div className={css.muted}>{t('search.noRelated')}</div>}{visibleRelated.map(insight => <InsightCard key={insightKey(insight)} insight={insight} writeEnabled={props.writeEnabled} onForget={forget} {...(edit === undefined ? {} : { onEdit: edit })} {...(props.onSuggestEntities === undefined ? {} : { onSuggestEntities: props.onSuggestEntities })} onRelated={item => void showRelated(item)} />)}{!relatedLoading && <ProgressiveFooter visible={visibleRelated.length} total={related.length} pageSize={pageSize} onMore={() => setVisibleRelatedLimit(value => value + pageSize)} />}</aside>}
         </div>
       )}
       </div>

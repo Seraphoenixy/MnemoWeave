@@ -1,5 +1,5 @@
 /** Source-owned private-child SPI. Core never imports or registers Providers. */
-export { CATEGORIES, SOURCES, EDGE_TYPES, INTENTS } from './contracts.ts'
+export { CATEGORIES, SOURCES, EDGE_TYPES, INTENTS, mergeEntitiesAndTags } from './contracts.ts'
 export type {
   JsonValue, Category, Source, EdgeType, Intent, Insight,
   MemorySpace, MemorySpaceProvider, MemorySpaceStats, MemoryGraphNode, MemoryGraphEdge, MemoryGraphSnapshot,

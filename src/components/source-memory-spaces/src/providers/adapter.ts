@@ -117,6 +117,8 @@ export interface MemoryProviderAdapter {
   related?(body: MemorySpace, id: string, depth: number, edge?: EdgeType, signal?: AbortSignal): Promise<Insight[]>
   link?(body: MemorySpace, sourceId: string, targetId: string, type: EdgeType, weight: number, reason?: string, signal?: AbortSignal): Promise<JsonValue>
   forget?(body: MemorySpace, id: string, signal?: AbortSignal): Promise<JsonValue>
+  /** Physically merge any legacy tags into entities on the backing store. */
+  migrateLegacyTags?(body: MemorySpace, signal?: AbortSignal): Promise<{ migrated: number }>
   /** Release generation-owned clients, timers, pools, or subprocess handles. */
   dispose?(): void | Promise<void>
 }

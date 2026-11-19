@@ -128,7 +128,7 @@ export function MoreList(props: { items: readonly string[]; shown: number }): JS
   const items = open || hidden <= 0 ? props.items : props.items.slice(0, props.shown)
   return <div className={css.skClamp}>
     <ul className={css.skChanges}>{items.map((item, index) => <li key={index}>{item}</li>)}</ul>
-    {hidden > 0 && <button type="button" className={css.skLink} onClick={() => setOpen(value => !value)}>{open ? t('common.less') : t('common.moreCount', { count: hidden })}</button>}
+    {hidden > 0 && <button type="button" className={css.skLink} onClick={() => setOpen(value => !value)}>{open ? t('common.less') : t('common.moreCount')}</button>}
   </div>
 }
 
@@ -213,8 +213,8 @@ export function diffLabels(t: SkillsTranslate) {
   return {
     codeLabel: t('diff.code'), wrapLabel: t('diff.wrap'), unwrapLabel: t('diff.unwrap'),
     copy: t('diff.copy'), copied: t('diff.copied'), collapseAria: t('diff.collapse'),
-    expandAria: (hidden: number) => t('diff.expand', { count: hidden }), collapse: t('diff.collapse'),
-    expand: (hidden: number) => t('diff.expand', { count: hidden }),
+    expandAria: () => t('diff.expand'), collapse: t('diff.collapse'),
+    expand: () => t('diff.expand'),
   }
 }
 

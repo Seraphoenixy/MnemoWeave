@@ -140,16 +140,20 @@ export function MnemonSyncSection({ connection, onMerged, scope, t }: MnemonSync
         {running ? <TextShimmer active>{t('serverSync.runningAction')}</TextShimmer> : t('serverSync.run')}
       </Button>
     </SettingRow>
-    <SettingRow title={t('serverSync.url')} htmlFor={urlId}>
+    {/* Both fields take the row's whole width, so an address is readable while it is typed and the
+        save action keeps its label on one line beside the password. */}
+    <SettingRow title={t('serverSync.url')} htmlFor={urlId} stacked>
       <input id={urlId} className={css.workspacePaths} type="url" spellCheck={false} autoCapitalize="none"
         value={url} disabled={unavailable} onChange={event => { setDraftUrl(event.target.value); setConflict(undefined) }} />
     </SettingRow>
-    <SettingRow title={t('serverSync.password')} htmlFor={passwordId}>
-      <input id={passwordId} className={css.workspacePaths} type="password" autoComplete="new-password"
-        placeholder={saved?.configured ? t('serverSync.configured') : undefined}
-        value={password} disabled={unavailable} onChange={event => { setPassword(event.target.value); setConflict(undefined) }} />
-      <Button disabled={unavailable || busy || !url.trim() || !password} aria-busy={busy || undefined}
-        onClick={() => { void save() }}>{busy ? <TextShimmer active>{t('serverSync.verifying')}</TextShimmer> : t('serverSync.save')}</Button>
+    <SettingRow title={t('serverSync.password')} htmlFor={passwordId} stacked>
+      <div className={css.syncFields}>
+        <input id={passwordId} className={css.workspacePaths} type="password" autoComplete="new-password"
+          placeholder={saved?.configured ? t('serverSync.configured') : undefined}
+          value={password} disabled={unavailable} onChange={event => { setPassword(event.target.value); setConflict(undefined) }} />
+        <Button disabled={unavailable || busy || !url.trim() || !password} aria-busy={busy || undefined}
+          onClick={() => { void save() }}>{busy ? <TextShimmer active>{t('serverSync.verifying')}</TextShimmer> : t('serverSync.save')}</Button>
+      </div>
     </SettingRow>
     {running && <SyncRunning t={t} progress={progress} elapsed={elapsed} />}
     {status !== '' && <p className={css.syncProgress} role="status" data-tone={conflict === undefined ? undefined : 'error'}>{status}</p>}

@@ -1,4 +1,5 @@
-import { normalizeEntityKey, type Insight } from './contracts.ts'
+import { mergeEntitiesAndTags, normalizeEntityKey, type Insight } from './contracts.ts'
+import { lexicalSearchTokens } from './search-tokens.ts'
 
 /**
  * The most memories one space's derived index asks list() for. Mnemon Native
@@ -29,7 +30,7 @@ export function buildSpaceEntityIndex(memories: readonly Insight[], memoryCount:
   for (const memory of memories) {
     const seen = new Set<string>()
     let position: number | undefined
-    for (const raw of memory.entities ?? []) {
+    for (const raw of mergeEntitiesAndTags(memory.entities, memory.tags) ?? []) {
       if (typeof raw !== 'string') continue
       const key = normalizeEntityKey(raw)
       if (key === '' || seen.has(key)) continue
@@ -48,6 +49,31 @@ export function buildSpaceEntityIndex(memories: readonly Insight[], memoryCount:
     }
   }
   return { memories: kept, byKey, spellings, memoryCount, complete }
+}
+
+export function entityIdfWeight(index: SpaceEntityIndex, key: string): number {
+  const total = Math.max(1, index.memoryCount)
+  const df = index.byKey.get(key)?.length ?? 0
+  return Math.log((total + 1) / (df + 1)) + 1
+}
+
+/**
+ * Identify normalized entity keys in `index` that appear in `query`.
+ * Matches exact entity keys against query substrings (for multi-word / CJK entities)
+ * or lexical search tokens, ordered by descending IDF specificity.
+ */
+export function matchQueryEntityKeys(index: SpaceEntityIndex, query: string): string[] {
+  const normalizedQuery = normalizeEntityKey(query)
+  if (normalizedQuery === '') return []
+  const tokens = new Set(lexicalSearchTokens(query, 64))
+  const matched: string[] = []
+  for (const key of index.byKey.keys()) {
+    if (key.length < 2) continue
+    if (tokens.has(key) || normalizedQuery.includes(key)) {
+      matched.push(key)
+    }
+  }
+  return matched.sort((left, right) => entityIdfWeight(index, right) - entityIdfWeight(index, left))
 }
 
 /** The spelling most memories use; the first one seen wins a tie. */

@@ -15,7 +15,7 @@ import { runtimeCapacityWrite, strategyDrives, viewStrategy } from '../support/s
 import { receipt as mutationReceipt } from '../../sdk/input.ts'
 import { allowsParticipation, assertParticipation } from '../support/access.ts'
 import { namedToolInstance, type CoordinatedDocumentResult, type CoordinatedRuntimeMemoryResult, type DelegatedAnswerResult, type DelegatedWriteResult, type MemorySpaceMetadataMaintenanceResult, type MemorySpaceMetadataUpdate, type MemoryPlacementDecision, type MnemonReconcileOptions, type MnemonReconcileResult, type SubagentCounters } from '../contracts/protocol.ts'
-import { emptyDocumentSnapshot, foreignMachines, parseReconcileResult, pendingOpinions, reconcileModelContract, reconcilePrompt, type MnemonReconcileEvidence } from '../engine/reconcile.ts'
+import { emptyDocumentSnapshot, foreignMachines, parseReconcileResult, pendingOpinions, reconcileModelContract, reconcilePrompt, type MnemonReconcileEvidence, type MnemonReconcileMemorySpaceEvidence } from '../engine/reconcile.ts'
 import { DEFAULT_MEMORY_VIEW_BUDGET, type ComposableMemoryView, type MemoryEvidence, type MemoryJsonValue, type MemoryMutationReceipt, type MemoryOperationScope, type MemorySourceManagementRequest, type MemorySourceManagementResult } from '../../core/contracts/index.ts'
 import { agentScope, type MnemonAgentRuntimeSource, type MnemonRuntimeGraph } from '../engine/runtime.ts'
 import type { ComposableMemoryTurn } from '../../core/turns.ts'
@@ -578,6 +578,38 @@ export class MnemonSubagentCoordinator {
     }, runId, provider }, signal)
   }
 
+  async suggestEntities(parent: HostAgent, content: string, existingEntities: readonly string[], signal: AbortSignal): Promise<{ entities: string[] }> {
+    const schema = {
+      type: 'object',
+      properties: {
+        entities: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Up to 12 concise, canonical entity names (components, tools, files, people, projects, or specific domain terms) extracted from the memory content.',
+        },
+      },
+      required: ['entities'],
+      additionalProperties: false,
+    }
+    const persona = 'Extract concise, canonical entity names from the provided memory text. Prefer concrete objects, components, files, tools, people, projects, and specific technical terms that aid future exact recall. Preserve existing valid spellings when appropriate, avoid generic filler words, and return at most 12 entities through the result tool.'
+    const existingLine = existingEntities.length === 0 ? '' : `\nCurrent entities: ${existingEntities.join(', ')}`
+    const prompt = `Extract entities for this memory content:\n\n${content}${existingLine}`
+    const { result } = await this.delegate(parent, 'answer', 'Suggest memory entities', prompt, [], schema, signal, 'spawn', persona)
+    const raw = (result.structured as { entities?: unknown } | undefined)?.entities
+    const list = Array.isArray(raw) ? raw.filter((item): item is string => typeof item === 'string') : []
+    const seen = new Set<string>()
+    const entities: string[] = []
+    for (const item of list) {
+      const trimmed = item.normalize('NFKC').trim()
+      const key = trimmed.toLocaleLowerCase()
+      if (key === '' || seen.has(key)) continue
+      seen.add(key)
+      entities.push(trimmed)
+      if (entities.length >= 12) break
+    }
+    return { entities }
+  }
+
   async maintainMetadata(parent: HostAgent, memoryBodyIds: readonly string[], signal: AbortSignal): Promise<MemorySpaceMetadataMaintenanceResult> {
     const selected = [...new Set(memoryBodyIds.map(id => id.trim()).filter(Boolean))]
     if (selected.length === 0 || selected.length > 20) throw new Error('metadata maintenance requires 1 through 20 Memory Spaces')
@@ -760,38 +792,75 @@ export class MnemonSubagentCoordinator {
    * human reads it first.
    */
   async reconcile(graph: MnemonRuntimeGraph, scope: MemoryOperationScope, signal: AbortSignal, options: MnemonReconcileOptions = {}): Promise<MnemonReconcileResult> {
+    const reconcileScope = options.scope
     const machine = graph.packs.identity()
     const lease = graph.memoryComposition.acquire()
     let runtime: RuntimeMemorySnapshot
     let documents: DocumentSnapshot
+    let memorySpaces: MnemonReconcileMemorySpaceEvidence[] | undefined
     try {
       runtime = await graph.source('runtime', scope).forGeneration(lease.generation).read<RuntimeMemorySnapshot>('snapshot', null, signal)
-      documents = await graph.source('documents', scope).forGeneration(lease.generation).read<DocumentSnapshot>('snapshot', null, signal)
-        // A reconciliation that cannot read Documents still has the runtime memory to plan against.
-        .catch(() => emptyDocumentSnapshot(graph.directory, new Date().toISOString()))
+      documents = reconcileScope === 'working-rules'
+        ? emptyDocumentSnapshot(graph.directory, new Date().toISOString())
+        : await graph.source('documents', scope).forGeneration(lease.generation).read<DocumentSnapshot>('snapshot', null, signal)
+            // A reconciliation that cannot read Documents still has the runtime memory to plan against.
+            .catch(() => emptyDocumentSnapshot(graph.directory, new Date().toISOString()))
+      if (reconcileScope === 'memory-spaces') {
+        const msSession = graph.source('memory-spaces', scope).forGeneration(lease.generation)
+        const catalog = await msSession.read<MemorySpaceCatalog>('bodies', null, signal)
+        const writableIds = new Set(
+          catalog.items
+            .filter(body => body.active && body.provider.capabilities.writeMode === 'exact' && body.provider.capabilities.remember && body.provider.capabilities.forget)
+            .map(body => body.id),
+        )
+        const listed = writableIds.size === 0 ? { items: [] } : await msSession.read<{ items: Insight[] }>('list', { limit: 150, memoryBodyIds: [...writableIds] }, signal)
+        const bySpace = new Map<string, MnemonReconcileMemorySpaceEvidence>()
+        for (const body of catalog.items) {
+          if (writableIds.has(body.id)) bySpace.set(body.id, { id: body.id, name: body.name, insights: [] })
+        }
+        for (const item of listed.items) {
+          if (item.memoryBodyId !== undefined) bySpace.get(item.memoryBodyId)?.insights.push(item)
+        }
+        memorySpaces = [...bySpace.values()].filter(entry => entry.insights.length > 0)
+      }
     } finally { lease.release() }
-    const others = foreignMachines(runtime.entries, machine)
+    const others = reconcileScope === undefined || reconcileScope === 'working-rules' ? foreignMachines(runtime.entries, machine) : []
     const guidance = options.guidance?.trim() ?? ''
-    const opinions = pendingOpinions(graph.reviews.list().filter(review => review.runtimeStorageKind === runtime.storageKind))
+    const opinions = pendingOpinions(graph.reviews.list().filter(review =>
+      reconcileScope === undefined
+        ? review.runtimeStorageKind === runtime.storageKind
+        : (review.reconcileScope ?? (review.runtimeStorageKind === runtime.storageKind ? 'working-rules' : undefined)) === reconcileScope,
+    ))
     const evidence: MnemonReconcileEvidence = {
+      ...(reconcileScope === undefined ? {} : { scope: reconcileScope }),
       machine, runtime, documents, foreignMachines: others,
+      ...(memorySpaces === undefined ? {} : { memorySpaces }),
       ...(guidance === '' ? {} : { guidance }),
       ...(opinions.length === 0 ? {} : { opinions }),
     }
     const read = {
       ...(guidance === '' ? {} : { guided: true }),
     }
-    if (runtime.entries.length === 0) {
+    const empty = reconcileScope === 'memory-spaces'
+      ? (memorySpaces?.length ?? 0) === 0
+      : reconcileScope === 'documents'
+        ? documents.documents.every(document => document.status !== 'active')
+        : runtime.entries.length === 0
+    if (empty) {
       return { title: '', summary: '', action: 'none', operations: 0, foreignMachines: others, ...read, provider: 'host', runId: '' }
     }
-    const { schema, persona } = reconcileModelContract(runtime)
-    const delegated = await this.runtimeModel(scope, undefined, signal, 'reconcile', 'Reconcile local memory', reconcilePrompt(evidence), schema, persona)
+    const { schema, persona } = reconcileModelContract(runtime, reconcileScope)
+    const label = reconcileScope === 'memory-spaces' ? 'Reconcile memory spaces' : reconcileScope === 'documents' ? 'Reconcile workspace documents' : 'Reconcile local memory'
+    const delegated = await this.runtimeModel(scope, undefined, signal, 'reconcile', label, reconcilePrompt(evidence), schema, persona)
     const proposal = parseReconcileResult(delegated.result.structured, evidence)
     const result = { title: proposal.title, summary: proposal.summary, action: proposal.action, foreignMachines: others, ...read, provider: delegated.provider, runId: delegated.runId }
     if (proposal.action === 'failed') throw new Error('memory reconciliation could not plan against the merged evidence: ' + proposal.summary)
     if (proposal.operations.length === 0) return { ...result, action: 'none', operations: 0 }
-    const entry = graph.reviews.create({ title: proposal.title, summary: proposal.summary, machine: { id: machine.id, label: machine.label }, foreignMachines: others, operations: proposal.operations,
-      ...(runtime.storageKind === undefined ? {} : { runtimeStorageKind: runtime.storageKind }) })
+    const entry = graph.reviews.create({
+      title: proposal.title, summary: proposal.summary, machine: { id: machine.id, label: machine.label }, foreignMachines: others, operations: proposal.operations,
+      ...(reconcileScope === undefined ? {} : { reconcileScope }),
+      ...(runtime.storageKind === undefined || (reconcileScope !== undefined && reconcileScope !== 'working-rules') ? {} : { runtimeStorageKind: runtime.storageKind }),
+    })
     return { ...result, action: 'planned', operations: proposal.operations.length, entry }
   }
 

@@ -28,6 +28,8 @@ export interface MemorySpacesPageClient {
   deleteBody(memoryBodyId: string): Promise<MemorySpace>
   /** Ask every enabled Provider again for namespaces it gained; optional for page clients written against an older Source. */
   rediscoverBodies?(): Promise<MemorySpaceRediscovery>
+  /** AI-assisted entity extraction for edited memory content; optional when task agent is unavailable. */
+  suggestEntities?(content: string, existingEntities?: string[]): Promise<{ entities: string[] }>
 }
 
 export interface SearchResponse { results: Insight[]; sources?: MemoryReadSource[] }

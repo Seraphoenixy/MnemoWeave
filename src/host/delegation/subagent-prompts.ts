@@ -121,7 +121,6 @@ export const REQUEST_LABELS: Record<string, string> = {
   content: 'Content',
   category: 'Category',
   importance: 'Importance',
-  tags: 'Tags',
   entities: 'Entities',
   source: 'Source',
   memoryBodyId: 'Memory Space ID',

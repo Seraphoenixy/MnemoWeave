@@ -264,7 +264,7 @@ Provider 还可以实现可选的 `get(body, id, signal)`：返回空间中这�
 
 用户每次点击工作区顶栏的**刷新**，`refreshKey` 都会变化；配置页改变了页面要显示的内容时也会变化，例如切换组件、保存 Provider、同步、合并、导入 ZIP 或执行整理方案，页面隐藏时也可能变化。页面应在它变化时重新读取数据，而不是自己放置刷新或同步按钮。只有对话中的锚点（例如回合记忆栏里的一条内容）打开页面时，`navigationInput` 才是 `{ seed, nonce }`；点击标签页打开时没有它。默认 Source 把 seed 分别理解为档案 id（工作区档案选中它）、召回查询（记忆空间打开后立即执行）或条目文本（运行时记忆高亮并滚动到它）。新的 `nonce` 表示对同一 seed 的又一次请求。
 
-`dsh-mnemo-weave/client` 还导出默认 Source 使用的控件，让安装的 Source 与它们外观和行为一致：`SearchField`（带搜索图标的 DSH 输入框）、`SelectField`（带标签的 DSH 选择菜单，支持 `inline`、`size: 'sm'`、`hideLabel` 与 `ariaLabel`）、`WriteReceipt`（写入的结果、摘要与可选的查看操作）和 `TaskAgentTag`（任务 Agent 能否接手）。它们遵循[交互约定](workbench.md#ui-交互约定)。导入这些控件或读取 `refreshKey` 的 Source，应声明对其实际使用的 `dsh-mnemo-weave` 版本的 peer 依赖。传入 `unembedded` 时，`WriteReceipt` 会多一行说明这条记忆没有向量，`embeddingManaged` 决定它的措辞：`false` 表示 DSH 不管理 Mnemon Native 嵌入配置，显示中性的说明；`true` 或不传则显示嵌入没有成功的提醒。上游 0.5.31 及更早版本会忽略 `embeddingManaged`。
+`dsh-mnemo-weave/client` 还导出默认 Source 使用的控件，让安装的 Source 与它们外观和行为一致：`SearchField`（带搜索图标的 DSH 输入框）、`SelectField`（带标签的 DSH 选择菜单，支持 `inline`、`size: 'sm'`、`hideLabel` 与 `ariaLabel`）、`WriteReceipt`（写入的结果、摘要与可选的查看操作）和 `TaskAgentTag`（任务 Agent 能否接手）。它们遵循[交互约定](workbench.md#ui-交互约定)。`ProgressiveFooter` 用于长列表的末尾：它只画出读取下一页时的转圈，进入视野即调用 `onMore`，不显示剩余数量；`pageSize` 参数保留是为了让按旧签名调用的 Source 继续编译。导入这些控件或读取 `refreshKey` 的 Source，应声明对其实际使用的 `dsh-mnemo-weave` 版本的 peer 依赖。传入 `unembedded` 时，`WriteReceipt` 会多一行说明这条记忆没有向量，`embeddingManaged` 决定它的措辞：`false` 表示 DSH 不管理 Mnemon Native 嵌入配置，显示中性的说明；`true` 或不传则显示嵌入没有成功的提醒。上游 0.5.31 及更早版本会忽略 `embeddingManaged`。
 
 <a id="extensions-独立仓库验收"></a>
 

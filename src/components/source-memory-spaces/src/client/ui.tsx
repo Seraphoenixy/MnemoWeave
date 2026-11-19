@@ -6,7 +6,7 @@ import {
   createMemorySourcePageClient, installMemorySourceUI, MemorySourcePageFrame, translateEn, message, PageHeader,
   appearanceClass, type MemoryComponentUIContext, type MemorySourcePageProps, type MnemonSourceManagementClient, type MnemonTranslate,
 } from 'dsh-mnemo-weave/client'
-import type { Insight, MemorySpacesStatus } from '../contracts.ts'
+import type { Insight, MemorySpacesStatus, RememberRequest } from '../contracts.ts'
 import { OverviewPage, ExplorePage, EntitiesPage, RememberPage, ListPage, PersistenceStrategyDialog, type MemoryPlacementPageConfig } from './pages.tsx'
 import type { MemorySpacesPageClient } from './api.ts'
 
@@ -39,6 +39,9 @@ export function memorySpacesPageClient(management: MnemonSourceManagementClient)
     agentSearch: request => client.assist('agent-search', input(request), false),
     supervise: (content, idempotencyKey) => client.assist('supervise', input({ content, idempotencyKey }), true),
     maintainBodyMetadata: memoryBodyIds => client.assist('body-metadata-maintain', { memoryBodyIds }, true),
+    ...(client.canAssist('suggest-entities')
+      ? { suggestEntities: (content, existingEntities) => client.assist('suggest-entities', input({ content, ...(existingEntities === undefined ? {} : { existingEntities }) }), false) }
+      : {}),
   }
 }
 
@@ -93,7 +96,33 @@ function MemorySpacesSourceView(props: MemorySourcePageProps & { page: Page }): 
   const explore = (query: string) => { setSeed(query); setPage('explore') }
   const remember = (content = '') => { setSeed(content); setRememberOpen(true) }
   const forget = async (insight: Insight) => { await client.forget(insight.id, insight.memoryBodyId); refresh() }
+  const edit = async (insight: Insight, request: RememberRequest): Promise<Insight> => {
+    const response = await client.remember({
+      ...request,
+      replacesId: insight.id,
+      source: 'user',
+      ...(insight.memoryBodyId === undefined ? {} : { memoryBodyId: insight.memoryBodyId }),
+    })
+    const action = typeof response.action === 'string' ? response.action : undefined
+    if (action !== 'updated') {
+      const reason = typeof response.reason === 'string' ? response.reason : action ?? 'unknown'
+      if (reason === 'retirement-unconfirmed') refresh()
+      throw new Error(t('card.editFailed', { reason }))
+    }
+    refresh()
+    return {
+      ...insight,
+      id: typeof response.id === 'string' ? response.id : insight.id,
+      content: request.content.trim(),
+      ...(request.category === undefined ? {} : { category: request.category }),
+      ...(request.importance === undefined ? {} : { importance: request.importance }),
+      ...(request.entities === undefined ? {} : { entities: request.entities }),
+    }
+  }
   const bodies = status?.memoryBodies ?? []
+  const suggestEntities = client.suggestEntities === undefined
+    ? undefined
+    : async (content: string, existingEntities: string[]) => (await client.suggestEntities!(content, existingEntities)).entities
   const preferences = props.preferences
   return <>
     {error !== null && <div className={css.inlineError} role="alert">{error}</div>}
@@ -102,9 +131,9 @@ function MemorySpacesSourceView(props: MemorySourcePageProps & { page: Page }): 
       <div className={sidebarCss.memoryNavigation}><div className={sidebarCss.memoryTabs} role="tablist" aria-label={t('nav.memory.aria')}>{TABS.map(tab => <button key={tab.id} type="button" role="tab" aria-selected={page === tab.id} data-active={page === tab.id ? '' : undefined} onClick={() => setPage(tab.id)}>{t(tab.key)}</button>)}</div></div>
     </section>}
     {page === 'spaces' && <OverviewPage active={props.active ?? true} client={client} metadataClient={client} revision={revision} reloadKey={reloads} activationEnabled={activationEnabled} writeEnabled={writable} agentAvailable={agentAvailable} fallbackBodies={bodies} fallbackDirectory={status?.memoryBodyDirectory} catalogKnown={status?.memoryBodies !== undefined} onMutate={refresh} onAgentRefresh={refresh} onBodyReconnect={refresh} onBodyMetadata={refresh} onExplore={explore} />}
-    {page === 'explore' && <ExplorePage client={client} agentClient={client} agentAvailable={client.canAssist('agent-search')} status={status} seed={seed} writeEnabled={writable} onForget={forget} onRevealElement={revealElement} />}
-    {page === 'entities' && <EntitiesPage client={client} revision={revision} writeEnabled={writable} onForget={forget} onExplore={explore} />}
-    {page === 'content' && <ListPage client={client} revision={revision} writeEnabled={writable} onForget={forget} onClone={insight => remember(insight.content)} onExplore={explore} />}
+    {page === 'explore' && <ExplorePage client={client} agentClient={client} agentAvailable={client.canAssist('agent-search')} status={status} seed={seed} writeEnabled={writable} onForget={forget} onEdit={edit} {...(suggestEntities === undefined ? {} : { onSuggestEntities: suggestEntities })} onRevealElement={revealElement} />}
+    {page === 'entities' && <EntitiesPage client={client} revision={revision} writeEnabled={writable} onForget={forget} onEdit={edit} {...(suggestEntities === undefined ? {} : { onSuggestEntities: suggestEntities })} onExplore={explore} />}
+    {page === 'content' && <ListPage client={client} revision={revision} writeEnabled={writable} onForget={forget} onEdit={edit} {...(suggestEntities === undefined ? {} : { onSuggestEntities: suggestEntities })} onClone={insight => remember(insight.content)} onExplore={explore} />}
     {rememberOpen && <RememberPage client={client} agentAvailable={agentAvailable} memoryBodies={bodies} writeEnabled={writable} seed={seed} embeddingManaged={status?.embeddingManaged} onMutate={refresh} onClose={() => setRememberOpen(false)} onView={() => { setRememberOpen(false); setPage('content') }} />}
     {strategyOpen && preferences !== undefined && <PersistenceStrategyDialog client={client} settingsScope={{ setPath: async (path, value) => {
       if (path.length !== 1 || path[0] !== 'persistenceStrategy') throw new Error('Preference path is outside this Source')

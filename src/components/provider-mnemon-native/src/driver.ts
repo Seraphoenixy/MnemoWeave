@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { NORMALIZED_RELEVANCE_SCORE, type MemorySpaceNativeRunner, type MemoryProviderAdapter, type JsonValue, type Insight, type MemoryBody as MemorySpace, type MemoryBodyStats as MemorySpaceStats, type MemoryGraphEdge, type MemoryGraphNode, type MemoryGraphSnapshot, type MemoryListRequest, type EdgeType, type RememberRequest, type SearchRequest, type ProviderBodyStatus as ProviderSpaceStatus, type ProviderSearchResult } from 'dsh-mnemo-weave/provider-sdk'
+import { mergeEntitiesAndTags, NORMALIZED_RELEVANCE_SCORE, type MemorySpaceNativeRunner, type MemoryProviderAdapter, type JsonValue, type Insight, type MemoryBody as MemorySpace, type MemoryBodyStats as MemorySpaceStats, type MemoryGraphEdge, type MemoryGraphNode, type MemoryGraphSnapshot, type MemoryListRequest, type EdgeType, type RememberRequest, type SearchRequest, type ProviderBodyStatus as ProviderSpaceStatus, type ProviderSearchResult } from 'dsh-mnemo-weave/provider-sdk'
 
 /**
  * Output cap for the two whole-Store reads: the full readonly recall and the
@@ -58,9 +58,7 @@ function normalizeInsight(value: JsonValue): Insight | undefined {
     depth: number(item.depth),
   }
   for (const [key, value] of Object.entries(optionalNumbers)) if (value !== undefined) Object.assign(insight, { [key]: value })
-  const tags = stringArray(core.tags)
-  const entities = stringArray(core.entities)
-  if (tags !== undefined) insight.tags = tags
+  const entities = mergeEntitiesAndTags(stringArray(core.entities), stringArray(core.tags))
   if (entities !== undefined) insight.entities = entities
   return insight
 }
@@ -273,9 +271,7 @@ export class MnemonNativeProvider implements MemoryProviderAdapter {
 
   async remember(body: MemorySpace, request: RememberRequest, signal?: AbortSignal): Promise<JsonValue> {
     const args = ['remember', request.content, '--cat', request.category ?? 'general', '--imp', String(request.importance ?? 3), '--source', request.source ?? 'user']
-    const tags = commaList(request.tags, 'tags', 20)
-    const entities = commaList(request.entities, 'entities', 50)
-    if (tags !== undefined) args.push('--tags', tags)
+    const entities = commaList(mergeEntitiesAndTags(request.entities, request.tags), 'entities', 50)
     if (entities !== undefined) args.push('--entities', entities)
     return this.runner.runJson(args, { ...(signal === undefined ? {} : { signal }), store: body.id })
   }
@@ -330,14 +326,16 @@ export class MnemonNativeProvider implements MemoryProviderAdapter {
       writeFileSync(draftPath, JSON.stringify({
         schema_version: '1',
         source: 'dsh-mnemon-runtime-archive',
-        insights: batch.map(({ request }) => ({
-          content: request.content,
-          category: request.category,
-          importance: request.importance ?? 3,
-          source: request.source,
-          ...(request.tags === undefined ? {} : { tags: request.tags }),
-          ...(request.entities === undefined ? {} : { entities: request.entities }),
-        })),
+        insights: batch.map(({ request }) => {
+          const entities = mergeEntitiesAndTags(request.entities, request.tags)
+          return {
+            content: request.content,
+            category: request.category,
+            importance: request.importance ?? 3,
+            source: request.source,
+            ...(entities === undefined ? {} : { entities }),
+          }
+        }),
       }), { encoding: 'utf8', mode: 0o600 })
       const payload = await this.runner.runJson(['import', draftPath, '--no-diff'], { ...(signal === undefined ? {} : { signal }), store: body.id })
       const summary = record(payload)
@@ -400,6 +398,52 @@ export class MnemonNativeProvider implements MemoryProviderAdapter {
 
   forget(body: MemorySpace, id: string, signal?: AbortSignal): Promise<JsonValue> {
     return this.runner.runJson(['forget', id], { ...(signal === undefined ? {} : { signal }), store: body.id })
+  }
+
+  async migrateLegacyTags(body: MemorySpace, signal?: AbortSignal): Promise<{ migrated: number }> {
+    const payload = await this.runner.runJson(
+      ['--readonly', 'recall', '', '--basic', '--limit', '100000'],
+      { ...(signal === undefined ? {} : { signal }), store: body.id, maxOutputBytes: STORE_DUMP_MAX_OUTPUT_BYTES },
+    )
+    const values = Array.isArray(payload) ? payload : Array.isArray(record(payload)?.results) ? record(payload)!.results as JsonValue[] : []
+    const candidates: Array<Record<string, JsonValue>> = []
+    for (const item of values) {
+      const row = record(item)
+      const core = record(row?.insight) ?? row
+      if (core === undefined) continue
+      const rawTags = stringArray(core.tags)
+      if (rawTags === undefined || rawTags.length === 0) continue
+      const content = text(core.content)
+      if (content === undefined) continue
+      const entities = mergeEntitiesAndTags(stringArray(core.entities), rawTags) ?? []
+      const category = text(core.category)
+      const importance = number(core.importance)
+      const source = text(core.source)
+      const createdAt = text(core.created_at)
+      candidates.push({
+        content,
+        ...(category === undefined ? {} : { category }),
+        ...(importance === undefined ? {} : { importance }),
+        ...(source === undefined ? {} : { source }),
+        ...(createdAt === undefined ? {} : { created_at: createdAt }),
+        entities,
+        tags: [],
+      })
+    }
+    if (candidates.length === 0) return { migrated: 0 }
+    const temporary = mkdtempSync(join(tmpdir(), 'dsh-mnemon-tag-migration-'))
+    const draftPath = join(temporary, 'memory-draft.json')
+    try {
+      writeFileSync(draftPath, JSON.stringify({
+        schema_version: '1',
+        source: 'dsh-mnemon-tag-migration',
+        insights: candidates,
+      }), { encoding: 'utf8', mode: 0o600 })
+      await this.runner.runJson(['import', draftPath], { ...(signal === undefined ? {} : { signal }), store: body.id })
+      return { migrated: candidates.length }
+    } finally {
+      rmSync(temporary, { recursive: true, force: true })
+    }
   }
 
 }

@@ -271,6 +271,29 @@ export function normalizeEntityKey(entity: string): string {
   return entity.normalize('NFKC').trim().toLocaleLowerCase()
 }
 
+/** Merge entities and legacy tags into a deduplicated entity list (case/NFKC-insensitive). */
+export function mergeEntitiesAndTags(
+  entities?: readonly string[],
+  tags?: readonly string[],
+  limit = 50,
+): string[] | undefined {
+  const merged: string[] = []
+  const seen = new Set<string>()
+  for (const list of [entities, tags]) {
+    if (list === undefined) continue
+    for (const raw of list) {
+      if (typeof raw !== 'string') continue
+      const trimmed = raw.normalize('NFKC').trim()
+      const key = normalizeEntityKey(trimmed)
+      if (key === '' || seen.has(key)) continue
+      seen.add(key)
+      merged.push(trimmed)
+      if (merged.length >= limit) return merged
+    }
+  }
+  return merged.length === 0 ? undefined : merged
+}
+
 export interface Insight {
   id: string
   content: string
@@ -309,6 +332,7 @@ export interface SearchRequest {
   category?: Category
   source?: Source
   intent?: Intent
+  entities?: string[]
   memoryBodyIds?: string[]
   /**
    * A look at the memory rather than a use of it, such as the Memory System's

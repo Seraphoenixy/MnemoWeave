@@ -1100,6 +1100,11 @@ export class MnemonLifecycle {
     return this.runTaskAgent(sessionId, root, signal, agent => this.coordinator.placeProvider(agent, body, prepared, signal), undefined, 'Mnemon · Choose memory provider')
   }
 
+  suggestEntities(sessionId: string, content: string, existingEntities: readonly string[], workspaceRoot?: string, signal = new AbortController().signal) {
+    const root = workspaceRoot?.trim() || this.workspaceRoot(sessionId)
+    return this.runTaskAgent(sessionId, root, signal, agent => this.coordinator.suggestEntities(agent, content, existingEntities, signal), undefined, 'Mnemon · Suggest entities')
+  }
+
   maintainMetadata(sessionId: string, memoryBodyIds: readonly string[], workspaceRoot?: string, signal = new AbortController().signal) {
     const root = workspaceRoot?.trim() || this.workspaceRoot(sessionId)
     return this.runTaskAgent(sessionId, root, signal, agent => this.coordinator.maintainMetadata(agent, memoryBodyIds, signal), undefined, 'Mnemon · Memory metadata')
