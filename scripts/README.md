@@ -8,6 +8,8 @@ Most run through a `package.json` script. None of these files ships in an npm pa
 |---|---|---|---|
 | `link-bundle-declarations.mjs` | `pnpm build` | Points the root package's emitted `dsh-mnemo-weave/*` self-references at its bundled declarations | `tsconfig.json` paths |
 | `copy-component-assets.mjs` | `pnpm build` | Copies each component's presentation, locale and market files into `dist/components` | — |
+| `emit-build-marker.mjs` | `pnpm build` | Atomically writes `.cache/dsh-build-complete` after all build artifacts are emitted | — |
+| `watch-build.mjs` | `pnpm build:watch` | Watches `src/`, `tsdown.config.ts` and `package.json` and runs serialized `pnpm run build` | — |
 | `install-antigravity.mjs` | `pnpm antigravity:install` | Builds `dist/mnemo-weave-mcp.js` when missing (or with `--build`) and installs the Antigravity plugin bundle (`plugin.json`, `mcp_config.json`, `rules/AGENTS.md`, `skills/mnemo-weave/SKILL.md`) | `--target`, `--storage-scope`, `--storage-dir`, `--workspace`, `--data-dir`, `--sync-url`, `--sync-password`, `--build`, `--no-build`, `--dry-run` |
 | `install-antigravity.ps1` / `install-antigravity.sh` | PowerShell / POSIX shell | One-click wrapper that installs dependencies if missing, runs `pnpm build`, and installs the Antigravity plugin | Forwards flags to `install-antigravity.mjs` |
 

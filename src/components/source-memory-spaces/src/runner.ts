@@ -5,6 +5,7 @@ import type { ResolvedMemorySpacesConfig as ResolvedConfig } from './config.ts'
 import { ProcessError, runProcess, type ProcessFailureReason, type ProcessOptions, type ProcessRunner } from './providers/process.ts'
 import { withMemoryStorageLock } from 'dsh-mnemo-weave/extension-sdk'
 import { embeddingApiKey, type EmbeddingCredentialReader } from './embedding-credentials.ts'
+import { defaultLocalEmbeddingManager, type LocalEmbeddingOperationKind, type LocalEmbeddingServerManager } from './local-embedding-runtime.ts'
 import { findMnemonCommand, isMnemonExecutable, resolveMnemonInvocation } from './native-cli.ts'
 
 /** Why a CLI call failed where callers act on the cause; a call that ran and exited non-zero carries none. */
@@ -71,10 +72,31 @@ function processFailureMessage(error: unknown, args: readonly string[]): string 
   return `${detail}. ${hint}`
 }
 
+function embeddingOperationKind(args: readonly string[]): LocalEmbeddingOperationKind | undefined {
+  const command = args.find(arg => !arg.startsWith('-'))
+  if (command === 'embed') return 'embed'
+  if (command === 'remember' || command === 'search') return 'write-or-search'
+  return undefined
+}
+
 /** Preserve the Host environment while making saved embedding overrides authoritative. */
-async function processEnvironment(config: ResolvedConfig, read?: EmbeddingCredentialReader): Promise<NodeJS.ProcessEnv | undefined> {
+async function processEnvironment(
+  config: ResolvedConfig,
+  read?: EmbeddingCredentialReader,
+  localEndpoint?: string,
+): Promise<NodeJS.ProcessEnv | undefined> {
   if (!config.embedding.enabled) return undefined
   const inherited = Object.fromEntries(Object.entries(process.env).filter(([key]) => !EMBEDDING_ENVIRONMENT_KEYS.has(key.toUpperCase())))
+  if (config.embedding.runtime === 'llama-cpp') {
+    if (localEndpoint === undefined) return inherited
+    return {
+      ...inherited,
+      MNEMON_EMBED_ENDPOINT: localEndpoint,
+      MNEMON_EMBED_MODEL: config.embedding.localPreset,
+      MNEMON_EMBED_API_KEY: '',
+      MNEMON_EMBED_PROTOCOL: 'openai',
+    }
+  }
   return {
     ...inherited,
     MNEMON_EMBED_ENDPOINT: config.embedding.endpoint,
@@ -85,7 +107,12 @@ async function processEnvironment(config: ResolvedConfig, read?: EmbeddingCreden
   }
 }
 
-export function createRunner(config: ResolvedConfig, processRunner: ProcessRunner = runProcess, readCredential?: EmbeddingCredentialReader): MnemonRunner {
+export function createRunner(
+  config: ResolvedConfig,
+  processRunner: ProcessRunner = runProcess,
+  readCredential?: EmbeddingCredentialReader,
+  localEmbeddingManager: LocalEmbeddingServerManager = defaultLocalEmbeddingManager,
+): MnemonRunner {
   // Installation can change while DSH stays running. Status and execution
   // must resolve the same current executable, not a boot-time availability flag.
   const currentCommand = (): string => findMnemonCommand(config) ?? config.cliPath ?? 'mnemon'
@@ -120,27 +147,43 @@ export function createRunner(config: ResolvedConfig, processRunner: ProcessRunne
     if (options.signal?.aborted === true) throw new MnemonCliError(`mnemon command aborted: ${String(options.signal.reason ?? 'cancelled')}`, 'aborted')
     if (options.database !== undefined && !existsSync(options.database)) throw new MnemonCliError(`mnemon ${args.find(arg => !arg.startsWith('-')) ?? 'command'}: no database at ${options.database}`, 'no-database')
     const argv = options.globalFlags === false ? [...args] : [...globalArgs(options.store), ...args]
-    const environment = await processEnvironment(config, readCredential)
-    const safeError = (message: string): string => environment?.MNEMON_EMBED_API_KEY ? message.replaceAll(environment.MNEMON_EMBED_API_KEY, '[redacted]') : message
-    const processOptions: ProcessOptions = {
-      timeoutMs: options.timeoutMs ?? config.timeoutMs,
-      ...(environment === undefined ? {} : { env: environment }),
-      ...(options.signal === undefined ? {} : { signal: options.signal }),
-      ...(options.maxOutputBytes === undefined ? {} : { maxOutputBytes: options.maxOutputBytes }),
+    const runWithEndpoint = async (localEndpoint?: string): Promise<string> => {
+      const environment = await processEnvironment(config, readCredential, localEndpoint)
+      const safeError = (message: string): string => environment?.MNEMON_EMBED_API_KEY ? message.replaceAll(environment.MNEMON_EMBED_API_KEY, '[redacted]') : message
+      const processOptions: ProcessOptions = {
+        timeoutMs: options.timeoutMs ?? config.timeoutMs,
+        ...(environment === undefined ? {} : { env: environment }),
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+        ...(options.maxOutputBytes === undefined ? {} : { maxOutputBytes: options.maxOutputBytes }),
+      }
+      let result
+      try {
+        const invocation = resolveMnemonInvocation(currentCommand(), argv, environment)
+        result = await processRunner(invocation.command, invocation.args,
+          { ...processOptions, ...(invocation.env === undefined ? {} : { env: invocation.env }) })
+      } catch (error) {
+        throw new MnemonCliError(safeError(processFailureMessage(error, args)), error instanceof ProcessError ? error.reason : 'launch')
+      }
+      if (result.exitCode !== 0) {
+        const detail = safeError(result.stderr.trim() || result.stdout.trim() || 'no output')
+        throw new MnemonCliError(`mnemon ${args.join(' ')} exited ${String(result.exitCode)}: ${detail}`)
+      }
+      return result.stdout
     }
-    let result
+
+    const operationKind = embeddingOperationKind(args)
+    if (operationKind === undefined || !config.embedding.enabled || config.embedding.runtime !== 'llama-cpp') {
+      return runWithEndpoint(undefined)
+    }
     try {
-      const invocation = resolveMnemonInvocation(currentCommand(), argv, environment)
-      result = await processRunner(invocation.command, invocation.args,
-        { ...processOptions, ...(invocation.env === undefined ? {} : { env: invocation.env }) })
+      return await localEmbeddingManager.withServer(config.embedding, operationKind, runWithEndpoint, options.signal)
     } catch (error) {
-      throw new MnemonCliError(safeError(processFailureMessage(error, args)), error instanceof ProcessError ? error.reason : 'launch')
+      if (operationKind === 'write-or-search') {
+        // Graceful degradation: writes/searches still succeed without vectors if local runtime is not yet deployed.
+        return runWithEndpoint(undefined)
+      }
+      throw error
     }
-    if (result.exitCode !== 0) {
-      const detail = safeError(result.stderr.trim() || result.stdout.trim() || 'no output')
-      throw new MnemonCliError(`mnemon ${args.join(' ')} exited ${String(result.exitCode)}: ${detail}`)
-    }
-    return result.stdout
   }
 
   const execute = (

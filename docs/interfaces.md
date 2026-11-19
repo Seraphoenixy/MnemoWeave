@@ -88,7 +88,7 @@ DSH 工具统一使用 `mnemo_` 前缀。升级后，自定义提示词、Code M
 | `mnemo_memory_body_update` | 更新名称、说明或 active | `spawn` write worker |
 | `mnemo_memory_body_merge` | 非破坏性合并 Mnemon Native 记忆空间 | `spawn` write worker |
 
-worker 内调用同名工具时直接进入服务层，不再递归委派。
+worker 内或 MCP 中调用同名工具时直接进入服务层，不再递归委派。
 
 默认三层策略在当前视图提供 `remember` 时，会提示模型在结束回合前判断是否形成了经过验证、能改变未来做法的新经验。每条可以独立复用的经验可分别通过 `mnemo_remember` 保存。同一结论的根因、修复和适用条件应放在一起。两条经验均已持久化、ID 已核实、位于同一记忆空间，且明确的关系有助于未来召回时，可在视图和 Provider 支持的情况下调用 `mnemo_link`。模型应尊重用户不记录的要求，跳过重复、临时内容及仅从记忆检索出的事实。
 
@@ -236,7 +236,9 @@ Gateway 通过 Mnemon 在 `dshMnemon` 命名空间下的 `mnemonRemote` Typert �
 | `graph` / `bodies` / `body-directory` | active 多空间图谱投影、含 Provider 能力的记忆空间目录与快速目录投影 |
 | `body-reconnect` | 清除短期健康状态并刷新单个记忆空间，不修改持久数据 |
 | `provider-services` | 脱敏的 Provider 服务目录；可包含已配置的凭据字段名，绝不包含凭据值 |
+| `provider-service-check` | 在不修改已保存配置的前提下检查单个 Provider 的连通性（原生检查 CLI，第三方通过 `discover` 探测并返回可见记忆空间数或错误原因） |
 | `embedding-status` | Mnemon 嵌入模型与可用性，以及每个 Mnemon Native 空间的向量覆盖率和合计 |
+| `local-embedding-status` | 本地 `llama.cpp` 嵌入运行时（`llama-server`）、所选 GGUF 模型预设与本地端口健康状态 |
 | `list` / `entities` | 内容列表与实体聚合 |
 | `search` / `agent-search` / `related` | 直接检索、证据回答与关系遍历 |
 | `turn-activities` / `turn-activity` | 会话或单回合的记忆工具活动 |
@@ -264,9 +266,11 @@ Gateway 通过 Mnemon 在 `dshMnemon` 命名空间下的 `mnemonRemote` Typert �
 | `body-metadata-maintain` | 由任务 Agent 刷新 1 到 20 个 active 记忆空间的名称与说明 |
 | `provider-service-update` | 更新单个 Provider 服务；凭据仅在 Host 保存，响应脱敏 |
 | `embedding-fill` | 为一个 Mnemon Native 空间补齐缺少的向量，使用 Host 的存储根目录与嵌入设置；最多运行一分钟，每步最多十秒，返回补齐与仍缺少的数量 |
+| `local-embedding-deploy` | 一键下载并部署本地 `llama-server` 与所选 GGUF 嵌入模型（`qwen3-embedding:0.6b` 或 `qwen3-embedding:4b`），支持断点续传 |
+| `local-embedding-control` | 手动启动（`start`）或停止（`stop`）本地 `llama-server` 嵌入进程 |
 | `memory-activity-clear` | 删除记忆活动：删除所选工作区活动流与全局工作准则活动流当前已有的全部事件，各留一条清空事件，返回两者被删除的事件数。清空事件随活动同步传输，服务端据此丢弃被取代的批次；只读模式拒绝 |
 | `source-management-mutate` / `source-assistance` | 通用 Source 管理 mutation，以及按 Source 当前修订确认的 Host 辅助操作；技能管理的辅助操作是 `skill-draft`、`skill-backtest`、`skill-derive-cases` 与 `skill-review-now`，均由任务 Agent 执行 |
-| `version-update` | 更新明确组件；Host 固定命令与参数 |
+| `version-update` | 安装或更新明确组件（含 `mnemon` CLI 未安装时通过 `npm` 全局一键安装）；Host 固定命令与参数 |
 
 `provider-services` 通过读通道返回脱敏目录。设置编辑器只知道哪些凭据字段已经配置；保存新的值或显式清除字段，不回读已保存的凭据值。
 

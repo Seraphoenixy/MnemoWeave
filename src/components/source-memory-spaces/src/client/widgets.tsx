@@ -164,12 +164,16 @@ export function InsightCard(props: {
     }
   }
 
+  const initialCategory: Category = CATEGORIES.includes(insight.category as Category) ? (insight.category as Category) : 'general'
+  const initialImportance = typeof insight.importance === 'number' && insight.importance >= 1 && insight.importance <= 5 ? Math.round(insight.importance) : 3
+  const initialEntities = (insight.entities ?? []).map(value => value.trim()).filter(Boolean)
+
   const beginEdit = () => {
     if (!supportsEdit) return
     setEditContent(insight.content)
-    setEditCategory(CATEGORIES.includes(insight.category as Category) ? (insight.category as Category) : 'general')
-    setEditImportance(typeof insight.importance === 'number' && insight.importance >= 1 && insight.importance <= 5 ? Math.round(insight.importance) : 3)
-    setEditEntities((insight.entities ?? []).join(', '))
+    setEditCategory(initialCategory)
+    setEditImportance(initialImportance)
+    setEditEntities(initialEntities.join(', '))
     setEditError(null)
     setEditing(true)
   }
@@ -183,15 +187,21 @@ export function InsightCard(props: {
   }
 
   const trimmedContent = editContent.trim()
-  const canSubmitEdit = trimmedContent !== '' && trimmedContent !== insight.content
+  const parsedEntities = editEntities.split(',').map(value => value.trim()).filter(Boolean)
+  const entitiesChanged = parsedEntities.length !== initialEntities.length || parsedEntities.some((value, index) => value !== initialEntities[index])
+  const canSubmitEdit = trimmedContent !== '' && (
+    trimmedContent !== insight.content
+    || editCategory !== initialCategory
+    || editImportance !== initialImportance
+    || entitiesChanged
+  )
 
   const suggestEntities = async () => {
     if (props.onSuggestEntities === undefined || trimmedContent === '' || saving || suggestingEntities) return
     setSuggestingEntities(true)
     setEditError(null)
     try {
-      const current = editEntities.split(',').map(value => value.trim()).filter(Boolean)
-      const suggested = await props.onSuggestEntities(trimmedContent, current)
+      const suggested = await props.onSuggestEntities(trimmedContent, parsedEntities)
       setEditEntities(suggested.join(', '))
     } catch (reason) {
       setEditError(message(reason))
@@ -209,7 +219,7 @@ export function InsightCard(props: {
         content: trimmedContent,
         category: editCategory,
         importance: editImportance,
-        entities: editEntities.split(',').map(value => value.trim()).filter(Boolean),
+        entities: parsedEntities,
         source: 'user',
         ...(insight.memoryBodyId === undefined ? {} : { memoryBodyId: insight.memoryBodyId }),
       })

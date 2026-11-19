@@ -22,7 +22,7 @@ Codex 启动本机 stdio MCP 进程（`dist/mnemo-weave-mcp.js`），与 DSH 共
 
 MCP 进程注册 14 个工具，返回 JSON 格式的文本内容：
 
-- **工作准则**：`mnemo_working_rules`（只读，支持 `branch` 过滤）、`mnemo_runtime_memory`（`add` / `replace` / `remove`）。
+- **工作准则**：`mnemo_working_rules`（只读，按当前工作区的 Git 分支过滤，不接受输入参数）、`mnemo_runtime_memory`（`add` / `replace` / `remove`）。
 - **工作区档案**：`mnemo_document_search`（只读）、`mnemo_document_manage`（`create` / `update` / `archive`）。
 - **记忆空间**：`mnemo_memory_bodies`、`mnemo_status`、`mnemo_recall`、`mnemo_related`（以上只读）；`mnemo_remember`、`mnemo_link`、`mnemo_forget`、`mnemo_memory_body_create`、`mnemo_memory_body_update`、`mnemo_memory_body_merge`（以上写入）。
 
@@ -35,6 +35,8 @@ MCP 进程注册 14 个工具，返回 JSON 格式的文本内容：
 command = "node"
 args = ["<仓库绝对路径>/dist/mnemo-weave-mcp.js"]
 ```
+
+MCP 入口直接调用 Source，不读取 DSH profile 的 `writeEnabled`、`memoryTopology` 或 `excludedWorkspaces`，以默认配置运行。它没有 Agent 回合边界，Recall、Related 与 Document 检索的预算按 MCP 进程段计算；新建记忆空间默认未激活，需要显式调用 `mnemo_memory_body_update` 设置 `active: true` 后再写入。完整差异见[工具与命令参考](tools.md#mcp-入口的行为边界)。
 
 ### 验收
 
@@ -112,7 +114,9 @@ dsh plugin --profile web add "link:$($PWD.Path)"
 
 内置 Source、Strategy 和 Provider 使用 `dsh-mnemo-weave-` 包名前缀，由根 bundle 装配。此前若在 profile 中手工链接过旧包名，升级后可移除这些旧的本地链接。已有的条目 ID 和记忆存储目录继续使用。
 
-修改根插件源码后在仓库根目录运行 `pnpm build`。完整构建成功后会更新 `.cache/dsh-build-complete` 标记文件；运行中的插件每 500 毫秒检查该标记，并在变化时调用 `pluginManager.setBundleEnabled('dsh-mnemo-weave', true)` 请求 DSH 重新加载 bundle，结果写入宿主日志。WebUI 资源更新后可刷新页面。宿主报告 `restart-required` 时，重启 DSH 以加载本次构建。
+构建产物使用固定文件名：入口文件输出至 `dist/<entry>.js`，共享 chunk 输出至 `dist/chunks/<name>.js`（不带随机内容哈希），以保证 DSH HMR 在两次构建之间能按模块路径对比并回收旧模块。
+
+修改根插件源码后在仓库根目录运行 `pnpm build`，或在开发期间运行 `pnpm build:watch` 自动监听 `src/`、`tsdown.config.ts` 与 `package.json` 变更并串行重建。仅当全部产物与组件静态资源复制完成后，构建末尾才原子写入 `.cache/dsh-build-complete` 标记文件；运行中的插件每 500 毫秒检查该标记，并在构建产物齐备后调用 `pluginManager.setBundleEnabled('dsh-mnemo-weave', true)` 请求 DSH 重新加载 bundle，结果写入宿主日志。WebUI 资源更新后刷新页面即可加载新的客户端 bundle。宿主报告 `restart-required` 时，重启 DSH 以加载本次构建。
 
 设置环境变量 `DSH_MNEMO_WEAVE_HOT_RELOAD=0` 后启动 DSH，可关闭本地构建监听。
 

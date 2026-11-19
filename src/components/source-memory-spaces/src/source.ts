@@ -162,11 +162,25 @@ function managementResult(service: MemorySpacesService, value: unknown): MemoryS
   return { revision: service.memoryRevision(), value: value as MemoryJsonValue }
 }
 
+function localEmbeddingOverrides(input: Readonly<Record<string, MemoryJsonValue>>) {
+  const localPreset = text(input.localPreset, 'localPreset', 64, false)
+  const lifecycle = text(input.lifecycle, 'lifecycle', 64, false)
+  const localDevice = text(input.localDevice, 'localDevice', 32, false)
+  const llamaServerPath = input.llamaServerPath === undefined ? undefined : text(input.llamaServerPath, 'llamaServerPath', 1024, false) ?? ''
+  return {
+    ...(localPreset === 'qwen3-embedding:0.6b' || localPreset === 'qwen3-embedding:4b' ? { localPreset: localPreset as 'qwen3-embedding:0.6b' | 'qwen3-embedding:4b' } : {}),
+    ...(lifecycle === 'on-demand' || lifecycle === 'resident' || lifecycle === 'write-first-fill-later' ? { lifecycle: lifecycle as 'on-demand' | 'resident' | 'write-first-fill-later' } : {}),
+    ...(localDevice === 'auto' || localDevice === 'gpu' || localDevice === 'cpu' ? { localDevice: localDevice as 'auto' | 'gpu' | 'cpu' } : {}),
+    ...(llamaServerPath === undefined ? {} : { llamaServerPath }),
+  }
+}
+
 async function manageMemorySpaces(service: MemorySpacesService, request: MemorySourceManagementRequest): Promise<MemorySourceManagementResult> {
   const input = request.input === null ? {} : record(request.input, `Memory Spaces management ${request.operation}`)
   if (request.mode === 'read') {
     switch (request.operation) {
       case 'embedding-status': return managementResult(service, await service.embeddingStatus(request.signal))
+      case 'local-embedding-status': return managementResult(service, await service.localEmbeddingStatus(localEmbeddingOverrides(input)))
       case 'status-summary': return managementResult(service, service.statusSummary())
       case 'status': return managementResult(service, await service.status(request.signal))
       case 'body-directory': return managementResult(service, service.spaceDirectory())
@@ -174,6 +188,15 @@ async function manageMemorySpaces(service: MemorySpacesService, request: MemoryS
       // Management output is always sanitized. Configured secret names may be
       // shown, but credential values never cross the Host/Client boundary.
       case 'provider-services': return managementResult(service, service.memorySpaces.providerServices())
+      case 'provider-service-check': {
+        const providerId = text(input.providerId, 'providerId', 128)!
+        return managementResult(service, await service.checkProviderService(
+          providerId,
+          scalarRecord(input.settings, 'settings') ?? {},
+          stringArray(input.clearSecrets, 'clearSecrets', 100) ?? [],
+          request.signal,
+        ))
+      }
       case 'graph': return managementResult(service, await service.graph(request.signal, stringArray(input.memoryBodyIds, 'memoryBodyIds', 10_000)))
       case 'list': return managementResult(service, await service.list({
         ...(text(input.query, 'query', 2_000, false) === undefined ? {} : { query: text(input.query, 'query', 2_000, false)! }),
@@ -237,6 +260,12 @@ async function manageMemorySpaces(service: MemorySpacesService, request: MemoryS
   if (!request.confirmed) throw new Error('Memory Spaces management mutation requires explicit confirmation')
   switch (request.operation) {
     case 'embedding-fill': return managementResult(service, await service.embedMissing(text(input.memoryBodyId, 'memoryBodyId', 300)!, request.signal))
+    case 'local-embedding-deploy': return managementResult(service, await service.deployLocalEmbedding(localEmbeddingOverrides(input), request.signal))
+    case 'local-embedding-control': {
+      const action = text(input.action, 'action', 20)!
+      if (action !== 'start' && action !== 'stop') throw new Error(`Unsupported local embedding action: ${action}`)
+      return managementResult(service, await service.controlLocalEmbedding(action, localEmbeddingOverrides(input), request.signal))
+    }
     case 'migrate-legacy-tags': return managementResult(service, await service.migrateLegacyTags(text(input.memoryBodyId, 'memoryBodyId', 300, false), request.signal))
     case 'provider-service-update': {
       const providerId = text(input.providerId, 'providerId', 128)!

@@ -280,7 +280,7 @@ Host 调用 Mnemon CLI 时不经过 shell，限制每次调用的时间与输出
 | 设置看起来没有变化 | 开关与选择器立即生效，需要输入的值要点击**应用**；写入失败时控件旁会显示原因并恢复为已保存的值 |
 | 自定义目录被拒绝 | 使用绝对路径、`~` 或 `~/...` |
 | `memoryBodyId is required...` | active 数量不是恰好 1；显式选择目标 |
-| `memory space is not active for reading` | 在概览激活目标；写入 inactive 可以，读取不行 |
+| `memory space is not active for reading` | 在概览激活目标；用户/UI 发起的写入可以并会激活目标，模型工具的 `mnemo_remember` 与 `mnemo_link` 会拒绝未激活目标；读取需要先激活 |
 | Provider 错误 | 审查需要受 guard 保护的本地子 Agent；默认有界 `spawn`，可选择 `fork`。安装了 Team 工具时如需继续审查，可选择 `idleReview.agentTeams: scoped`，默认仍为 `pause`；重试前核对部分写入回执 |
 | 本地模型（例如 Ollama 上的 Qwen3.x）下空闲审查报 `no user query found in messages` | 工具结果填满模型的上下文窗口后，Ollama 截断时丢掉了子代理的任务提示。0.5.22 起，Mnemon 会给被拒的子代理步骤追加一条用户消息并重试（[#327](https://github.com/omdsh-dev/dsh-mnemon/issues/327)），请更新 dsh-mnemo-weave。调大 Ollama 的上下文长度（`OLLAMA_CONTEXT_LENGTH` 或模型的 `num_ctx`）也能避免截断。审查可能在失败前已创建工作区档案，请核对部分写入回执 |
 | 侧栏“未分组”下出现空的“未命名”会话，每运行一次记忆任务就多一些 | 上游 0.5.32 及更早版本没有给记忆任务（存入记忆、Agent 查询、档案归档、运行时记忆容量维护、记忆整理等）的任务 Agent 加上子代理来源标记，DSH 只要没有该会话的投影缓存记录，就把它当作对话列出（[#435](https://github.com/omdsh-dev/dsh-mnemon/issues/435)）。当前版本的任务记录显示方式取决于 DSH 客户端。已有的这些行会保留：dsh-mnemo-weave 不会删除它们，记忆数据不受影响。想隐藏某一行，在该行上使用“归档会话”；DSH 会把它保留在已归档筛选中，“取消归档”即可恢复 |

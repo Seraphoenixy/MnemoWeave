@@ -176,6 +176,19 @@ export interface UpdateMemoryProviderServiceRequest {
   clearSecrets?: string[]
 }
 
+export interface CheckMemoryProviderServiceRequest {
+  providerId: MemoryProviderId
+  settings?: MemoryProviderConnection
+  clearSecrets?: string[]
+}
+
+export interface MemoryProviderServiceCheckResult {
+  providerId: MemoryProviderId
+  healthy: boolean
+  spacesCount?: number
+  error?: string
+}
+
 export interface MemoryProviderRuntimeStatus {
   providerId: MemoryProviderId
   label: string
@@ -254,6 +267,18 @@ export interface MemorySpaceMetadataMaintenanceResult {
 
 export type Category = 'preference' | 'decision' | 'fact' | 'insight' | 'context' | 'general'
 export const CATEGORIES = ['preference', 'decision', 'fact', 'insight', 'context', 'general'] as const satisfies readonly Category[]
+export const CATEGORY_DESCRIPTIONS: Readonly<Record<Category, string>> = {
+  preference: 'user habits, communication/output style, or recurring workflow preferences',
+  decision: 'architecture/tool choices, trade-offs, design policies, or process standards',
+  fact: 'objective platform behavior, API/CLI semantics, file/environment facts, or hard constraints',
+  insight: 'troubleshooting cause-and-remedy lessons, diagnosed root causes, or reusable design patterns',
+  context: 'project/environment background, deployment setup, or situational scope',
+  general: 'durable notes that do not clearly fit a narrower category (default when omitted)',
+}
+export const CATEGORY_PARAMETER_DESCRIPTION =
+  'Memory category (defaults to "general" when omitted): '
+  + CATEGORIES.map(category => `${category} = ${CATEGORY_DESCRIPTIONS[category]}`).join('; ')
+  + '.'
 export type Source = 'user' | 'agent' | 'external'
 export const SOURCES = ['user', 'agent', 'external'] as const satisfies readonly Source[]
 export type EdgeType = 'temporal' | 'semantic' | 'causal' | 'entity'
@@ -264,11 +289,102 @@ export const INTENTS = ['WHY', 'WHEN', 'ENTITY', 'GENERAL'] as const satisfies r
 export type RecallRelevanceTier = 'high' | 'medium' | 'ranked' | 'low' | 'unknown'
 
 /**
+ * Unified entity extraction and validation contract shared across tool schemas
+ * (`mnemo_remember`, `reconcile`), delegated writer personas, and the UI entity
+ * suggestion subagent (`suggestEntities`).
+ */
+export const ENTITY_EXTRACTION_RULES =
+  'Short canonical named entities used as exact cross-session lookup keys: specific products, services, libraries, frameworks, components, modules, APIs/tools, symbols/identifiers, standards, people, organizations, project names, or established domain terms. Preserve the canonical language of the memory text (use Chinese for established Chinese domain or component names such as "记忆空间" or "工作流引擎"; keep English/code identifiers in their original form such as "SQLite", "MnemoWeave", "subagent.ts", or "w:numPr"; never translate Chinese terms into English or vice versa). One name per item, 2-48 characters (2-16 characters for pure Chinese terms), with no surrounding quotes or punctuation. Never output clauses, full sentences, questions, procedures, criteria, task-status phrases (such as "需确认" or "已修改"), bilingual parenthetical glosses (such as "系统提示词 (system prompt)" or "Foo (Bar)"), slash-separated alternatives ("A / B"), single characters (such as "如"), bare numbers ("1", "1."), numbered rule/item/step codes or ranges (such as "G1"-"G9", "G1-G9", "R1", "E1"), generic filler words (such as "code", "file", "project", "issue", "data", "memory", "代码", "文件", "系统", "数据", "规则", "问题"), local filesystem paths, working directories, file:// URIs, full URLs, raw IDs/hashes, or timestamps. Fewer is better: return [] rather than padding with paraphrased text from the memory content.'
+
+/**
+ * What an entity name may be, stated for the model that supplies one. Entities are lookup
+ * keys: a clause, a sentence, a local path, a bare number, a short item code, or a generic
+ * word arrives at recall as noise. The write path enforces the same rule (`canonicalEntityName`),
+ * so this wording and the enforcement cannot drift apart.
+ */
+export const ENTITY_PARAMETER_DESCRIPTION = `${ENTITY_EXTRACTION_RULES} Write paths filter supplied values through canonicalEntityName and drop rejected items.`
+
+/**
  * One spelling-insensitive key per entity. The Host's entity index and the Client's graph
  * both count an entity's memories by it, so their numbers agree.
  */
 export function normalizeEntityKey(entity: string): string {
   return entity.normalize('NFKC').trim().toLocaleLowerCase()
+}
+
+const LOCAL_FILESYSTEM_PATH_RE = /^(?:[a-zA-Z]:[\\/]|\\\\[^\\]+\\[^\\]+|~(?:[\\/]|$)|file:\/\/|\/(?:Users|home|root|mnt|Volumes|tmp|var|opt|etc|usr|bin|sbin|private|workspace|workspaces|projects?)(?:\/|$))/i
+
+/** Whether a value names a machine-local location rather than an entity. */
+export function isLocalFilesystemPathEntity(value: string): boolean {
+  return LOCAL_FILESYSTEM_PATH_RE.test(value)
+}
+
+const NON_CANONICAL_ENTITY_PATTERNS = [
+  /\s*[（(][^）)]{2,}[）)]$/u, // Bilingual parenthetical glosses like "系统提示词 (system prompt)" or "Foo（Bar）"
+  /\s+\/\s+/u, // Slash-separated alternatives like "A / B"
+  /[。？！?!，、；：,;「」『』“”]/u, // Sentence/clause punctuation or CJK quotes anywhere
+  /^[""''（）(【】\[\]]|[.""''（）【】\[\]]$/u, // Surrounding quotes/brackets or trailing period
+  /(?<!\()\)$/u, // Trailing closing parenthesis unless part of empty symbol suffix like "scan()"
+]
+
+const MIN_ENTITY_LENGTH = 2
+const MAX_ENTITY_LENGTH = 48
+/**
+ * Pure-Han terms above this length are typically descriptive phrases lifted from the
+ * memory text rather than canonical domain names. 16 Han characters accommodates
+ * multi-word Chinese proper/domain names while rejecting long clauses.
+ */
+const MAX_HAN_ENTITY_LENGTH = 16
+const HAN_CLAUSE_MARKER_RE = /(?:是否|没有|不要|不能|不得|不可|中的|如果|因为|所以|以及|或者|而且)/u
+const ITEM_CODE_RANGE_RE = /^[A-Za-z]{1,2}\d+\s*[-–—~～]\s*[A-Za-z]{0,2}\d+$/u
+const SINGLE_LETTER_ITEM_CODE_RE = /^[A-Za-z]-?\d{1,3}$/u
+const CANONICAL_SHORT_ALPHANUMERIC_ALLOWLIST = new Set(['s3', 'v8'])
+const GENERIC_ENTITY_WORDS = new Set([
+  'code', 'file', 'files', 'project', 'projects', 'bug', 'bugs', 'issue', 'issues',
+  'system', 'systems', 'data', 'memory', 'memories', 'rule', 'rules', 'config',
+  'configuration', 'state', 'status', 'test', 'tests', 'doc', 'docs', 'document',
+  'documents', 'task', 'tasks', 'error', 'errors', 'info', 'item', 'items', 'list',
+  'text', 'content', 'input', 'output', 'result', 'results', 'note', 'notes',
+  'user', 'users', 'agent', 'model', 'tool', 'tools', 'app', 'service', 'module',
+  'component', 'feature', 'check', 'review', 'change', 'update', 'fix', 'work',
+  'step', 'steps', 'type', 'name', 'value', 'key', 'id', 'tbd',
+  '代码', '文件', '项目', '问题', '系统', '数据', '规则', '内容', '配置', '状态',
+  '测试', '文档', '记忆', '任务', '流程', '需求', '输入', '输出', '结果', '段落',
+  '表格', '序号', '陷阱', '安装包', '需确认', '已修改', '错误', '信息', '用户',
+  '模型', '工具', '模块', '组件', '功能', '检查', '审查', '修改', '更新', '修复',
+  '方法', '步骤', '类型', '名称', '字段', '格式', '示例', '说明', '备注', '单元格',
+  '规范', '要求', '标准', '条目', '列表', '通用',
+])
+
+/** Whether a value is too short/long, punctuated, parenthetical, or clause-like to serve as a canonical name. */
+export function isNonCanonicalEntity(value: string): boolean {
+  const codePointLength = [...value].length
+  if (codePointLength < MIN_ENTITY_LENGTH || value.length > MAX_ENTITY_LENGTH) return true
+  if (NON_CANONICAL_ENTITY_PATTERNS.some(pattern => pattern.test(value))) return true
+  if (/^[\u3400-\u9fff]+$/u.test(value)) {
+    if (codePointLength > MAX_HAN_ENTITY_LENGTH) return true
+    if (codePointLength >= 4 && HAN_CLAUSE_MARKER_RE.test(value)) return true
+  }
+  return false
+}
+
+/**
+ * One canonical entity name, or undefined when the value is too short, a clause,
+ * a sentence, a local path, a number, a short item code, a generic filler word,
+ * or an otherwise unusable anchor. Both the suggestion path and the write path use
+ * it, so a caller cannot store what the extractor would have rejected.
+ */
+export function canonicalEntityName(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined
+  const trimmed = raw.normalize('NFKC').trim()
+  if (trimmed === '') return undefined
+  if (isLocalFilesystemPathEntity(trimmed) || isNonCanonicalEntity(trimmed)) return undefined
+  if (/^[\d.\-–—_/:]+$/u.test(trimmed)) return undefined
+  if (ITEM_CODE_RANGE_RE.test(trimmed)) return undefined
+  const lowered = trimmed.toLocaleLowerCase()
+  if (SINGLE_LETTER_ITEM_CODE_RE.test(trimmed) && !CANONICAL_SHORT_ALPHANUMERIC_ALLOWLIST.has(lowered)) return undefined
+  if (GENERIC_ENTITY_WORDS.has(lowered)) return undefined
+  return trimmed
 }
 
 /** Merge entities and legacy tags into a deduplicated entity list (case/NFKC-insensitive). */
@@ -557,6 +673,15 @@ export const EMBEDDING_PROTOCOL_OPENAI = 'openai'
 export const DEFAULT_EMBEDDING_PROTOCOL = EMBEDDING_PROTOCOL_AUTO
 /** Wire protocols accepted by the embedding protocol override; single source for schema, resolver, and UI validation. */
 export const MNEMON_EMBEDDING_PROTOCOLS = [EMBEDDING_PROTOCOL_AUTO, EMBEDDING_PROTOCOL_OLLAMA, EMBEDDING_PROTOCOL_OPENAI] as const
+export const MNEMON_EMBEDDING_RUNTIMES = ['external', 'llama-cpp'] as const
+export const LOCAL_EMBEDDING_PRESETS = ['qwen3-embedding:0.6b', 'qwen3-embedding:4b'] as const
+export const LOCAL_EMBEDDING_LIFECYCLES = ['on-demand', 'resident', 'write-first-fill-later'] as const
+export const LOCAL_EMBEDDING_DEVICES = ['auto', 'gpu', 'cpu'] as const
+
+export const DEFAULT_EMBEDDING_RUNTIME = 'external' as const
+export const DEFAULT_LOCAL_EMBEDDING_PRESET = 'qwen3-embedding:0.6b' as const
+export const DEFAULT_LOCAL_EMBEDDING_LIFECYCLE = 'on-demand' as const
+export const DEFAULT_LOCAL_EMBEDDING_DEVICE = 'auto' as const
 
 
 export interface RecallQualityConfig {
@@ -587,10 +712,26 @@ export interface ResolvedRecallQualityConfig {
 
 
 export type MnemonEmbeddingProtocol = (typeof MNEMON_EMBEDDING_PROTOCOLS)[number]
+export type MnemonEmbeddingRuntime = (typeof MNEMON_EMBEDDING_RUNTIMES)[number]
+export type LocalEmbeddingPreset = (typeof LOCAL_EMBEDDING_PRESETS)[number]
+export type LocalEmbeddingLifecycle = (typeof LOCAL_EMBEDDING_LIFECYCLES)[number]
+export type LocalEmbeddingDevice = (typeof LOCAL_EMBEDDING_DEVICES)[number]
 
 export interface MnemonEmbeddingConfig {
   /** When false or omitted, Mnemon keeps its inherited environment and built-in defaults. */
   enabled?: boolean
+  /** 'external' uses endpoint/protocol; 'llama-cpp' manages a local llama-server without Ollama. */
+  runtime?: MnemonEmbeddingRuntime
+  /** Local GGUF preset when runtime is 'llama-cpp'. */
+  localPreset?: LocalEmbeddingPreset
+  /** Process lifecycle strategy for local llama-server: on-demand, resident, or write-first-fill-later. */
+  lifecycle?: LocalEmbeddingLifecycle
+  /** Inference device for local llama-server: auto, gpu, or cpu. */
+  localDevice?: LocalEmbeddingDevice
+  /** Optional port override for local llama-server. */
+  localPort?: number
+  /** Optional explicit path to an existing llama-server executable. */
+  llamaServerPath?: string
   endpoint?: string
   model?: string
   /** Legacy inline key. New settings writes move it to the Host credentials store. */
@@ -605,12 +746,48 @@ export interface MnemonEmbeddingConfig {
 
 export interface ResolvedMnemonEmbeddingConfig {
   enabled: boolean
+  runtime: MnemonEmbeddingRuntime
+  localPreset: LocalEmbeddingPreset
+  lifecycle: LocalEmbeddingLifecycle
+  localDevice: LocalEmbeddingDevice
+  localPort?: number
+  llamaServerPath?: string
   endpoint: string
   model: string
   apiKey: string
   apiKeyEnv?: string
   apiKeyRef?: string
   protocol: MnemonEmbeddingProtocol
+}
+
+export interface LocalEmbeddingPresetStatus {
+  id: LocalEmbeddingPreset
+  label: string
+  fileName: string
+  installed: boolean
+  sizeBytes?: number
+}
+
+export interface LocalEmbeddingRuntimeStatus {
+  preset: LocalEmbeddingPreset
+  lifecycle: LocalEmbeddingLifecycle
+  device: LocalEmbeddingDevice
+  port: number
+  endpoint: string
+  serverInstalled: boolean
+  serverPath?: string
+  modelInstalled: boolean
+  modelPath: string
+  modelSizeBytes?: number
+  running: boolean
+  healthy: boolean
+  presets: LocalEmbeddingPresetStatus[]
+}
+
+export interface LocalEmbeddingDeployResult {
+  status: LocalEmbeddingRuntimeStatus
+  downloadedServer: boolean
+  downloadedModel: boolean
 }
 
 /** Settings readback metadata only; never persisted as embedding configuration. */

@@ -29,8 +29,8 @@ const LENT: Readonly<Record<string, Lent>> = {
   'source-memory-spaces': {
     reads: ['embedding', 'storageScope', 'writeEnabled'],
     owns: ['embedding'],
-    read: ['status-summary', 'embedding-status', 'provider-services'],
-    write: ['embedding-fill', 'provider-service-update'],
+    read: ['status-summary', 'embedding-status', 'local-embedding-status', 'provider-services', 'provider-service-check', 'versions'],
+    write: ['embedding-fill', 'local-embedding-deploy', 'local-embedding-control', 'provider-service-update', 'version-update'],
     // An embedding test checks the connection as it is now, so it always asks the Host.
     join: ['status-summary', 'provider-services'],
   },

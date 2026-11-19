@@ -39,7 +39,7 @@ export function threeTierGuidance(available: {
     ...(available.recall || available.remember || available.link ? [[
       '### Memory Spaces — durable lessons and history',
       ...(available.recall ? [`Use mnemo_recall for focused historical questions and verify relevance. ${TROUBLESHOOTING_RECALL} If a hit points to a project document and exact wording matters, read the original record.`] : []),
-      ...(available.remember ? [`Before finishing, proactively record distinct, verified lessons (cause + remedy, tested workaround, or trade-off with clear conditions) with mnemo_remember without waiting to be asked. ${REUSABLE_LESSON_CONTENT} Respect requests not to remember; skip guesses, routine progress, secrets, and duplicates (check via recall when available), and confirm from receipt.`] : []),
+      ...(available.remember ? [`Before finishing, proactively record distinct, verified lessons, decisions, or durable facts (cause + remedy, tested workaround, platform constraint, or trade-off with clear conditions) with mnemo_remember without waiting to be asked. ${REUSABLE_LESSON_CONTENT} Choose the narrowest accurate category (decision, fact, insight, preference, context, or general) rather than defaulting to insight. Respect requests not to remember; skip guesses, routine progress, secrets, and duplicates (check via recall when available), and confirm from receipt.`] : []),
       ...(available.link ? ['Use mnemo_link only between persisted, verified IDs in the same link-capable Memory Space when the relationship improves recall; confirm from receipt.'] : []),
     ].join('\n\n')] : []),
   ]

@@ -48,6 +48,31 @@ export class ActivityStore {
     try { this.save(value) } catch { console.error('MnemoWeave could not persist a memory activity event') }
   }
 
+  /** Store a local-only diagnostic/failure detail for an event (never synced across machines). */
+  recordDetail(id: string, detail: string): void {
+    const trimmed = detail.trim()
+    if (!trimmed) return
+    try {
+      const parsedId = activityId.parse(id)
+      const bounded = trimmed.length <= 2000 ? trimmed : `${trimmed.slice(0, 1999)}…`
+      publishActivityFile(this.detailFile(parsedId), bounded, true)
+    } catch {
+      // Local detail is best-effort and must never fail the activity record itself.
+    }
+  }
+
+  readDetail(id: string): string | undefined {
+    try {
+      const parsedId = activityId.parse(id)
+      const file = this.detailFile(parsedId)
+      if (!existsSync(file)) return undefined
+      const text = readFileSync(file, 'utf8').trim()
+      return text === '' ? undefined : text
+    } catch {
+      return undefined
+    }
+  }
+
   /**
    * End the activity recorded at or before `before`, and publish the clear so
    * another client ends the same events.
@@ -78,6 +103,7 @@ export class ActivityStore {
       if ((event.at ?? 0) > before) continue
       rmSync(this.eventFile(id), { force: true })
       rmSync(join(this.directory, 'local', id), { force: true })
+      rmSync(this.detailFile(id), { force: true })
       removed += 1
     }
     // Only a clear that removed something, or that moves the boundary later,
@@ -106,6 +132,7 @@ export class ActivityStore {
       if (event.kind === 'clear' || (event.at ?? 0) > before) continue
       rmSync(this.eventFile(id), { force: true })
       rmSync(join(this.directory, 'local', id), { force: true })
+      rmSync(this.detailFile(id), { force: true })
       removed += 1
     }
     return removed
@@ -141,5 +168,9 @@ export class ActivityStore {
 
   private eventFile(id: string): string {
     return join(this.directory, 'events', activityId.parse(id) + '.json')
+  }
+
+  private detailFile(id: string): string {
+    return join(this.directory, 'details', activityId.parse(id) + '.txt')
   }
 }

@@ -1,4 +1,4 @@
-import { mergeEntitiesAndTags, normalizeEntityKey, type Insight } from './contracts.ts'
+import { canonicalEntityName, mergeEntitiesAndTags, normalizeEntityKey, type Insight } from './contracts.ts'
 import { lexicalSearchTokens } from './search-tokens.ts'
 
 /**
@@ -57,10 +57,27 @@ export function entityIdfWeight(index: SpaceEntityIndex, key: string): number {
   return Math.log((total + 1) / (df + 1)) + 1
 }
 
+const SHORT_ASCII_KEY_RE = /^[\x20-\x7e]{1,3}$/u
+const SHORT_ALPHANUMERIC_KEY_RE = /^(?=.*\d)[a-z0-9._-]{1,4}$/u
+const SIMPLE_WORD_KEY_RE = /^[a-z0-9_-]+$/u
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function matchesAsciiBoundary(normalizedQuery: string, key: string): boolean {
+  return new RegExp(`(?<![a-z0-9_])${escapeRegExp(key)}(?![a-z0-9_])`, 'u').test(normalizedQuery)
+}
+
+function requiresWholeTokenMatch(key: string): boolean {
+  return SHORT_ASCII_KEY_RE.test(key) || SHORT_ALPHANUMERIC_KEY_RE.test(key)
+}
+
 /**
  * Identify normalized entity keys in `index` that appear in `query`.
- * Matches exact entity keys against query substrings (for multi-word / CJK entities)
- * or lexical search tokens, ordered by descending IDF specificity.
+ * Short ASCII keys and digit-bearing short codes require whole-token / boundary
+ * matches so they do not match inside unrelated words; longer ASCII keys and CJK
+ * domain terms also match substrings, ordered by descending IDF specificity.
  */
 export function matchQueryEntityKeys(index: SpaceEntityIndex, query: string): string[] {
   const normalizedQuery = normalizeEntityKey(query)
@@ -68,7 +85,12 @@ export function matchQueryEntityKeys(index: SpaceEntityIndex, query: string): st
   const tokens = new Set(lexicalSearchTokens(query, 64))
   const matched: string[] = []
   for (const key of index.byKey.keys()) {
-    if (key.length < 2) continue
+    if (key.length < 2 || canonicalEntityName(key) === undefined) continue
+    if (requiresWholeTokenMatch(key)) {
+      const hit = SIMPLE_WORD_KEY_RE.test(key) ? tokens.has(key) : matchesAsciiBoundary(normalizedQuery, key)
+      if (hit) matched.push(key)
+      continue
+    }
     if (tokens.has(key) || normalizedQuery.includes(key)) {
       matched.push(key)
     }

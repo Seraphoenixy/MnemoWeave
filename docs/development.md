@@ -11,7 +11,8 @@
 | 命令 | 用途 |
 |---|---|
 | `pnpm typecheck` | 检查根包和仓库内 TypeScript 引用 |
-| `pnpm build` | 构建根包。构建全部组件再运行 `pnpm -r build` |
+| `pnpm build` | 构建根包（固定入口与 `dist/chunks/*.js` 文件名，并在末尾写入热重载标记）。构建全部组件再运行 `pnpm -r build` |
+| `pnpm build:watch` | 监听 `src/`、`tsdown.config.ts` 与 `package.json` 变更并串行重建，配合 DSH 本地热重载使用 |
 | `pnpm test` | 运行 `tests/unit`：单模块行为的用例，不起服务或宿主 |
 | `pnpm test:integration` | 运行 `tests/integration`：真实同步服务、Host 与 Pack 的组合用例 |
 | `pnpm verify:docs` | 校验本地 Markdown 链接及锚点 |
@@ -74,7 +75,7 @@ src/
     protocol.ts  服务端与客户端共用的同步协议
     server/      HTTP 请求处理、存储接口、SQLite 实现
     client/      快照协调、远端接口、HTTP 客户端、本地状态文件
-scripts/         build-time tooling: bundle declarations, component assets, Antigravity installer
+scripts/         build-time tooling: bundle declarations, component assets, reload marker/watch, Antigravity installer
 tests/           unit, integration and check cases (see tests/README.md)
 cordis.patch.yml   default Starter composition
 ```

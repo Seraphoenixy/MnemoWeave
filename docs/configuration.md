@@ -103,7 +103,7 @@ mnemon:
 | `runtimeMemory.memoryLimitBytes` | `10240` | 1–1048576 字节 | 完整 `MEMORY.md` 投影的 UTF-8 字节上限 |
 | `runtimeMemory.userLimitBytes` | `4096` | 1–1048576 字节 | 旧用户画像配额，与工作记忆配额相加后作为共享上限 |
 | `runtimeMemory.maintenanceMaxTokens` | `8192` | 1–1000000 tokens | Runtime 迁移与压缩 worker 的完成 token 预算；不改变工作区档案归档与元信息维护预算 |
-| `embedding` | `{ enabled: false, endpoint: http://localhost:11434, model: nomic-embed-text, apiKey: '', protocol: auto }` | enabled + HTTP(S) endpoint + model + 可选 apiKey + protocol（auto/ollama/openai） | 开启后，Host 为每个 Mnemon CLI 子进程注入保存的 endpoint、模型、API Key 与协议覆盖；endpoint 以 `/v1` 结尾时 Mnemon 自动使用 OpenAI 兼容协议并以 Bearer 头携带 apiKey，`protocol: openai` 可对非 `/v1` 端点显式指定；关闭后不干预既有 Host 环境和 Mnemon 默认值 |
+| `embedding` | `{ enabled: false, runtime: external, localPreset: 'qwen3-embedding:0.6b', lifecycle: on-demand, localDevice: auto, endpoint: http://localhost:11434, model: nomic-embed-text, apiKey: '', protocol: auto }` | enabled + runtime（`external`/`llama-cpp`）+ localPreset（`qwen3-embedding:0.6b`/`qwen3-embedding:4b`）+ lifecycle（`on-demand`/`resident`/`write-first-fill-later`）+ localDevice（`auto`/`gpu`/`cpu`）+ 可选 `localPort`/`llamaServerPath` + HTTP(S) endpoint + model + 可选 apiKey + protocol（auto/ollama/openai） | 开启后，支持 `runtime: llama-cpp`（本地 `llama-server` 按需/常驻/先写后补，无需 Ollama，支持一键部署）或 `runtime: external`（注入保存的 endpoint、模型、API Key 与协议覆盖）；关闭后不干预既有 Host 环境和 Mnemon 默认值 |
 | `memoryTopology.layers.<id>.enabled` | 三个默认层为 `true` | boolean | 旧版记忆层标记。记忆组合中 Source 的开关会打开或关闭它的 DSH Entry，并同时恢复这个标记；读不到组件时才使用它。关闭 Source 不会删除或迁移数据 |
 | `memoryTopology.layers.<id>.participation` | 每层各自的默认值 | `recall`、`write`、`projection`、`maintenance` 分别取 `off` / `manual` / `automatic` | 分层策略下每一层如何参与各类工作 |
 | `memoryView.strategyTypeId` | 未设置 | Strategy type id，例如 `default-three-tier` 或 `general` | 当前选择的主策略，由**主策略**选择器写入，优先于 `memoryTopology.strategyId` |
@@ -176,12 +176,34 @@ mnemon:
 
 ### Mnemon Native 嵌入
 
-从 Finder 或 Dock 启动的 macOS 应用通常不会继承交互式 shell 启动文件。在 Mnemon Native 中开启“由 DSH 管理嵌入配置”，即可让保存值成为每个 Mnemon 子进程的权威配置：
+从 Finder 或 Dock 启动的 macOS 应用通常不会继承交互式 shell 启动文件。在 Mnemon Native 中开启“由 DSH 管理嵌入配置”，即可让保存值成为每个 Mnemon 子进程的权威配置。支持两种运行方式：
+
+1. **本地 `llama.cpp`（`runtime: llama-cpp`，无需 Ollama）**：
+   - **模型预设（`localPreset`）**：支持 `qwen3-embedding:0.6b`（`Qwen3-Embedding-0.6B-Q8_0.gguf`，默认端口 `8911`）和 `qwen3-embedding:4b`（`Qwen3-Embedding-4B-Q4_K_M.gguf`，默认端口 `8912`）。
+   - **一键部署**：在设置页点击「检查本地部署」与「一键部署」，自动从 `ggml-org/llama.cpp` Releases（含 `nightly-tag.txt` 指针回退）下载解压 `llama-server` 至 `~/.mnemon/local-embedding/bin`，并从 `hf-mirror.com` 支持断点续传下载所选 GGUF 模型至 `~/.mnemon/local-embedding/models`；也可通过 `llamaServerPath` 指定本机已有的 `llama-server` 可执行文件。
+   - **运行策略（`lifecycle`）**：
+     - `on-demand`（按需启动，默认）：在执行 `remember`、`search`、`embed` 时自动拉起 `llama-server`（`--embedding --pooling last`），调用完成后自动停止进程释放内存/显存。
+     - `resident`（常驻后台）：首次调用或手动启动后保持进程常驻，后续请求低延迟复用，直到手动停止或宿主退出。
+     - `write-first-fill-later`（先写后补）：日常 `remember` / `search` 不启动 `llama-server`（记忆直接落盘并标记 `embedded: false`），仅在执行「测试状态」或「补齐向量」（`embed`）时按需拉起并在补齐后自动停止。
+   - **推理设备（`localDevice`）**：`auto`（探测 GPU offload）、`gpu`（`-ngl 99`）或 `cpu`（`-ngl 0`）。
 
 ```yaml
 mnemon:
   embedding:
     enabled: true
+    runtime: llama-cpp
+    localPreset: qwen3-embedding:0.6b
+    lifecycle: on-demand
+    localDevice: auto
+```
+
+2. **外部 HTTP 服务（`runtime: external`）**：
+
+```yaml
+mnemon:
+  embedding:
+    enabled: true
+    runtime: external
     endpoint: http://127.0.0.1:11434
     model: qwen3-embedding:0.6b
 ```

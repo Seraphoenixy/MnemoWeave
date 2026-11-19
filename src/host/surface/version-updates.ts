@@ -552,7 +552,20 @@ export class VersionUpdateManager {
   private async inspectMnemon(): Promise<{ install: MnemonInstall; current?: string }> {
     const configured = this.mnemonCliPath() ?? findMnemonCommand({})
     const command = configured === undefined ? undefined : this.executable(configured)
-    if (command === undefined) return { install: { mode: 'missing' } }
+    if (command === undefined) {
+      const npm = this.npmInvocation()
+      return {
+        install: {
+          mode: 'missing',
+          hint: npm === undefined ? 'npm-missing' : 'install',
+          ...(npm === undefined ? {} : {
+            updateCommand: npm.command,
+            updateArgs: [...npm.args, 'install', '--global', `${MNEMON_NPM_PACKAGE}@latest`],
+            updateEnv: npm.env,
+          }),
+        },
+      }
+    }
     const launcher = mnemonNpmLauncher(command)
     let current: string | undefined
     try {
@@ -737,7 +750,24 @@ export class VersionUpdateManager {
     if (component === 'mnemon') {
       const before = await this.inspectMnemon()
       const latest = await this.latestMnemonVersion()
-      if (before.current === undefined) throw new Error('Mnemon CLI is unavailable')
+      if (before.current === undefined) {
+        if (before.install.updateCommand === undefined || before.install.updateArgs === undefined) {
+          throw new Error('Mnemon CLI cannot be installed automatically (npm is unavailable)')
+        }
+        const output = await resultOrThrow(this.processRunner, before.install.updateCommand, before.install.updateArgs, UPDATE_TIMEOUT_MS, { env: before.install.updateEnv })
+        const after = await this.inspectMnemon()
+        if (after.current === undefined) {
+          throw new Error('Mnemon CLI installation completed, but the mnemon executable is still unavailable on PATH')
+        }
+        const outputText = updateOutput(output)
+        return {
+          component,
+          currentVersion: after.current,
+          updated: true,
+          restartRequired: false,
+          ...(outputText === undefined ? {} : { output: outputText }),
+        }
+      }
       if (latest === undefined) throw new Error('Unable to verify the latest Mnemon release')
       if (compareVersions(before.current, latest) >= 0) return { component, previousVersion: before.current, currentVersion: before.current, updated: false, restartRequired: false }
       if (before.install.updateCommand === undefined || before.install.updateArgs === undefined) throw new Error('This Mnemon installation cannot be updated automatically')

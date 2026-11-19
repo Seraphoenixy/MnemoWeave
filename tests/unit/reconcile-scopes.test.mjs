@@ -85,15 +85,19 @@ test('parseReconcileResult enforces scope boundaries and validates memory-spaces
     summary: 'Merge duplicate SQLite notes and link.',
     action: 'planned',
     operations: [
-      { kind: 'insight-revise', memoryBodyId: 'space-1', replacesId: 'ins-1', content: 'Use SQLite WAL mode for concurrency', category: 'decision', importance: 4, entities: ['SQLite'], reason: 'Merge duplicate facts' },
+      { kind: 'insight-revise', memoryBodyId: 'space-1', replacesId: 'ins-1', content: 'Use SQLite WAL mode for concurrency', category: 'decision', importance: 4, entities: ['SQLite', 'G1', '如', '系统'], reason: 'Merge duplicate facts' },
+      { kind: 'insight-revise', memoryBodyId: 'space-1', replacesId: 'ins-2', content: 'Clean all invalid entities', entities: ['G2', '1', '已修改。'], reason: 'Strip invalid entities' },
       { kind: 'insight-forget', memoryBodyId: 'space-1', id: 'ins-2', reason: 'Covered by revised entry' },
       { kind: 'insight-link', memoryBodyId: 'space-1', sourceId: 'ins-1', targetId: 'ins-2', edgeType: 'semantic', weight: 0.8, reason: 'Related SQLite topic' },
     ],
   }, evidence)
-  assert.equal(parsed.operations.length, 3)
+  assert.equal(parsed.operations.length, 4)
   assert.equal(parsed.operations[0].kind, 'insight-revise')
-  assert.equal(parsed.operations[1].kind, 'insight-forget')
-  assert.equal(parsed.operations[2].kind, 'insight-link')
+  assert.deepEqual(parsed.operations[0].entities, ['SQLite'])
+  assert.equal(parsed.operations[1].kind, 'insight-revise')
+  assert.deepEqual(parsed.operations[1].entities, [])
+  assert.equal(parsed.operations[2].kind, 'insight-forget')
+  assert.equal(parsed.operations[3].kind, 'insight-link')
 })
 
 test('applyReconcileOperations executes memory-spaces operations through sourceApplier', async () => {

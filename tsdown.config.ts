@@ -66,6 +66,7 @@ const host: UserConfig = {
   dts: false,
   clean: true,
   deps: { neverBundle: true },
+  outputOptions: { chunkFileNames: 'chunks/[name].js' },
   plugins: [standardDecoratorsPlugin()],
 }
 
@@ -80,7 +81,7 @@ const syncServer: UserConfig = {
   dts: false,
   clean: false,
   deps: { alwaysBundle: [/^(?:@swan-io\/srp|jsbn|zod)(?:\/|$)/u] },
-  outputOptions: { banner: await syncServerNotices() },
+  outputOptions: { banner: await syncServerNotices(), chunkFileNames: 'chunks/[name].js' },
 }
 
 async function syncServerNotices(): Promise<string> {
@@ -120,6 +121,7 @@ const client: UserConfig = {
   },
   plugins: [clientCssPlugin()],
   outputOptions: {
+    chunkFileNames: 'chunks/[name].js',
     banner: `window.__ModuleLoader__.load({ id: ${JSON.stringify(PLUGIN_ID)}, factory: (require) => {`,
     footer: 'return module.exports; } });',
     intro: 'var module = { exports: {} }; var exports = module.exports;',

@@ -17,21 +17,57 @@ export function activityStoreForAgent(root: string, agent: HostAgent, workspace?
   return workspaceActivityStore(root, path)
 }
 
+export function formatActivityError(error: unknown): string | undefined {
+  if (error === undefined || error === null) return undefined
+  if (typeof error === 'string') {
+    const trimmed = error.trim()
+    return trimmed === '' ? undefined : trimmed
+  }
+  if (error instanceof Error) {
+    const parts: string[] = []
+    let current: unknown = error
+    const seen = new Set<unknown>()
+    while (current instanceof Error && !seen.has(current)) {
+      seen.add(current)
+      const msg = current.message.trim()
+      if (msg !== '' && !parts.includes(msg)) parts.push(msg)
+      current = current.cause
+    }
+    return parts.length === 0 ? undefined : parts.join(': ')
+  }
+  if (typeof error === 'object' && 'message' in error && typeof (error as { message?: unknown }).message === 'string') {
+    const trimmed = (error as { message: string }).message.trim()
+    return trimmed === '' ? undefined : trimmed
+  }
+  try {
+    return JSON.stringify(error)
+  } catch {
+    return String(error)
+  }
+}
+
 export function recordAgentTurn(agent: HostAgent, turn: number, storage: () => { root: string; workspace?: string } | undefined): void {
   try {
     const location = storage()
     if (location === undefined) return
     const store = activityStoreForAgent(location.root, agent, location.workspace)
     if (store === undefined) return
-    for (const event of collectTurnActivity(agent.id, agent.session.header?.parentSession, turn, sessionTurnEvents(agent.session, turn))) store.record(event)
+    for (const { event, detail } of collectTurnActivityWithDetails(agent.id, agent.session.header?.parentSession, turn, sessionTurnEvents(agent.session, turn))) {
+      store.record(event)
+      if (detail !== undefined) store.recordDetail(event.id, detail)
+    }
   } catch {
     console.error('MnemoWeave could not collect memory activity for a turn')
   }
 }
 
 export function collectTurnActivity(session: string, parentSession: string | undefined, turn: number, events: Iterable<HostSessionEvent>): MemoryActivityEvent[] {
+  return collectTurnActivityWithDetails(session, parentSession, turn, events).map(entry => entry.event)
+}
+
+export function collectTurnActivityWithDetails(session: string, parentSession: string | undefined, turn: number, events: Iterable<HostSessionEvent>): Array<{ event: MemoryActivityEvent; detail?: string }> {
   const pending = new Map<string, { name: string; time?: number }>()
-  const activity: MemoryActivityEvent[] = []
+  const activity: Array<{ event: MemoryActivityEvent; detail?: string }> = []
   const validTime = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
   const settled = (callId: string, call: { name: string; time?: number }, event?: HostSessionEvent) => {
     const tool = memoryTool(call.name)
@@ -60,7 +96,10 @@ export function collectTurnActivity(session: string, parentSession: string | und
       ...(validTime(event?.time) ? { at: event.time } : {}),
       ...(validTime(event?.time) && call.time !== undefined && event.time >= call.time ? { durationMs: event.time - call.time } : {}),
     })
-    if (record.success && record.data.kind === 'memory') activity.push(record.data)
+    if (record.success && record.data.kind === 'memory') {
+      const detail = outcome === 'failed' ? formatActivityError(event?.data.error) : undefined
+      activity.push({ event: record.data, ...(detail === undefined ? {} : { detail }) })
+    }
   }
   for (const event of events) {
     if (event.type === 'tool/call' && event.data.turn === turn && typeof event.data.callId === 'string' && typeof event.data.name === 'string') {
@@ -79,11 +118,21 @@ export function collectTurnActivity(session: string, parentSession: string | und
   return activity
 }
 
-export function recordSubagentActivity(store: ActivityStore | undefined, parent: HostAgent, turn: number | undefined, runId: string, childId: string | undefined, result: Pick<SubagentActivityEvent, 'operation' | 'outcome' | 'durationMs' | 'committedWrites' | 'usage' | 'trigger' | 'skipReason'>): void {
+export function recordSubagentActivity(
+  store: ActivityStore | undefined,
+  parent: HostAgent,
+  turn: number | undefined,
+  runId: string,
+  childId: string | undefined,
+  result: Pick<SubagentActivityEvent, 'operation' | 'outcome' | 'durationMs' | 'committedWrites' | 'usage' | 'trigger' | 'skipReason'>,
+  detail?: string,
+): void {
+  const id = activityKey('dsh-subagent', runId)
   store?.record({
-    version: 1, kind: 'subagent', id: activityKey('dsh-subagent', runId), at: Date.now(), ...result,
+    version: 1, kind: 'subagent', id, at: Date.now(), ...result,
     parentSession: activityKey('session', parent.id),
     ...(turn === undefined ? {} : { turn }),
     ...(childId === undefined ? {} : { childSession: activityKey('session', childId) }),
   })
+  if (detail !== undefined) store?.recordDetail(id, detail)
 }

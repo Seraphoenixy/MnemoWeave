@@ -166,3 +166,25 @@ test('a clear covers the global stream beside the selected workspace', async () 
     assert.deepEqual(recentMemoryActivity({}), [])
   })
 })
+
+test('local failure details and usage are returned on status reads and removed on clear', async () => {
+  await fixture(async ({ root, workspace }) => {
+    const store = workspaceActivityStore(root, workspace)
+    const failedSubagent = {
+      ...subagent,
+      id: activityKey('failed-subagent'),
+      outcome: 'failed',
+      usage: { uncachedInputTokens: 120, outputTokens: 35, cacheReadTokens: 10, cacheWriteTokens: 0 },
+    }
+    store.record(failedSubagent)
+    store.recordDetail(failedSubagent.id, 'memory subagent completed without recording its result')
+    const [record] = recentMemoryActivity({ workspace: { root, path: workspace } })
+    assert.equal(record.outcome, 'failed')
+    assert.equal(record.detail, 'memory subagent completed without recording its result')
+    assert.deepEqual(record.usage, failedSubagent.usage)
+    // Synced event JSON remains untouched (no local detail field inside events/).
+    assert.equal('detail' in store.read(failedSubagent.id), false)
+    clearMemoryActivity({ workspace: { root, path: workspace } })
+    assert.equal(store.readDetail(failedSubagent.id), undefined)
+  })
+})

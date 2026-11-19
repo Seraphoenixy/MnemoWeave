@@ -5,7 +5,7 @@
 MnemoWeave 由一个根包 `dsh-mnemo-weave` 发布，内部按运行时入口、核心引擎、组件与同步协议分层组织，服务三个运行环境：
 
 1. **DSH 插件宿主与 WebUI**：通过 `dist/index.js`、`dist/bundle.js`、`dist/client.js` 与 `cordis.patch.yml` 接入 DeepSeek Harness（最低 `0.2.2-rc.1`），提供系统提示注入、模型工具、后台子任务、RPC 通道、工作台页面与技能管理。
-2. **stdio MCP 服务**：通过 `dist/mnemo-weave-mcp.js` 为 Codex 与 Antigravity 提供本地 stdio MCP 接口，复用同一套 Runtime Memory 控制器与 Composable Memory 运行时，暴露 `mnemo_working_rules` 及 13 个与 DSH 同名的记忆工具（参数与行为见[工具与命令参考](tools.md)）。Antigravity 另可通过 `integrations/antigravity/` 装配规则与技能插件。
+2. **stdio MCP 服务**：通过 `dist/mnemo-weave-mcp.js` 为 Codex 与 Antigravity 提供本地 stdio MCP 接口，复用同一套 Runtime Memory 控制器与 Composable Memory 运行时，暴露 `mnemo_working_rules` 及 13 个与 DSH 同名的记忆工具（名称与必填参数与 DSH 对齐；MCP 直连 Source，执行路径与输出差异见[工具与命令参考](tools.md)）。Antigravity 另可通过 `integrations/antigravity/` 装配规则与技能插件。
 3. **HTTP 同步服务**：通过 `dist/mnemo-weave-sync-server.js` 作为独立 Node.js 24 进程运行，使用 SQLite 与 SRP-6a（PAKE）认证为 DSH 与 MCP 提供增量快照与活动流同步（协议与部署见[服务器同步与部署](sync.md)）。
 
 ### 模块分层与依赖方向
@@ -570,7 +570,7 @@ location      本地 Store/CLI 作用域，或远程 endpoint + Provider 作用�
 - 召回与浏览只使用已激活记忆空间；图谱、实体、关联、链接和删除由 Provider 能力决定。
 - 指定未激活记忆空间进行读取会被拒绝。
 - 写入可以选择任何支持 `remember` 的已登记记忆空间；回执会反映 Provider 的精确写入或异步提炼语义。
-- 对未激活目标写入成功后，插件自动激活它。
+- 对未激活目标的写入：用户/UI 发起或显式指定目标的写入成功后会激活它；模型工具的 `mnemo_remember` 与 `mnemo_link` 在目标未激活时拒绝，要求用户先激活。
 - 没有显式目标且激活数量不是 1 时，确定性服务要求调用方先选择目标。
 
 <a id="storage-创建发现和合并"></a>

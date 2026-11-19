@@ -27,7 +27,8 @@ MnemoWeave exposes 14 `mnemo_*` tools over the `mnemo_weave` stdio MCP server (`
 
 - **Inspect**: Call `mnemo_memory_bodies` to list Memory Space IDs, activation, and capabilities. Call `mnemo_status` only when diagnosing a provider error or checking health.
 - **Recall**: Call `mnemo_recall` with a focused `query` (omit `memoryBodyIds` to search all pinned active spaces). Use `mnemo_related` to traverse graph edges from a recalled insight ID.
-- **Write**: Call `mnemo_remember` to store a self-contained durable lesson, `mnemo_link` to connect two verified insight IDs in the same space, or `mnemo_forget` to soft-delete an obsolete insight.
+- **Write**: Call `mnemo_remember` to store a self-contained durable entry, `mnemo_link` to connect two verified insight IDs in the same space, or `mnemo_forget` to soft-delete an obsolete insight.
+  - Set `category` to the narrowest match (omitting it defaults to `"general"`): `"preference"` (user habits/style), `"decision"` (trade-offs/standards), `"fact"` (platform behavior/API constraints), `"insight"` (diagnosed cause-and-remedy/patterns), `"context"` (environment/project background), or `"general"`.
 - **Space lifecycle**: Only call `mnemo_memory_body_create`, `mnemo_memory_body_update`, or `mnemo_memory_body_merge` on explicit user request.
 
 ## 4. Storage & Sync Configuration

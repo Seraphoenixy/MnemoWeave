@@ -83,14 +83,14 @@ export * from './memory-tools.ts'
 export const MNEMON_RPC_ENDPOINTS = {
   [MNEMON_READ_CHANNEL]: [
     'status', 'status-summary', 'memory-system', 'versions', 'task-agent-models', 'runtime-memory', 'documents', 'document', 'document-search',
-    'graph', 'bodies', 'body-directory', 'body-reconnect', 'provider-services', 'embedding-status', 'list', 'entities', 'search', 'agent-search', 'related',
+    'graph', 'bodies', 'body-directory', 'body-reconnect', 'provider-services', 'provider-service-check', 'embedding-status', 'local-embedding-status', 'list', 'entities', 'search', 'agent-search', 'related',
     'turn-activities', 'turn-activity', 'skill-activity', 'assistant-message', 'source-management-catalog', 'source-management-read', 'source-assistance',
     'diagnostics', 'memory-activity',
   ],
   [MNEMON_ACTIVATION_CHANNEL]: ['body', 'source-assistance'],
   [MNEMON_WRITE_CHANNEL]: [
     'runtime-memory', 'document', 'supervise', 'remember', 'link', 'forget', 'body-create', 'body-update', 'body-delete', 'body-merge',
-    'body-metadata-maintain', 'provider-service-update', 'embedding-fill', 'source-management-mutate', 'source-assistance', 'version-update',
+    'body-metadata-maintain', 'provider-service-update', 'embedding-fill', 'local-embedding-deploy', 'local-embedding-control', 'source-management-mutate', 'source-assistance', 'version-update',
     'memory-activity-clear',
   ],
   [MNEMON_PACK_CHANNEL]: ['target', 'export', 'inspect', 'import'],
@@ -161,6 +161,15 @@ export interface ActivityRecordView {
   /** A delegated child's task type shares `operation`; these describe its run. */
   durationMs?: number
   committedWrites?: number
+  replayed?: boolean
+  usage?: {
+    uncachedInputTokens: number
+    outputTokens: number
+    cacheReadTokens: number
+    cacheWriteTokens: number
+  }
+  /** Local-only failure or diagnostic detail (never synced across machines). */
+  detail?: string
   /** Which stream the event was recorded in: the selected workspace, or the global Working Rules stream. */
   stream: 'workspace' | 'working rules'
 }

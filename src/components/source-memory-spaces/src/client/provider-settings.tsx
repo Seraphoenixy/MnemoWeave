@@ -4,7 +4,7 @@ import { Button, IconChevronDownOutlineRegular, Switch } from '@deepseek-ai/dsh-
 import { GlobalLocationSetting, memorySettingsStyles, message, Reveal, useRequestVersion } from 'dsh-mnemo-weave/client'
 // Each function reads memorySettingsStyles where it draws, never at load: dsh-mnemo-weave 0.5.31 lacks it and never draws
 // these settings, and this bundle's pages must still load beside it.
-import type { MemoryProviderConfigField, MemoryProviderConnection, MemoryProviderDescriptor, MemoryProviderServiceCatalog, MemoryProviderServiceView } from '../contracts.ts'
+import type { MemoryProviderConfigField, MemoryProviderConnection, MemoryProviderDescriptor, MemoryProviderServiceCatalog, MemoryProviderServiceCheckResult, MemoryProviderServiceView } from '../contracts.ts'
 import { ProviderField } from './provider-field.tsx'
 import { ProviderIcon } from './ProviderIcon.tsx'
 import { providerSummary } from './provider-presentation.ts'
@@ -99,14 +99,17 @@ function ProviderServiceForm(props: {
   activeScope: 'global' | 'workspace'
   disabled: boolean
   onSave: (provider: MemoryProviderDescriptor, draft: ServiceDraft) => Promise<void>
+  onCheck?: ((provider: MemoryProviderDescriptor, draft: ServiceDraft) => Promise<MemoryProviderServiceCheckResult>) | undefined
 }): JSX.Element {
   const t = useT()
   const css = memorySettingsStyles
   const [draft, setDraft] = useState<ServiceDraft>(() => draftFor(props.provider, props.service))
   const [customLocations, setCustomLocations] = useState<Set<string>>(() => new Set(globalLocationFields(props.provider).filter(field => String(props.service.settings[field.key] ?? '').trim() !== '').map(field => field.key)))
   const [saving, setSaving] = useState(false)
+  const [checking, setChecking] = useState(false)
   const [failed, setFailed] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
+  const [checkResult, setCheckResult] = useState<MemoryProviderServiceCheckResult | null>(null)
   const formRef = useRef<HTMLFormElement>(null)
   const stabilizeAfterLocationLayout = useRef(false)
 
@@ -121,21 +124,37 @@ function ProviderServiceForm(props: {
     stabilizeProviderCard(formRef.current.closest<HTMLElement>('[data-provider]') ?? formRef.current)
   }, [customLocations])
 
-  const submit = async (event: FormEvent): Promise<void> => {
-    event.preventDefault()
-    const locationsComplete = props.activeScope === 'workspace' || globalLocationFields(props.provider).every(field => !customLocations.has(field.key) || String(draft.settings[field.key] ?? '').trim() !== '')
-    if (!configurationComplete(props.provider, draft, props.service) || !locationsComplete || saving || props.disabled) return
-    setSaving(true); setFailed(null); setSaved(false)
+  const effectiveSettings = (): MemoryProviderConnection => {
     const settings = { ...draft.settings }
     for (const field of globalLocationFields(props.provider)) {
       if (props.activeScope === 'workspace' || !customLocations.has(field.key)) settings[field.key] = ''
     }
-    try { await props.onSave(props.provider, { settings }); setSaved(true) } catch (reason) { setFailed(message(reason)) } finally { setSaving(false) }
+    return settings
+  }
+
+  const submit = async (event: FormEvent): Promise<void> => {
+    event.preventDefault()
+    const locationsComplete = props.activeScope === 'workspace' || globalLocationFields(props.provider).every(field => !customLocations.has(field.key) || String(draft.settings[field.key] ?? '').trim() !== '')
+    if (!configurationComplete(props.provider, draft, props.service) || !locationsComplete || saving || checking || props.disabled) return
+    setSaving(true); setFailed(null); setSaved(false); setCheckResult(null)
+    try { await props.onSave(props.provider, { settings: effectiveSettings() }); setSaved(true) } catch (reason) { setFailed(message(reason)) } finally { setSaving(false) }
+  }
+
+  const check = async (): Promise<void> => {
+    if (props.onCheck === undefined || checking || saving || props.disabled) return
+    setChecking(true); setFailed(null); setSaved(false); setCheckResult(null)
+    try {
+      setCheckResult(await props.onCheck(props.provider, { settings: effectiveSettings() }))
+    } catch (reason) {
+      setCheckResult({ providerId: props.provider.id, healthy: false, error: message(reason) })
+    } finally {
+      setChecking(false)
+    }
   }
 
   const update = (key: string, value: string | number | boolean): void => {
     setDraft(current => ({ ...current, settings: { ...current.settings, [key]: value } }))
-    setFailed(null); setSaved(false)
+    setFailed(null); setSaved(false); setCheckResult(null)
   }
 
   const useCustomLocation = (field: MemoryProviderConfigField, custom: boolean): void => {
@@ -184,8 +203,17 @@ function ProviderServiceForm(props: {
       {regularFields.map(field)}
     </div>
     <div className={`${css.memoryConfigFooter} ${css.providerServiceFooter}`}>
-      <div className={css.configFeedback} aria-live="polite">{failed !== null && <span className={css.error}>{t('config.providerSaveFailed', { error: failed })}</span>}{saved && <span className={css.packSuccess}>{t('config.providerServiceSaved')}</span>}</div>
-      <Button type="submit" variant="primary" size="sm" disabled={props.disabled || saving || !formComplete}>{saving ? t('config.saving') : t(props.service.configured ? 'config.saveProviderService' : 'config.enableProvider')}</Button>
+      <div className={css.configFeedback} aria-live="polite">
+        {failed !== null && <span className={css.error}>{t('config.providerSaveFailed', { error: failed })}</span>}
+        {saved && <span className={css.packSuccess}>{t('config.providerServiceSaved')}</span>}
+        {checkResult !== null && (checkResult.healthy
+          ? <span className={css.packSuccess}>{checkResult.spacesCount === undefined ? t('config.providerCheckHealthy') : t('config.providerCheckHealthySpaces', { count: checkResult.spacesCount })}</span>
+          : <span className={css.error}>{t('config.providerCheckFailed', { error: checkResult.error ?? '' })}</span>)}
+      </div>
+      <div className={css.configFeedback}>
+        {props.onCheck !== undefined && <Button type="button" variant="outline" size="sm" disabled={props.disabled || saving || checking || !formComplete} onClick={() => void check()}>{checking ? t('config.providerChecking') : t('config.providerCheck')}</Button>}
+        <Button type="submit" variant="primary" size="sm" disabled={props.disabled || saving || checking || !formComplete}>{saving ? t('config.saving') : t(props.service.configured ? 'config.saveProviderService' : 'config.enableProvider')}</Button>
+      </div>
     </div>
   </form>
 }
@@ -195,6 +223,7 @@ function ProviderPanel(props: {
   service: MemoryProviderServiceView
   disabled: boolean
   onSave: (provider: MemoryProviderDescriptor, draft: ServiceDraft) => Promise<void>
+  onCheck?: ((provider: MemoryProviderDescriptor, draft: ServiceDraft) => Promise<MemoryProviderServiceCheckResult>) | undefined
   onToggle: (provider: MemoryProviderDescriptor, enabled: boolean) => Promise<MemoryProviderServiceView>
   activeScope: 'global' | 'workspace'
 }): JSX.Element {
@@ -280,7 +309,7 @@ function ProviderPanel(props: {
       </div>
     </div>
     {failed !== null && <p className={css.providerToggleError} role="alert">{t('config.providerToggleFailed', { error: failed })}</p>}
-    {enabled && expanded && <div className={css.providerInlineBody}><ProviderServiceForm provider={props.provider} service={props.service} activeScope={props.activeScope} disabled={controlDisabled} onSave={props.onSave} /></div>}
+    {enabled && expanded && <div className={css.providerInlineBody}><ProviderServiceForm provider={props.provider} service={props.service} activeScope={props.activeScope} disabled={controlDisabled} onSave={props.onSave} onCheck={props.onCheck} /></div>}
   </div>
 }
 
@@ -346,6 +375,12 @@ export function ProviderSettingsSection(props: ProviderSettingsSectionProps): JS
     props.onChanged?.()
   }
 
+  const check = async (provider: MemoryProviderDescriptor, draft: ServiceDraft): Promise<MemoryProviderServiceCheckResult> => {
+    if (client === undefined) throw new Error(t('config.providerUnavailable'))
+    const settings = Object.fromEntries(Object.entries(draft.settings).filter(([key, value]) => serviceFields(provider).find(field => field.key === key)?.input !== 'secret' || String(value).trim() !== ''))
+    return client.checkProviderService({ providerId: provider.id, settings })
+  }
+
   const toggle = async (provider: MemoryProviderDescriptor, enabled: boolean): Promise<MemoryProviderServiceView> => {
     if (client === undefined) throw new Error(t('config.providerUnavailable'))
     const updated = await client.updateProviderService({ providerId: provider.id, settings: {}, enabled })
@@ -365,7 +400,7 @@ export function ProviderSettingsSection(props: ProviderSettingsSectionProps): JS
     {failed !== null && <div className={css.providerLoadError}><span className={css.error}>{t('config.providerLoadFailed', { error: failed })}</span><Button variant="ghost" size="sm" onClick={() => void load()}>{t('config.retryProviders')}</Button></div>}
     <div className={css.providerList} aria-busy={loading}>{props.leading}{catalog.providers.map(provider => {
       const service = catalog.items.find(item => item.providerId === provider.id) ?? { providerId: provider.id, enabled: false, configured: false, settings: {}, configuredSecrets: [] }
-      return <ProviderPanel key={provider.id} provider={provider} service={service} disabled={disabled} activeScope={props.activeScope} onSave={save} onToggle={toggle} />
+      return <ProviderPanel key={provider.id} provider={provider} service={service} disabled={disabled} activeScope={props.activeScope} onSave={save} onCheck={check} onToggle={toggle} />
     })}</div>
   </>
 }

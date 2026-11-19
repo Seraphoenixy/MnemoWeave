@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, writeFileSync, existsSync, unlinkSync, rmdirSync, mkdirSync } from 'node:fs'
+import { readFileSync, readdirSync, writeFileSync, existsSync, unlinkSync, rmdirSync } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
@@ -83,8 +83,3 @@ function removeEmptyDirectories(directory) {
 }
 removeEmptyDirectories(output)
 console.log(`Linked public declarations; retained ${retained.size}/${declarations.size} public type dependencies.`)
-
-// Keep the completion signal outside dist, which tsdown cleans at build start.
-const cache = join(root, '.cache')
-mkdirSync(cache, { recursive: true })
-writeFileSync(join(cache, 'dsh-build-complete'), '')

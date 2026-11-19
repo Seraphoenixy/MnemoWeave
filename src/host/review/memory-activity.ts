@@ -46,6 +46,7 @@ function view(store: ActivityStore, stream: ActivityRecordView['stream'], limit:
   const shown = [...events.values()].filter(listed)
   const latest = shown.sort((left, right) => (right.at ?? 0) - (left.at ?? 0) || left.id.localeCompare(right.id)).slice(0, limit)
   for (const event of latest) {
+    const detail = store.readDetail(event.id)
     records.push({
       at: event.at ?? 0,
       kind: event.kind,
@@ -56,8 +57,11 @@ function view(store: ActivityStore, stream: ActivityRecordView['stream'], limit:
       ...(event.kind === 'memory' ? { source: event.source } : {}),
       ...(event.skipReason === undefined ? {} : { skipReason: event.skipReason }),
       ...(event.kind === 'memory' && event.results !== undefined ? { results: event.results } : {}),
+      ...(event.kind === 'memory' && event.replayed === true ? { replayed: true } : {}),
       ...(event.kind === 'memory' && event.durationMs !== undefined ? { durationMs: event.durationMs } : {}),
       ...(event.kind === 'subagent' ? { durationMs: event.durationMs, committedWrites: event.committedWrites } : {}),
+      ...(event.kind === 'subagent' && event.usage !== undefined ? { usage: event.usage } : {}),
+      ...(detail === undefined ? {} : { detail }),
     })
   }
   return records

@@ -6,10 +6,30 @@ import {
   type MemoryComponentHost, type MemoryComponentSettingsProps, type MemoryComponentUIContext,
 } from 'dsh-mnemo-weave/client'
 import type { MemoryJsonValue } from 'dsh-mnemo-weave/contracts'
-import { EMBEDDING_ENVIRONMENT_NAME, DEFAULT_EMBEDDING_ENDPOINT, DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_PROTOCOL, MNEMON_EMBEDDING_PROTOCOLS, NATIVE_PROVIDER_ID, type MnemonEmbeddingSettingsView, type MnemonEmbeddingFill, type MnemonEmbeddingSpaceStatus, type MnemonEmbeddingStatus } from '../contracts.ts'
+import {
+  EMBEDDING_ENVIRONMENT_NAME,
+  DEFAULT_EMBEDDING_ENDPOINT,
+  DEFAULT_EMBEDDING_MODEL,
+  DEFAULT_EMBEDDING_PROTOCOL,
+  DEFAULT_EMBEDDING_RUNTIME,
+  DEFAULT_LOCAL_EMBEDDING_DEVICE,
+  DEFAULT_LOCAL_EMBEDDING_LIFECYCLE,
+  DEFAULT_LOCAL_EMBEDDING_PRESET,
+  MNEMON_EMBEDDING_PROTOCOLS,
+  NATIVE_PROVIDER_ID,
+  type LocalEmbeddingDevice,
+  type LocalEmbeddingLifecycle,
+  type LocalEmbeddingPreset,
+  type LocalEmbeddingRuntimeStatus,
+  type MnemonEmbeddingRuntime,
+  type MnemonEmbeddingSettingsView,
+  type MnemonEmbeddingFill,
+  type MnemonEmbeddingSpaceStatus,
+  type MnemonEmbeddingStatus,
+} from '../contracts.ts'
 import { ProviderIcon } from './ProviderIcon.tsx'
 import { ProviderSettingsSection } from './provider-settings.tsx'
-import { memorySpacesSettingsClient } from './settings-client.ts'
+import { memorySpacesSettingsClient, type MemorySpacesSettingsClient, type ProviderInstallResultView, type ProviderVersionComponentView } from './settings-client.ts'
 
 /** The package these settings belong to, as Memory Spaces' plugin declaration names it. */
 const COMPONENT_ID = 'source-memory-spaces'
@@ -29,6 +49,11 @@ interface SpacesConfiguration {
 
 /** The embedding connection DSH manages for Mnemon Native. */
 interface EmbeddingDraft {
+  runtime: MnemonEmbeddingRuntime
+  localPreset: LocalEmbeddingPreset
+  lifecycle: LocalEmbeddingLifecycle
+  localDevice: LocalEmbeddingDevice
+  llamaServerPath: string
   endpoint: string
   model: string
   apiKey: string
@@ -40,6 +65,11 @@ interface EmbeddingDraft {
 function embeddingDraft(value: SpacesConfiguration | undefined): EmbeddingDraft {
   const embedding = value?.embedding
   return {
+    runtime: embedding?.runtime ?? DEFAULT_EMBEDDING_RUNTIME,
+    localPreset: embedding?.localPreset ?? DEFAULT_LOCAL_EMBEDDING_PRESET,
+    lifecycle: embedding?.lifecycle ?? DEFAULT_LOCAL_EMBEDDING_LIFECYCLE,
+    localDevice: embedding?.localDevice ?? DEFAULT_LOCAL_EMBEDDING_DEVICE,
+    llamaServerPath: embedding?.llamaServerPath ?? '',
     endpoint: embedding?.endpoint?.trim() || DEFAULT_EMBEDDING_ENDPOINT,
     model: embedding?.model?.trim() || DEFAULT_EMBEDDING_MODEL,
     apiKey: '',
@@ -77,6 +107,7 @@ const validProtocol = (protocol: string): boolean => MNEMON_EMBEDDING_PROTOCOLS.
 type Translate = ReturnType<typeof useT>
 
 function embeddingProblem(draft: EmbeddingDraft, t: Translate): string | null {
+  if (draft.runtime === 'llama-cpp') return null
   if (!validEmbeddingEndpoint(draft.endpoint)) return t('config.embeddingEndpointInvalid')
   if (!validEmbeddingModel(draft.model)) return t('config.embeddingModelInvalid')
   if (!validEmbeddingApiKey(draft.apiKey)) return t('config.embeddingApiKeyInvalid')
@@ -90,9 +121,17 @@ function embeddingProblem(draft: EmbeddingDraft, t: Translate): string | null {
 function embeddingValue(enabled: boolean, draft: EmbeddingDraft, secure: boolean, legacyKey = ''): MemoryJsonValue {
   const auth = secure ? { apiKey: draft.apiKey.trim(), apiKeyEnv: draft.apiKeyEnv.trim(), ...(draft.clearApiKey ? { clearApiKey: true } : {}) } : { apiKey: legacyKey };
   const endpoint = draft.endpoint.trim().replace(/\/+$/u, '')
-  if (enabled) return { enabled: true, endpoint, model: draft.model.trim(), protocol: draft.protocol, ...auth }
+  const local = {
+    runtime: draft.runtime,
+    localPreset: draft.localPreset,
+    lifecycle: draft.lifecycle,
+    localDevice: draft.localDevice,
+    ...(draft.llamaServerPath.trim() ? { llamaServerPath: draft.llamaServerPath.trim() } : {}),
+  }
+  if (enabled) return { enabled: true, ...local, endpoint, model: draft.model.trim(), protocol: draft.protocol, ...auth }
   return {
     enabled: false,
+    ...local,
     ...(validEmbeddingEndpoint(draft.endpoint) ? { endpoint } : {}),
     ...(validEmbeddingModel(draft.model) ? { model: draft.model.trim() } : {}),
     ...(validProtocol(draft.protocol) ? { protocol: draft.protocol } : {}),
@@ -220,7 +259,19 @@ function SpacesSettings({ page, host }: { page: MemoryComponentSettingsProps; ho
       onChanged={host.changed}
       {...(readOnly ? { notice: <Callout tone="warning" className={css.groupCallout} title={t('config.providersReadOnlyTitle')}>{t('config.providersReadOnlyDetail')}</Callout> } : {})}
       leading={<NativeProviderCard activeScope={activeScope} cliMissing={cliMissing} t={t}>
-        <EmbeddingEditor secure={secure} credentialSaved={value?.embedding?.apiKeyStorage === 'credentials'} managed={managed.value} draft={form.draft} disabled={disabled} connectionAvailable={client !== undefined} cliMissing={cliMissing} changing={form.dirty}
+        <MnemonNativeCliSection
+          client={client}
+          disabled={disabled}
+          writable={!disabled && !readOnly}
+          cliMissing={cliMissing}
+          t={t}
+          onCliChanged={found => {
+            setNativeCliFound(found)
+            retained.set(RETAINED_CLI, { commandFound: found })
+            host.changed?.()
+          }}
+        />
+        <EmbeddingEditor client={client} secure={secure} credentialSaved={value?.embedding?.apiKeyStorage === 'credentials'} managed={managed.value} draft={form.draft} disabled={disabled} connectionAvailable={client !== undefined} cliMissing={cliMissing} changing={form.dirty}
           status={status} t={t} onEdit={form.edit} onTest={() => { setFill(undefined); test() }}
           canFill={!disabled && !readOnly} fill={fill} onFill={fillSpace}
           onManaged={on => { if (!on) form.discard(); managed.set(on) }}
@@ -251,6 +302,102 @@ function NativeProviderCard(props: { activeScope: 'global' | 'workspace'; cliMis
   </details>
 }
 
+function MnemonNativeCliSection(props: {
+  client?: MemorySpacesSettingsClient | undefined
+  disabled: boolean
+  writable: boolean
+  cliMissing: boolean
+  t: Translate
+  onCliChanged: (found: boolean) => void
+}): JSX.Element {
+  const { client, t } = props
+  const css = memorySettingsStyles
+  const [checking, setChecking] = useState(false)
+  const [installing, setInstalling] = useState(false)
+  const [component, setComponent] = useState<ProviderVersionComponentView | undefined>(undefined)
+  const [checkError, setCheckError] = useState<string | null>(null)
+  const [installError, setInstallError] = useState<string | null>(null)
+  const [installResult, setInstallResult] = useState<ProviderInstallResultView | null>(null)
+  const checkVersion = useRef(0)
+
+  const runCheck = useCallback(async () => {
+    if (client === undefined) return
+    const request = ++checkVersion.current
+    setChecking(true)
+    setCheckError(null)
+    try {
+      const [status, summary] = await Promise.all([
+        client.checkProviderInstall(),
+        client.statusSummary().catch(() => undefined),
+      ])
+      if (checkVersion.current !== request) return
+      const mnemon = status.components.find(item => item.id === 'mnemon')
+      setComponent(mnemon)
+      if (summary !== undefined) props.onCliChanged(summary.commandFound)
+      else if (mnemon !== undefined) props.onCliChanged(mnemon.installMode !== 'missing')
+    } catch (reason) {
+      if (checkVersion.current !== request) return
+      setCheckError(message(reason))
+    } finally {
+      if (checkVersion.current === request) setChecking(false)
+    }
+  }, [client, props])
+
+  const runInstall = async () => {
+    if (client === undefined || installing || !props.writable) return
+    setInstalling(true)
+    setInstallError(null)
+    setInstallResult(null)
+    try {
+      const result = await client.installOrUpdateMnemon()
+      setInstallResult(result)
+      await runCheck()
+    } catch (reason) {
+      setInstallError(message(reason))
+    } finally {
+      setInstalling(false)
+    }
+  }
+
+  const missing = component !== undefined ? component.installMode === 'missing' : props.cliMissing
+  const canInstall = missing && component?.updateSupported === true
+  const canUpdate = !missing && component?.outdated === true && component.updateSupported
+  const statusText = checking ? t('config.nativeCliChecking')
+    : checkError !== null ? t('config.nativeCliCheckFailed', { error: checkError })
+      : component === undefined ? (props.cliMissing ? t('config.nativeCliMissingDetail') : t('config.nativeCliNotChecked'))
+        : missing ? t('config.nativeCliMissingDetail')
+          : component.outdated && component.latest !== undefined && component.current !== undefined
+            ? t('config.nativeCliUpdateAvailable', { current: component.current, latest: component.latest })
+            : component.current !== undefined ? t('config.nativeCliInstalled', { version: component.current })
+              : t('config.nativeCliNotChecked')
+
+  return <section className={css.editor} aria-labelledby="mnemon-native-cli-heading">
+    <div className={css.editorHeading}>
+      <h3 id="mnemon-native-cli-heading">{t('config.nativeCliTitle')}</h3>
+      <p>{t('config.nativeCliHint')}</p>
+    </div>
+    <div className={css.embeddingTest} aria-live="polite">
+      <span className={checkError !== null ? css.error : undefined} role={checkError !== null ? 'alert' : undefined}>{statusText}</span>
+      <div className={css.configFeedback}>
+        <Button variant="outline" size="sm" disabled={props.disabled || client === undefined || checking || installing} onClick={() => void runCheck()}>
+          {checking ? t('config.nativeCliChecking') : t('config.nativeCliCheck')}
+        </Button>
+        {(canInstall || canUpdate) && <Button variant="primary" size="sm" disabled={!props.writable || client === undefined || checking || installing} onClick={() => void runInstall()}>
+          {installing
+            ? t(canInstall ? 'config.nativeCliInstalling' : 'config.nativeCliUpdating')
+            : t(canInstall ? 'config.nativeCliInstall' : 'config.nativeCliUpdate')}
+        </Button>}
+      </div>
+    </div>
+    {component?.executablePath !== undefined && <p className={css.editorNote}><code>{component.executablePath}</code></p>}
+    {missing && component !== undefined && !component.updateSupported && <p className={css.editorNote}>{t('config.nativeCliManualHint')}</p>}
+    {installError !== null && <p className={css.error} role="alert">{t('config.nativeCliInstallFailed', { error: installError })}</p>}
+    {installResult !== null && installResult.updated && <p className={css.packSuccess} role="status">
+      {t(installResult.previousVersion === undefined ? 'config.nativeCliInstalledOk' : 'config.nativeCliUpdatedOk', { version: installResult.currentVersion ?? '' })}
+    </p>}
+  </section>
+}
+
 /** Selected-model usability and stored-vector coverage; the protocol appears only when the Host reports one. */
 function embeddingStatusText(t: Translate, status: MnemonEmbeddingStatus): string {
   const coverage = { embedded: status.embedded, total: status.totalInsights, coverage: status.coverage }
@@ -261,6 +408,7 @@ function embeddingStatusText(t: Translate, status: MnemonEmbeddingStatus): strin
 
 /** The embedding runtime: the switch applies at once; the connection fields, shown while DSH manages it, wait for Apply. */
 function EmbeddingEditor(props: {
+  client?: MemorySpacesSettingsClient | undefined
   secure: boolean
   credentialSaved: boolean
   managed: boolean
@@ -283,13 +431,86 @@ function EmbeddingEditor(props: {
 }): JSX.Element {
   const { draft, t, status } = props
   const css = memorySettingsStyles
+  const [localStatus, setLocalStatus] = useState<LocalEmbeddingRuntimeStatus | undefined>(undefined)
+  const [localChecking, setLocalChecking] = useState(false)
+  const [localDeploying, setLocalDeploying] = useState(false)
+  const [localControlling, setLocalControlling] = useState(false)
+  const [localError, setLocalError] = useState<string | null>(null)
+  const [localNotice, setLocalNotice] = useState<string | null>(null)
+
+  const localOverrides = useMemo(() => ({
+    localPreset: draft.localPreset,
+    lifecycle: draft.lifecycle,
+    localDevice: draft.localDevice,
+    llamaServerPath: draft.llamaServerPath.trim(),
+  }), [draft.localPreset, draft.lifecycle, draft.localDevice, draft.llamaServerPath])
+
+  useEffect(() => {
+    setLocalStatus(undefined)
+    setLocalError(null)
+    setLocalNotice(null)
+  }, [draft.localPreset, draft.llamaServerPath])
+
+  const checkLocal = useCallback(async () => {
+    if (props.client === undefined) return
+    setLocalChecking(true)
+    setLocalError(null)
+    try {
+      setLocalStatus(await props.client.localEmbeddingStatus(localOverrides))
+    } catch (reason) {
+      setLocalError(message(reason))
+    } finally {
+      setLocalChecking(false)
+    }
+  }, [props.client, localOverrides])
+
+  const deployLocal = async () => {
+    if (props.client === undefined || localDeploying || !props.canFill) return
+    setLocalDeploying(true)
+    setLocalError(null)
+    setLocalNotice(null)
+    try {
+      const result = await props.client.deployLocalEmbedding(localOverrides)
+      setLocalStatus(result.status)
+      setLocalNotice(t('config.localEmbeddingDeployedOk', { model: result.status.preset }))
+    } catch (reason) {
+      setLocalError(message(reason))
+    } finally {
+      setLocalDeploying(false)
+    }
+  }
+
+  const controlLocal = async (action: 'start' | 'stop') => {
+    if (props.client === undefined || localControlling || !props.canFill) return
+    setLocalControlling(true)
+    setLocalError(null)
+    setLocalNotice(null)
+    try {
+      setLocalStatus(await props.client.controlLocalEmbedding(action, localOverrides))
+    } catch (reason) {
+      setLocalError(message(reason))
+    } finally {
+      setLocalControlling(false)
+    }
+  }
+
+  const isLocal = draft.runtime === 'llama-cpp'
+  const localBusy = localChecking || localDeploying || localControlling
+  const validLocalStatus = localStatus !== undefined && localStatus !== null && typeof localStatus === 'object' ? localStatus : undefined
+  const localNeedsDeploy = validLocalStatus === undefined || !validLocalStatus.serverInstalled || !validLocalStatus.modelInstalled
+  const localSummary = validLocalStatus === undefined ? t('config.localEmbeddingCheck')
+    : !validLocalStatus.serverInstalled && !validLocalStatus.modelInstalled ? t('config.localEmbeddingMissingBoth', { model: validLocalStatus.preset })
+      : !validLocalStatus.serverInstalled ? t('config.localEmbeddingMissingServer')
+        : !validLocalStatus.modelInstalled ? t('config.localEmbeddingMissingModel', { model: validLocalStatus.preset })
+          : t('config.localEmbeddingReady', { port: validLocalStatus.port, state: t(validLocalStatus.running ? 'config.localEmbeddingRunning' : 'config.localEmbeddingStopped') })
+
   const feedback = props.cliMissing ? t('config.embeddingCliMissing')
     : props.changing ? t('config.embeddingSaveBeforeTest')
       : status.state === 'loading' ? t('config.embeddingTesting')
         : status.state === 'error' ? t('config.embeddingStatusFailed', { error: status.error ?? '' })
           : status.state === 'ready' && status.value !== undefined ? embeddingStatusText(t, status.value)
             : !props.connectionAvailable ? t('config.embeddingTestUnavailable') : t('config.embeddingNotTested')
-  const text = (field: 'endpoint' | 'model' | 'apiKey' | 'apiKeyEnv', type: string, label: string, valid: boolean, placeholder: string): JSX.Element => <label>
+  const text = (field: 'endpoint' | 'model' | 'apiKey' | 'apiKeyEnv' | 'llamaServerPath', type: string, label: string, valid: boolean, placeholder: string): JSX.Element => <label>
     {label}
     <input type={type} aria-label={label} aria-invalid={!valid} value={draft[field]} disabled={props.disabled || ((field === 'apiKey' || field === 'apiKeyEnv') && (!props.secure || draft.clearApiKey))}
       autoComplete="off" spellCheck={false} autoCapitalize="none" autoCorrect="off" placeholder={placeholder}
@@ -304,21 +525,61 @@ function EmbeddingEditor(props: {
       onChange={props.onManaged} />
     {props.managed && <>
       <div className={css.fieldGrid}>
-        {text('endpoint', 'url', t('config.embeddingEndpoint'), validEmbeddingEndpoint(draft.endpoint), DEFAULT_EMBEDDING_ENDPOINT)}
-        {text('model', 'text', t('config.embeddingModel'), validEmbeddingModel(draft.model), DEFAULT_EMBEDDING_MODEL)}
-        <SelectField label={t('config.embeddingProtocol')} value={draft.protocol} disabled={props.disabled} options={[
-          { value: 'auto', label: t('config.embeddingProtocolAuto') },
-          { value: 'ollama', label: t('config.embeddingProtocolOllama') },
-          { value: 'openai', label: t('config.embeddingProtocolOpenai') },
-        ]} onChange={protocol => props.onEdit({ protocol })} />
-        {text('apiKey', 'password', t('config.embeddingApiKey'), validEmbeddingApiKey(draft.apiKey), t('config.embeddingKeyPlaceholder'))}
-        {props.secure && text('apiKeyEnv', 'text', t('config.embeddingApiKeyEnv'), !draft.apiKeyEnv.trim() || EMBEDDING_ENVIRONMENT_NAME.test(draft.apiKeyEnv.trim()), 'MY_EMBEDDING_API_KEY')}
+        <SelectField label={t('config.embeddingRuntime')} value={draft.runtime} disabled={props.disabled} options={[
+          { value: 'llama-cpp', label: t('config.embeddingRuntimeLlamaCpp') },
+          { value: 'external', label: t('config.embeddingRuntimeExternal') },
+        ]} onChange={runtime => props.onEdit({ runtime: runtime as MnemonEmbeddingRuntime })} />
+        {isLocal ? <>
+          <SelectField label={t('config.embeddingLocalPreset')} value={draft.localPreset} disabled={props.disabled} options={[
+            { value: 'qwen3-embedding:0.6b', label: t('config.embeddingLocalPreset06b') },
+            { value: 'qwen3-embedding:4b', label: t('config.embeddingLocalPreset4b') },
+          ]} onChange={localPreset => props.onEdit({ localPreset: localPreset as LocalEmbeddingPreset })} />
+          <SelectField label={t('config.embeddingLifecycle')} value={draft.lifecycle} disabled={props.disabled} options={[
+            { value: 'on-demand', label: t('config.embeddingLifecycleOnDemand') },
+            { value: 'resident', label: t('config.embeddingLifecycleResident') },
+            { value: 'write-first-fill-later', label: t('config.embeddingLifecycleWriteFirst') },
+          ]} onChange={lifecycle => props.onEdit({ lifecycle: lifecycle as LocalEmbeddingLifecycle })} />
+          <SelectField label={t('config.embeddingLocalDevice')} value={draft.localDevice} disabled={props.disabled} options={[
+            { value: 'auto', label: t('config.embeddingLocalDeviceAuto') },
+            { value: 'gpu', label: t('config.embeddingLocalDeviceGpu') },
+            { value: 'cpu', label: t('config.embeddingLocalDeviceCpu') },
+          ]} onChange={localDevice => props.onEdit({ localDevice: localDevice as LocalEmbeddingDevice })} />
+          {text('llamaServerPath', 'text', t('config.embeddingLlamaServerPath'), true, 'llama-server.exe')}
+        </> : <>
+          {text('endpoint', 'url', t('config.embeddingEndpoint'), validEmbeddingEndpoint(draft.endpoint), DEFAULT_EMBEDDING_ENDPOINT)}
+          {text('model', 'text', t('config.embeddingModel'), validEmbeddingModel(draft.model), DEFAULT_EMBEDDING_MODEL)}
+          <SelectField label={t('config.embeddingProtocol')} value={draft.protocol} disabled={props.disabled} options={[
+            { value: 'auto', label: t('config.embeddingProtocolAuto') },
+            { value: 'ollama', label: t('config.embeddingProtocolOllama') },
+            { value: 'openai', label: t('config.embeddingProtocolOpenai') },
+          ]} onChange={protocol => props.onEdit({ protocol })} />
+          {text('apiKey', 'password', t('config.embeddingApiKey'), validEmbeddingApiKey(draft.apiKey), t('config.embeddingKeyPlaceholder'))}
+          {props.secure && text('apiKeyEnv', 'text', t('config.embeddingApiKeyEnv'), !draft.apiKeyEnv.trim() || EMBEDDING_ENVIRONMENT_NAME.test(draft.apiKeyEnv.trim()), 'MY_EMBEDDING_API_KEY')}
+        </>}
       </div>
-      {props.secure ? <>
+      {!isLocal && (props.secure ? <>
         {props.credentialSaved && <p className={css.editorNote}>{t('config.embeddingCredentialSaved')}</p>}
         <label className={css.providerBoolean}><input type="checkbox" checked={draft.clearApiKey} disabled={props.disabled} onChange={event => props.onEdit({ clearApiKey: event.target.checked, apiKey: '', apiKeyEnv: '' })} /><span>{t('config.embeddingClearKey')}</span></label>
-      </> : <p className={css.editorNote}>{t('config.embeddingUpgradeHost')}</p>}
-      <p className={css.editorNote}>{t('config.embeddingSecurity')}</p>
+      </> : <p className={css.editorNote}>{t('config.embeddingUpgradeHost')}</p>)}
+      {!isLocal && <p className={css.editorNote}>{t('config.embeddingSecurity')}</p>}
+      {isLocal && <>
+        <div className={css.embeddingTest} aria-live="polite">
+          <span>{localSummary}</span>
+          <div className={css.configFeedback}>
+            <Button variant="outline" size="sm" disabled={props.disabled || !props.connectionAvailable || localBusy} onClick={() => void checkLocal()}>
+              {localChecking ? t('config.localEmbeddingChecking') : t('config.localEmbeddingCheck')}
+            </Button>
+            {localNeedsDeploy && <Button variant="primary" size="sm" disabled={!props.canFill || !props.connectionAvailable || localBusy} onClick={() => void deployLocal()}>
+              {localDeploying ? t('config.localEmbeddingDeploying') : t('config.localEmbeddingDeploy')}
+            </Button>}
+            {!localNeedsDeploy && validLocalStatus !== undefined && <Button variant="outline" size="sm" disabled={!props.canFill || !props.connectionAvailable || localBusy} onClick={() => void controlLocal(validLocalStatus.running ? 'stop' : 'start')}>
+              {localControlling ? t('config.localEmbeddingControlling') : t(validLocalStatus.running ? 'config.localEmbeddingStop' : 'config.localEmbeddingStart')}
+            </Button>}
+          </div>
+        </div>
+        {localError !== null && <p className={css.error} role="alert">{t('config.localEmbeddingFailed', { error: localError })}</p>}
+        {localNotice !== null && <p className={css.packSuccess} role="status">{localNotice}</p>}
+      </>}
     </>}
     {props.actions}
     <div className={css.embeddingTest} aria-live="polite">

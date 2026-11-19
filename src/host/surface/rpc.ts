@@ -126,11 +126,11 @@ function badRequest(message: string): RpcResult<unknown> {
 
 const SPACE_READ_CAPABILITIES: Record<string, MemoryCapability> = {
   graph: 'graph', list: 'browse', entities: 'search', search: 'recall', related: 'related',
-  bodies: 'status', 'body-directory': 'status', 'body-reconnect': 'status', 'provider-services': 'status', 'embedding-status': 'status',
+  bodies: 'status', 'body-directory': 'status', 'body-reconnect': 'status', 'provider-services': 'status', 'provider-service-check': 'status', 'embedding-status': 'status', 'local-embedding-status': 'status',
 }
 const SPACE_WRITE_CAPABILITIES: Record<string, MemoryCapability> = {
   remember: 'write', link: 'link', forget: 'forget', 'body-create': 'write', 'body-update': 'write',
-  'body-delete': 'forget', 'body-merge': 'write', 'provider-service-update': 'maintain', 'embedding-fill': 'maintain',
+  'body-delete': 'forget', 'body-merge': 'write', 'provider-service-update': 'maintain', 'embedding-fill': 'maintain', 'local-embedding-deploy': 'maintain', 'local-embedding-control': 'maintain',
 }
 
 // Optional product workflows. They are not Source or Core operations and are

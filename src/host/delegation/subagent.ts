@@ -1,6 +1,6 @@
 import { memoryTool } from '../contracts/memory-tools.ts'
 import { openAgentTurn } from '../engine/agent-memory-turn.ts'
-import { activityStoreForAgent, recordSubagentActivity } from '../review/activity-history.ts'
+import { activityStoreForAgent, formatActivityError, recordSubagentActivity } from '../review/activity-history.ts'
 import { sessionEvents } from '../session/session-events.ts'
 import { collectSubagentTokenUsage } from './subagent-token-usage.ts'
 import { createHash, randomUUID } from 'node:crypto'
@@ -23,12 +23,13 @@ import { idleReviewBlockReason, reviewDocumentPolicy, startGuardedChild, startGu
 import { reviewCheckpoint } from '../review/review-checkpoint.ts'
 import { startWithContinuationTurns } from '../boot/continuation-turn.ts'
 import { assertAgentMemoryIncluded } from '../support/workspace-exclusion.ts'
+import { targetProblem } from '../support/memory-space-target.ts'
 import { configuredProviderNames, contextIsActive, isInactiveContextError, isTaskRecord, type ProviderConfigurationHost } from '../session/agent-compat.ts'
 import { supportsChildComposition, startSubagent, type SubagentStartAgents } from './subagent-start.ts'
 import type { IdleReviewFailure, MemoryToolName } from '../contracts/protocol.ts'
 import { assertDshOutputSchema, assertDshOutputValue } from './subagent-output-schema.ts'
-import { ANSWER_PERSONA, ANSWER_SCHEMA, AUTONOMOUS_WRITE_PERSONA, indentedText, METADATA_MAINTENANCE_PERSONA, METADATA_MAINTENANCE_SCHEMA, metadataSampleText, naturalEvidence, naturalRequest, PROVIDER_PLACEMENT_PERSONA, providerPlacementSchema, REQUEST_LABELS, reviewPersona, SUPERVISED_WRITE_PERSONA, TARGETED_WRITE_LABELS, WRITE_PERSONA, WRITE_SCHEMA } from './subagent-prompts.ts'
-import { isTool, object, optionalObject, recoverStructuredResult, reviewReceipt, strings, subagentFailureDetail, type CapturedSubagentResult, type CapturedToolReceipt, type ToolReceiptRecovery } from './subagent-receipts.ts'
+import { ANSWER_PERSONA, ANSWER_SCHEMA, AUTONOMOUS_WRITE_PERSONA, indentedText, METADATA_MAINTENANCE_PERSONA, METADATA_MAINTENANCE_SCHEMA, metadataSampleText, naturalEvidence, naturalRequest, PROVIDER_PLACEMENT_PERSONA, providerPlacementSchema, REQUEST_LABELS, reviewPersona, sanitizeSuggestedEntities, SUGGEST_ENTITIES_PERSONA, SUGGEST_ENTITIES_SCHEMA, suggestEntitiesPrompt, SUPERVISED_WRITE_PERSONA, TARGETED_WRITE_LABELS, WRITE_PERSONA, WRITE_SCHEMA } from './subagent-prompts.ts'
+import { isTool, object, optionalObject, recoverOutputJson, recoverStructuredResult, reviewReceipt, strings, subagentFailureDetail, type CapturedSubagentResult, type CapturedToolReceipt, type ToolReceiptRecovery } from './subagent-receipts.ts'
 import { archivableElsewhere } from '../engine/archive-destinations.ts'
 import { runtimeArchiveSource, runtimeLocked, type RuntimeModelResult, type RuntimeWriteContext } from '../engine/runtime-capacity.ts'
 import { archiveDocumentLocked, documentLocked, type DocumentWorkflowHost } from '../engine/document-archive.ts'
@@ -207,26 +208,6 @@ export function spaceWriteGuard(target: string | undefined, inactive: ReadonlySe
     if (isTool(execution.name, 'mnemo_memory_body_update') && input.active === true) return `Memory Space ${JSON.stringify(space)} is switched off; only the user switches it on.`
     return undefined
   }
-}
-
-/**
- * Why a write cannot go to the Memory Space its caller named, before a writer runs (#387):
- * the space is unknown, its Provider is off or takes no writes, or it is switched off and
- * the caller did not ask to switch it on. A model names a space by its description, the
- * judgement that misplaced memories before; switching a space back on is its own request.
- */
-function targetProblem(spaces: MemorySpaceCatalog['items'], target: string, activate: boolean): string | undefined {
-  const body = spaces.find(candidate => candidate.id === target)
-  if (body === undefined) {
-    const known = spaces.slice(0, 20).map(candidate => `${JSON.stringify(candidate.id)} (${candidate.name}${candidate.active ? '' : ', switched off'})`).join(', ')
-    return `Memory Space ${JSON.stringify(target)} does not exist. Name one by its id${known === '' ? '; there is none yet.' : `: ${known}.`}`
-  }
-  if (body.providerEnabled === false) return `Memory Space ${JSON.stringify(target)} uses ${body.provider.label}, which is turned off on the dsh-mnemo-weave page under Plugins. Name another space.`
-  if (body.provider.capabilities.remember !== true) return `Memory Space ${JSON.stringify(target)} (${body.provider.label}) does not take writes. Name another space.`
-  if (!body.active && !activate) {
-    return `Memory Space ${JSON.stringify(target)} (${body.name}) is switched off, and a write would switch it back on. Choose an active space or let the user decide whether to reactivate this one in the workbench.`
-  }
-  return undefined
 }
 
 /** Whether a write receipt put the memory in its space, or handed it to a Provider that confirms later. */
@@ -579,35 +560,17 @@ export class MnemonSubagentCoordinator {
   }
 
   async suggestEntities(parent: HostAgent, content: string, existingEntities: readonly string[], signal: AbortSignal): Promise<{ entities: string[] }> {
-    const schema = {
-      type: 'object',
-      properties: {
-        entities: {
-          type: 'array',
-          items: { type: 'string' },
-          description: 'Up to 12 concise, canonical entity names (components, tools, files, people, projects, or specific domain terms) extracted from the memory content.',
-        },
-      },
-      required: ['entities'],
-      additionalProperties: false,
+    const prompt = suggestEntitiesPrompt(content, existingEntities)
+    let delegated: Awaited<ReturnType<MnemonSubagentCoordinator['delegate']>>
+    try {
+      delegated = await this.delegate(parent, 'answer', 'Suggest memory entities', prompt, [], SUGGEST_ENTITIES_SCHEMA, signal, 'spawn', SUGGEST_ENTITIES_PERSONA)
+    } catch (error) {
+      if (signal.aborted || !(error instanceof Error) || error.message !== 'memory subagent completed without recording its result') throw error
+      const retryPrompt = `${prompt}\n\nSubmit the final result by calling \`${RESULT_TOOL_NAME}\` with \`requestId\` and \`result: { "entities": [...] }\`. Do not finish with a plain-text answer.`
+      delegated = await this.delegate(parent, 'answer', 'Suggest memory entities', retryPrompt, [], SUGGEST_ENTITIES_SCHEMA, signal, 'spawn', SUGGEST_ENTITIES_PERSONA)
     }
-    const persona = 'Extract concise, canonical entity names from the provided memory text. Prefer concrete objects, components, files, tools, people, projects, and specific technical terms that aid future exact recall. Preserve existing valid spellings when appropriate, avoid generic filler words, and return at most 12 entities through the result tool.'
-    const existingLine = existingEntities.length === 0 ? '' : `\nCurrent entities: ${existingEntities.join(', ')}`
-    const prompt = `Extract entities for this memory content:\n\n${content}${existingLine}`
-    const { result } = await this.delegate(parent, 'answer', 'Suggest memory entities', prompt, [], schema, signal, 'spawn', persona)
-    const raw = (result.structured as { entities?: unknown } | undefined)?.entities
-    const list = Array.isArray(raw) ? raw.filter((item): item is string => typeof item === 'string') : []
-    const seen = new Set<string>()
-    const entities: string[] = []
-    for (const item of list) {
-      const trimmed = item.normalize('NFKC').trim()
-      const key = trimmed.toLocaleLowerCase()
-      if (key === '' || seen.has(key)) continue
-      seen.add(key)
-      entities.push(trimmed)
-      if (entities.length >= 12) break
-    }
-    return { entities }
+    const raw = (delegated.result.structured as { entities?: unknown } | undefined)?.entities
+    return { entities: sanitizeSuggestedEntities(raw) }
   }
 
   async maintainMetadata(parent: HostAgent, memoryBodyIds: readonly string[], signal: AbortSignal): Promise<MemorySpaceMetadataMaintenanceResult> {
@@ -1261,7 +1224,7 @@ This is the only completion channel for this run. Do not finish with a plain-tex
           // DSH permits 32 characters; the random suffix keeps concurrent and
           // repeated operations distinct without putting memory text in names.
           name: `mnemon-${operation}`.slice(0, 15).replace(/-$/u, '') + '-' + randomUUID().replaceAll('-', '').slice(0, 16),
-          prompt: [{ type: 'text', text: `${delegatedTaskLine(operation)}\n${prompt}` }],
+          prompt: [{ type: 'text', text: `${delegatedTaskLine(operation)}\n${prompt}\n\nFinish by calling \`${resultToolName}\` once with \`requestId: ${JSON.stringify(requestId)}\` and \`result\` matching the JSON schema. Do not finish with plain text alone.` }],
           parent,
           signal,
           ...(resolvedAgentOptions === undefined ? {} : { agentOptions: resolvedAgentOptions }),
@@ -1283,6 +1246,9 @@ This is the only completion channel for this run. Do not finish with a plain-tex
         // Do not rerun a mutation after a missed handoff. A matching successful
         // tool receipt is already the host's authoritative commit evidence.
         structured = recoverStructuredResult(recovery, committedReceipts.filter(receipt => receipt.agentId === activeRun.id))
+        if (structured === undefined) {
+          structured = recoverOutputJson(result.output, candidate => assertDshOutputValue(outputSchema, candidate))
+        }
       }
       if (result.stopReason !== 'completed') {
         const detail = subagentFailureDetail(activeRun, result)
@@ -1348,6 +1314,9 @@ This is the only completion channel for this run. Do not finish with a plain-tex
         const runId = run?.id ?? reviewChildId
         const skippedWrite = activityTrigger !== undefined && optionalObject(completed?.result.structured)?.action === 'skipped'
           && cleanupFailure === undefined && !receipts.some(receipt => receipt.agentId === runId && mutationResultCommitted(receipt.value))
+        const detail = failure !== undefined ? formatActivityError(failure)
+          : cleanupFailure !== undefined ? formatActivityError(cleanupFailure)
+          : undefined
         recordSubagentActivity(activityStoreForAgent(parentGraph.directory, parent, parentGraph.workspaceRoot), parent, parentTurn, requestId, child?.id ?? run?.id, {
           operation, durationMs: elapsed,
           ...(activityTrigger === undefined ? {} : { trigger: activityTrigger }),
@@ -1356,7 +1325,7 @@ This is the only completion channel for this run. Do not finish with a plain-tex
           committedWrites: receipts.filter(receipt => receipt.agentId === runId
             && memoryTool(receipt.name)?.kind === 'write' && mutationResultCommitted(receipt.value)).length,
           ...(usage === undefined ? {} : { usage }),
-        })
+        }, detail)
       } catch { console.error('MnemoWeave could not collect subagent memory activity') }
       if (cleanupFailure !== undefined) {
         const receipts = reviewReceipts.map(reviewReceipt).filter((receipt): receipt is NonNullable<typeof receipt> => receipt !== undefined)

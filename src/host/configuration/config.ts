@@ -4,7 +4,18 @@ import { isAbsolute } from 'node:path'
 import { normalizeDisplayMode } from '../contracts/display-mode.ts'
 import { schema as MemoryViewConfig, preferences as validateMemoryViewPreferences } from '../surface/view-preferences.ts'
 import { resolveEmbedding, resolvePersistenceStrategy, resolveRecallQuality } from 'dsh-mnemo-weave/source-memory-spaces'
-import { MEMORY_PLACEMENT_CAPABILITIES, MEMORY_SPACE_ID_PATTERN } from 'dsh-mnemo-weave/source-memory-spaces/contracts'
+import {
+  DEFAULT_EMBEDDING_RUNTIME,
+  DEFAULT_LOCAL_EMBEDDING_DEVICE,
+  DEFAULT_LOCAL_EMBEDDING_LIFECYCLE,
+  DEFAULT_LOCAL_EMBEDDING_PRESET,
+  LOCAL_EMBEDDING_DEVICES,
+  LOCAL_EMBEDDING_LIFECYCLES,
+  LOCAL_EMBEDDING_PRESETS,
+  MEMORY_PLACEMENT_CAPABILITIES,
+  MEMORY_SPACE_ID_PATTERN,
+  MNEMON_EMBEDDING_RUNTIMES,
+} from 'dsh-mnemo-weave/source-memory-spaces/contracts'
 
 export { resolveEmbedding, resolvePersistenceStrategy, resolveRecallQuality } from 'dsh-mnemo-weave/source-memory-spaces'
 import {
@@ -132,6 +143,12 @@ const TaskAgentModelSchema: z<TaskAgentModelConfig> = z.object({
 
 const MnemonEmbeddingSchema = z.object({
   enabled: z.boolean().default(false),
+  runtime: z.union(MNEMON_EMBEDDING_RUNTIMES).default(DEFAULT_EMBEDDING_RUNTIME),
+  localPreset: z.union(LOCAL_EMBEDDING_PRESETS).default(DEFAULT_LOCAL_EMBEDDING_PRESET),
+  lifecycle: z.union(LOCAL_EMBEDDING_LIFECYCLES).default(DEFAULT_LOCAL_EMBEDDING_LIFECYCLE),
+  localDevice: z.union(LOCAL_EMBEDDING_DEVICES).default(DEFAULT_LOCAL_EMBEDDING_DEVICE),
+  localPort: z.number().step(1).min(1024).max(65535),
+  llamaServerPath: z.string(),
   endpoint: z.string().default(DEFAULT_EMBEDDING_ENDPOINT),
   model: z.string().default(DEFAULT_EMBEDDING_MODEL),
   apiKey: z.string().role('secret').default(''),
@@ -222,6 +239,10 @@ export const Config: z<Config> = z.object({
   }),
   embedding: MnemonEmbeddingSchema.default({
     enabled: false,
+    runtime: DEFAULT_EMBEDDING_RUNTIME,
+    localPreset: DEFAULT_LOCAL_EMBEDDING_PRESET,
+    lifecycle: DEFAULT_LOCAL_EMBEDDING_LIFECYCLE,
+    localDevice: DEFAULT_LOCAL_EMBEDDING_DEVICE,
     endpoint: DEFAULT_EMBEDDING_ENDPOINT,
     model: DEFAULT_EMBEDDING_MODEL,
     apiKey: '',

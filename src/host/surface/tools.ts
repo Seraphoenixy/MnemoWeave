@@ -4,13 +4,14 @@ import { memoryTool } from '../contracts/memory-tools.ts'
 import type { HostContextShape, ToolDefinition, ToolExecution } from '../support/dsh.ts'
 import type { DocumentMutation } from 'dsh-mnemo-weave/source-documents/contracts'
 import type { RuntimeMemoryImportance } from 'dsh-mnemo-weave/source-runtime/contracts'
-import { CATEGORIES, EDGE_TYPES, SOURCES, type Category, type EdgeType, type Source } from 'dsh-mnemo-weave/source-memory-spaces/contracts'
+import { CATEGORIES, CATEGORY_PARAMETER_DESCRIPTION, EDGE_TYPES, ENTITY_PARAMETER_DESCRIPTION, SOURCES, type Category, type EdgeType, type Source } from 'dsh-mnemo-weave/source-memory-spaces/contracts'
 import { assertParticipation } from '../support/access.ts'
 import type { MemoryCapability, MemoryJsonValue } from '../../core/contracts/index.ts'
 import { agentScope, type MnemonAgentRuntimeSource, type MnemonRuntimeGraph } from '../engine/runtime.ts'
 import { isSubagent, MnemonSubagentCoordinator } from '../delegation/subagent.ts'
 import { namedToolPresentation } from '../review/activity-presentation.ts'
 import { assertAgentMemoryIncluded } from '../support/workspace-exclusion.ts'
+import { documentReceipt } from '../support/document-receipt.ts'
 
 const text = (value: unknown): Array<{ type: 'text'; text: string }> => [{
   type: 'text',
@@ -24,36 +25,11 @@ function definition(value: ToolDefinition): ToolDefinition {
 // DSH tool outputs use its supported JSON Schema subset. `type: "json"` is
 // valid in the parameter DSL, but it is not a JSON Schema type.
 const JSON_OBJECT_OUTPUT = { type: 'object', additionalProperties: true } as const
+
 /** Register a deliberately small model-facing surface over Mnemon's protocol. */
 function requireAgent(exec: ToolExecution) {
   if (exec.agent === undefined) throw new Error('Mnemon semantic operations require a live DSH agent')
   return exec.agent
-}
-
-/**
- * The fields of a written Document the model needs to refer to it: never its body, which it just
- * wrote, nor a path under the storage root, which it could read as one in the workspace. The
- * content hash is what an archive's lineage names.
- */
-const DOCUMENT_RECEIPT_FIELDS = ['id', 'title', 'description', 'status', 'revision', 'contentHash', 'sizeBytes', 'sourcePaths', 'memoryBodyIds', 'archivedAt', 'archiveSummary'] as const
-
-/**
- * A Document write as the model reads it: the Document written and the layer's totals. The
- * snapshot of every Document, with their excerpts and paths, grows with the layer and stays on
- * the control plane the WebUI reads (#390).
- */
-export function documentReceipt(value: unknown): unknown {
-  const result = typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined
-  const snapshot = result?.snapshot
-  if (result === undefined || typeof snapshot !== 'object' || snapshot === null || Array.isArray(snapshot)) return value
-  const { snapshot: _snapshot, document, ...rest } = result
-  const totals = snapshot as Record<string, unknown>
-  const written = typeof document === 'object' && document !== null && !Array.isArray(document) ? document as Record<string, unknown> : undefined
-  return {
-    ...rest,
-    ...(written === undefined ? {} : { document: Object.fromEntries(DOCUMENT_RECEIPT_FIELDS.filter(key => written[key] !== undefined).map(key => [key, written[key]])) }),
-    documents: { active: totals.activeCount, archived: totals.archivedCount, activeBytes: totals.activeBytes, limitBytes: totals.limitBytes },
-  }
 }
 
 /**
@@ -342,15 +318,15 @@ function registerRuntimeTools(ctx: HostContextShape, { requireSource, config, co
 function registerMemorySpaceWriteTools(ctx: HostContextShape, { requireSource, sourceAction }: ToolHelpers, coordinator: MnemonSubagentCoordinator): void {
   ctx.tools.register(definition({
     name: 'mnemo_remember',
-    description: `Store one self-contained durable insight in a selected provider-backed Memory Space. Use this when the user explicitly chooses a Memory Space or when a verified lesson or durable insight should be retrieved on demand, such as a diagnosed cause and remedy or a tested workaround. ${REUSABLE_LESSON_CONTENT} Save each distinct qualifying lesson separately when it is independently useful. Keep related details together when they form one lesson. Respect requests not to remember. Choose a suitable writable space, check for equivalent insights when recall is available, and wait for the provider receipt. Providers using semantic extraction may return skipped. Skip duplicates, transcripts, temporary progress, guesses, secrets, routine observations, and lessons already covered by an equivalent retrievable memory entry.`,
+    description: `Store one self-contained durable memory entry (decision, preference, fact, troubleshooting insight, or context) in a selected provider-backed Memory Space. Use this when the user explicitly chooses a Memory Space or when a verified lesson, decision, fact, or preference should be retrieved on demand, such as a diagnosed cause and remedy, an engineering trade-off, or a platform constraint. ${REUSABLE_LESSON_CONTENT} Save each distinct qualifying entry separately when it is independently useful. Keep related details together when they form one entry. Respect requests not to remember. Choose a suitable writable space, check for equivalent entries when recall is available, and wait for the provider receipt. Providers using semantic extraction may return skipped. Skip duplicates, transcripts, temporary progress, guesses, secrets, routine observations, and entries already covered by an equivalent retrievable memory.`,
     parameters: {
       type: 'object',
       properties: {
-        content: { type: 'string', description: 'One concise, self-contained durable insight.' },
-        replacesId: { type: 'string', description: 'A recalled insight ID in the same active Space, only when verified evidence supersedes its conclusion. Unsupported Providers skip the revision.' },
-        category: { type: 'string', enum: [...CATEGORIES] },
+        content: { type: 'string', description: 'One concise, self-contained durable memory entry.' },
+        replacesId: { type: 'string', description: 'A recalled insight ID in the same active Space, only when verified evidence supersedes its conclusion or metadata. Unsupported Providers skip the revision.' },
+        category: { type: 'string', enum: [...CATEGORIES], description: CATEGORY_PARAMETER_DESCRIPTION },
         importance: { type: 'integer', minimum: 1, maximum: 5, description: 'Durable value from 1 through 5.' },
-        entities: { type: 'array', items: { type: 'string' }, maxItems: 50, description: 'Named entities.' },
+        entities: { type: 'array', items: { type: 'string' }, maxItems: 50, description: ENTITY_PARAMETER_DESCRIPTION },
         source: { type: 'string', enum: [...SOURCES], description: 'Defaults to agent for model-authored writeback.' },
         memoryBodyId: { type: 'string', description: 'Target Memory Space id; the write goes there or nowhere. Select an active space. A save request does not authorize reactivation. Required unless exactly one space is active.' },
       },
@@ -419,7 +395,7 @@ function registerMemorySpaceWriteTools(ctx: HostContextShape, { requireSource, s
 
   ctx.tools.register(definition({
     name: 'mnemo_memory_body_create',
-    description: 'Create a new isolated Memory Space only on an explicit user request to create one. First inspect mnemo_memory_bodies.persistenceStrategy. In manual mode the host fixes the Provider. In automatic mode select only an eligible configured Provider from that policy and supply a concise reason and confidence; the host validates every hard rule and injects saved connection settings. Never invent credentials or endpoints. An ordinary request to save an insight does not authorize creating a space.',
+    description: 'Create a new isolated Memory Space only on an explicit user request to create one. First inspect mnemo_memory_bodies.persistenceStrategy. In manual mode the host fixes the Provider. In automatic mode select only an eligible configured Provider from that policy and supply a concise reason and confidence; the host validates every hard rule and injects saved connection settings. Never invent credentials or endpoints. A new space starts switched off; activate it with mnemo_memory_body_update only when the user asks. An ordinary request to save an insight does not authorize creating a space.',
     parameters: {
       type: 'object',
       properties: {

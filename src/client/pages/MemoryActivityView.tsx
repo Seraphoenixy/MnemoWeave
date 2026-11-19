@@ -103,9 +103,12 @@ export function MemoryActivityView(props: {
               <em>{t(`activity.outcome.${record.outcome}` as MnemonKey)}</em>
               {record.trigger !== undefined && <code>{t(`activity.trigger.${record.trigger}` as MnemonKey)}</code>}
               {record.skipReason !== undefined && <code>{t(`activity.skip.${record.skipReason}` as MnemonKey)}</code>}
+              {record.replayed === true && <code>{t('activity.replayed')}</code>}
               {record.results !== undefined && <code>{t('activity.results', { count: record.results })}</code>}
               {record.durationMs !== undefined && <code>{t('activity.duration', { ms: record.durationMs })}</code>}
               {record.committedWrites !== undefined && <code>{t('activity.committedWrites', { count: record.committedWrites })}</code>}
+              {record.usage !== undefined && <code>{t('activity.tokens', { input: record.usage.uncachedInputTokens + record.usage.cacheReadTokens, output: record.usage.outputTokens })}</code>}
+              {record.detail !== undefined && <p className={css.activityDetail}>{record.detail}</p>}
             </div>
           </li>)}
         </ol>}

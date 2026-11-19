@@ -2,7 +2,25 @@ import z from '@deepseek-ai/schemastery'
 import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import type { MemoryPersistenceStrategy, ResolvedMemoryPersistenceStrategy, MemoryPlacementCapability, MemoryPlacementPreference, MemoryProviderId, MemoryProviderConnection, MnemonEmbeddingConfig, ResolvedMnemonEmbeddingConfig, RecallQualityConfig, ResolvedRecallQualityConfig } from './contracts.ts'
-import { EMBEDDING_CREDENTIAL_REFERENCE, EMBEDDING_ENVIRONMENT_NAME, DEFAULT_EMBEDDING_ENDPOINT, DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_PROTOCOL, MEMORY_PLACEMENT_CAPABILITIES, MEMORY_SPACE_ID_PATTERN, MNEMON_EMBEDDING_PROTOCOLS, NATIVE_PROVIDER_ID } from './contracts.ts'
+import {
+  EMBEDDING_CREDENTIAL_REFERENCE,
+  EMBEDDING_ENVIRONMENT_NAME,
+  DEFAULT_EMBEDDING_ENDPOINT,
+  DEFAULT_EMBEDDING_MODEL,
+  DEFAULT_EMBEDDING_PROTOCOL,
+  DEFAULT_EMBEDDING_RUNTIME,
+  DEFAULT_LOCAL_EMBEDDING_DEVICE,
+  DEFAULT_LOCAL_EMBEDDING_LIFECYCLE,
+  DEFAULT_LOCAL_EMBEDDING_PRESET,
+  LOCAL_EMBEDDING_DEVICES,
+  LOCAL_EMBEDDING_LIFECYCLES,
+  LOCAL_EMBEDDING_PRESETS,
+  MEMORY_PLACEMENT_CAPABILITIES,
+  MEMORY_SPACE_ID_PATTERN,
+  MNEMON_EMBEDDING_PROTOCOLS,
+  MNEMON_EMBEDDING_RUNTIMES,
+  NATIVE_PROVIDER_ID,
+} from './contracts.ts'
 import { DEFAULT_TIMEOUT_MS, DEFAULT_RECALL_LIMIT, DEFAULT_RECALL_QUALITY_POLICY, DEFAULT_RECALL_LOW_SCORE_THRESHOLD, DEFAULT_RECALL_HIGH_SCORE_THRESHOLD, DEFAULT_RECALL_CANDIDATE_MULTIPLIER, DEFAULT_RECALL_MAX_MEDIUM_RESULTS, DEFAULT_RECALL_MAX_RANKED_RESULTS, DEFAULT_RECALL_MAX_UNKNOWN_RESULTS } from './defaults.ts'
 
 export interface MemorySpacesConfig {
@@ -105,7 +123,37 @@ export function resolveEmbedding(value: MemorySpacesConfig['embedding']): Resolv
   if (value?.apiKeyRef !== undefined && (typeof value.apiKeyRef !== 'string' || (apiKeyRef !== undefined && !EMBEDDING_CREDENTIAL_REFERENCE.test(apiKeyRef)))) throw new Error('dsh-mnemo-weave: embedding apiKeyRef must reference a Mnemon embedding credential')
   const protocol = value?.protocol ?? DEFAULT_EMBEDDING_PROTOCOL
   if (!MNEMON_EMBEDDING_PROTOCOLS.includes(protocol)) throw new Error(`dsh-mnemo-weave: unsupported embedding protocol: ${String(protocol)}`)
-  return { enabled: value?.enabled === true, endpoint: normalizedEndpoint, model, apiKey, protocol, ...(apiKeyEnv === undefined ? {} : { apiKeyEnv }), ...(apiKeyRef === undefined ? {} : { apiKeyRef }) }
+  const runtime = value?.runtime ?? DEFAULT_EMBEDDING_RUNTIME
+  if (!MNEMON_EMBEDDING_RUNTIMES.includes(runtime)) throw new Error(`dsh-mnemo-weave: unsupported embedding runtime: ${String(runtime)}`)
+  const localPreset = value?.localPreset ?? DEFAULT_LOCAL_EMBEDDING_PRESET
+  if (!LOCAL_EMBEDDING_PRESETS.includes(localPreset)) throw new Error(`dsh-mnemo-weave: unsupported local embedding preset: ${String(localPreset)}`)
+  const lifecycle = value?.lifecycle ?? DEFAULT_LOCAL_EMBEDDING_LIFECYCLE
+  if (!LOCAL_EMBEDDING_LIFECYCLES.includes(lifecycle)) throw new Error(`dsh-mnemo-weave: unsupported local embedding lifecycle: ${String(lifecycle)}`)
+  const localDevice = value?.localDevice ?? DEFAULT_LOCAL_EMBEDDING_DEVICE
+  if (!LOCAL_EMBEDDING_DEVICES.includes(localDevice)) throw new Error(`dsh-mnemo-weave: unsupported local embedding device: ${String(localDevice)}`)
+  const localPort = value?.localPort
+  if (localPort !== undefined && (!Number.isInteger(localPort) || localPort < 1024 || localPort > 65535)) {
+    throw new Error('dsh-mnemo-weave: local embedding port must be an integer within 1024..65535')
+  }
+  const llamaServerPath = optionalText(value?.llamaServerPath)
+  if (llamaServerPath !== undefined && (llamaServerPath.length > 1024 || /[\u0000-\u001f\u007f]/u.test(llamaServerPath))) {
+    throw new Error('dsh-mnemo-weave: llamaServerPath contains invalid characters')
+  }
+  return {
+    enabled: value?.enabled === true,
+    runtime,
+    localPreset,
+    lifecycle,
+    localDevice,
+    ...(localPort === undefined ? {} : { localPort }),
+    ...(llamaServerPath === undefined ? {} : { llamaServerPath }),
+    endpoint: normalizedEndpoint,
+    model,
+    apiKey,
+    protocol,
+    ...(apiKeyEnv === undefined ? {} : { apiKeyEnv }),
+    ...(apiKeyRef === undefined ? {} : { apiKeyRef }),
+  }
 }
 
 export function resolveRecallQuality(value: RecallQualityConfig | undefined): ResolvedMemorySpacesConfig['recallQuality'] {

@@ -270,19 +270,41 @@ export class MnemonNativeProvider implements MemoryProviderAdapter {
   }
 
   async remember(body: MemorySpace, request: RememberRequest, signal?: AbortSignal): Promise<JsonValue> {
+    return this.rememberWithFlags(body, request, { noDiff: false }, signal)
+  }
+
+  private async rememberWithFlags(
+    body: MemorySpace,
+    request: RememberRequest,
+    options: { noDiff: boolean },
+    signal?: AbortSignal,
+  ): Promise<JsonValue> {
     const args = ['remember', request.content, '--cat', request.category ?? 'general', '--imp', String(request.importance ?? 3), '--source', request.source ?? 'user']
+    if (options.noDiff) args.push('--no-diff')
     const entities = commaList(mergeEntitiesAndTags(request.entities, request.tags), 'entities', 50)
     if (entities !== undefined) args.push('--entities', entities)
+    // `provided` keeps the caller's canonical names and stops the CLI's own extraction from
+    // adding phrases lifted out of the content: those arrive as clauses and sentences, which
+    // anchor no later recall while still counting as entities. The Host has already filtered
+    // the list (canonicalEntityName), so merging would only reintroduce noise.
+    args.push('--entity-mode', 'provided')
     return this.runner.runJson(args, { ...(signal === undefined ? {} : { signal }), store: body.id })
   }
 
   async rememberMany(body: MemorySpace, requests: readonly RememberRequest[], signal?: AbortSignal): Promise<JsonValue[]> {
     if (requests.length === 0) return []
+    // Revisions (`replacesId`) write one replacement insight and must preserve exact caller
+    // entities (including `[]`) without `mnemon import` re-running its built-in extractor.
+    if (requests.length === 1 && requests[0]!.replacesId !== undefined) {
+      return [await this.rememberWithFlags(body, requests[0]!, { noDiff: true }, signal)]
+    }
     // Bulk archival preserves exact committed facts. Native's normal semantic
     // deduplication can skip a distinct configuration or correction that merely
     // resembles an earlier entry. Reuse only byte-identical persisted content,
     // and import the remaining originals without semantic replacement.
-    const existing = new Map((await this.allNativeInsights(body, signal, true)).map(entry => [entry.content, entry]))
+    const existing = requests.some(request => request.replacesId === undefined)
+      ? new Map((await this.allNativeInsights(body, signal, true)).map(entry => [entry.content, entry]))
+      : new Map<string, Insight>()
     const ordered = new Array<JsonValue>(requests.length)
     const reused = new Set<number>()
     let pending = new Map<string, { request: RememberRequest; indexes: number[] }>()
@@ -293,7 +315,7 @@ export class MnemonNativeProvider implements MemoryProviderAdapter {
       else group.indexes.push(index)
     }
     for (const [index, request] of requests.entries()) {
-      const exact = existing.get(request.content)
+      const exact = request.replacesId === undefined ? existing.get(request.content) : undefined
       if (exact === undefined) queue(index)
       else {
         ordered[index] = { action: 'skipped', id: exact.id, content: exact.content }

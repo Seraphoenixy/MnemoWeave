@@ -2,12 +2,18 @@ import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:f
 import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { JsonValue } from './contracts.ts'
+import type { JsonValue, LocalEmbeddingDeployResult, LocalEmbeddingRuntimeStatus } from './contracts.ts'
 import type { MemoryMutationCompletion } from 'dsh-mnemo-weave/contracts'
 import { memoryInputInteger as integer, withMemoryStorageLock } from 'dsh-mnemo-weave/extension-sdk'
 import type { ResolvedMemorySpacesConfig as ResolvedConfig } from './config.ts'
 import { MemorySpaceRegistry, validateMemorySpaceId } from './memory-spaces.ts'
 import { MnemonCliError, type MnemonRunner } from './runner.ts'
+import {
+  defaultLocalEmbeddingManager,
+  deployLocalEmbeddingRuntime,
+  inspectLocalEmbeddingRuntime,
+  resolveLocalEmbeddingPort,
+} from './local-embedding-runtime.ts'
 import { finalizeLlmPlacement, prepareMemoryPlacement, rulesOnlyPlacement } from './provider-placement.ts'
 import { EMPTY_MEMORY_PROVIDER_CATALOG, MemoryProviderCatalog } from './providers/catalog.ts'
 import { type MemoryProviderAdapter, type ProviderSpaceStatus, type ProviderSearchResult } from './providers/adapter.ts'
@@ -30,6 +36,7 @@ import {
   INTENTS,
   NATIVE_PROVIDER_ID,
   SOURCES,
+  canonicalEntityName,
   isNativeProvider,
   mergeEntitiesAndTags,
   normalizeEntityKey,
@@ -635,6 +642,51 @@ export class MemorySpacesService {
    * `mnemon embed --status` counts only one Store, so a full count for it could read as the
    * health of every space while another one lacked vectors (#392).
    */
+  private mergeLocalEmbeddingOverrides(
+    overrides?: Partial<Pick<ResolvedConfig['embedding'], 'localPreset' | 'lifecycle' | 'localDevice' | 'localPort' | 'llamaServerPath'>>,
+  ): ResolvedConfig['embedding'] {
+    if (overrides === undefined) return this.config.embedding
+    const { llamaServerPath: previousPath, ...rest } = this.config.embedding
+    const effectivePath = overrides.llamaServerPath !== undefined ? overrides.llamaServerPath.trim() : previousPath
+    return {
+      ...rest,
+      ...(overrides.localPreset === undefined ? {} : { localPreset: overrides.localPreset }),
+      ...(overrides.lifecycle === undefined ? {} : { lifecycle: overrides.lifecycle }),
+      ...(overrides.localDevice === undefined ? {} : { localDevice: overrides.localDevice }),
+      ...(overrides.localPort === undefined ? {} : { localPort: overrides.localPort }),
+      ...(effectivePath ? { llamaServerPath: effectivePath } : {}),
+    }
+  }
+
+  async localEmbeddingStatus(
+    overrides?: Partial<Pick<ResolvedConfig['embedding'], 'localPreset' | 'lifecycle' | 'localDevice' | 'localPort' | 'llamaServerPath'>>,
+  ): Promise<LocalEmbeddingRuntimeStatus> {
+    return inspectLocalEmbeddingRuntime(this.mergeLocalEmbeddingOverrides(overrides))
+  }
+
+  async deployLocalEmbedding(
+    overrides?: Partial<Pick<ResolvedConfig['embedding'], 'localPreset' | 'lifecycle' | 'localDevice' | 'localPort' | 'llamaServerPath'>>,
+    signal?: AbortSignal,
+  ): Promise<LocalEmbeddingDeployResult> {
+    this.assertWritable()
+    return deployLocalEmbeddingRuntime(this.mergeLocalEmbeddingOverrides(overrides), {}, signal)
+  }
+
+  async controlLocalEmbedding(
+    action: 'start' | 'stop',
+    overrides?: Partial<Pick<ResolvedConfig['embedding'], 'localPreset' | 'lifecycle' | 'localDevice' | 'localPort' | 'llamaServerPath'>>,
+    signal?: AbortSignal,
+  ): Promise<LocalEmbeddingRuntimeStatus> {
+    this.assertWritable()
+    const effective = this.mergeLocalEmbeddingOverrides(overrides)
+    if (action === 'start') {
+      await defaultLocalEmbeddingManager.start(effective, signal)
+    } else {
+      await defaultLocalEmbeddingManager.stop(resolveLocalEmbeddingPort(effective))
+    }
+    return inspectLocalEmbeddingRuntime(effective)
+  }
+
   async embeddingStatus(signal?: AbortSignal): Promise<MnemonEmbeddingStatus> {
     // Older binaries use both availability fields for reachability, so field
     // presence alone cannot prove model usability. Recheck the actual command
@@ -1492,20 +1544,25 @@ export class MemorySpacesService {
     if (this.isNativeSpace(body) && prepared.request.content.length > 8_000) {
       return this.annotateResult({ action: 'skipped', reason: 'replacement-too-large', previousId }, body)
     }
-    if (previous.content === prepared.request.content) return this.annotateResult({ action: 'skipped', reason: 'equivalent-insight', id: previousId }, body)
-    const [written] = await provider.rememberMany(body, [prepared.request], signal)
+    if (insightEquivalent(previous, prepared.request)) return this.annotateResult({ action: 'skipped', reason: 'equivalent-insight', id: previousId }, body)
+    const [written] = await provider.rememberMany(body, [{ ...prepared.request, replacesId: previousId }], signal)
     const value = record(written)
     const id = typeof value?.id === 'string' ? value.id : undefined
     if (id === undefined || id === previousId || (!mutationResultCommitted(written) && value?.action !== 'skipped')) {
+      this.invalidateEntityIndex(body.id)
       return this.annotateResult({ action: 'partial', reason: 'replacement-unconfirmed', previousId, ...(id === undefined ? {} : { id }) }, body)
     }
     try {
       const replacement = await provider.get(body, id, signal)
       if (replacement?.content === prepared.request.content) {
         const retired = await provider.forget(body, previousId, signal)
-        if (mutationResultCommitted(retired)) return this.annotateResult({ action: 'updated', id, previousId }, body)
+        if (mutationResultCommitted(retired)) {
+          this.activateAfterWrite(body, true)
+          return this.annotateResult({ action: 'updated', id, previousId }, body)
+        }
       }
     } catch { /* Keep the replacement when retirement cannot be confirmed. */ }
+    this.activateAfterWrite(body, true)
     return this.annotateResult({ action: 'partial', reason: 'retirement-unconfirmed', previousId, id }, body)
   }
 
@@ -1669,6 +1726,31 @@ export class MemorySpacesService {
   private persistenceProviderId(): MemorySpace['provider']['id'] | undefined {
     const strategy = this.config.persistenceStrategy
     return strategy.providerDefaulted === true ? this.memorySpaces.defaultProviderId() : strategy.providerId
+  }
+
+  async checkProviderService(
+    providerId: MemorySpace['provider']['id'],
+    settings: Record<string, string | number | boolean> = {},
+    clearSecrets: readonly string[] = [],
+    signal?: AbortSignal,
+  ): Promise<{ providerId: MemorySpace['provider']['id']; healthy: boolean; spacesCount?: number; error?: string }> {
+    if (this.isNativeProviderId(providerId)) {
+      const commandFound = this.runner.command !== ''
+      return commandFound
+        ? { providerId, healthy: true }
+        : { providerId, healthy: false, error: 'Mnemon CLI is not installed' }
+    }
+    try {
+      const connection = this.memorySpaces.resolveProviderService(providerId, settings, clearSecrets)
+      const provider = this.providers.get(providerId)
+      if (provider?.discover === undefined) {
+        return { providerId, healthy: false, error: `${this.providerCatalog.descriptor(providerId).label} does not support Memory Space discovery` }
+      }
+      const discovered = await provider.discover(connection, signal)
+      return { providerId, healthy: true, spacesCount: discovered.length }
+    } catch (error) {
+      return { providerId, healthy: false, error: error instanceof Error ? error.message : String(error) }
+    }
   }
 
   async updateProviderService(providerId: MemorySpace['provider']['id'], settings: Record<string, string | number | boolean>, clearSecrets: readonly string[] = [], enabled = true, signal?: AbortSignal) {
@@ -1885,8 +1967,21 @@ export class MemorySpacesService {
     const importance = request.importance === undefined ? undefined : integer(request.importance, 3, 1, 5, 'importance')
     const category = allowed(request.category, CATEGORIES, 'category') ?? 'general'
     const source = allowed(request.source, SOURCES, 'source') ?? 'user'
+    if (request.entities !== undefined && request.entities.length > 50) throw new Error('entities accepts at most 50 values')
     const tags = commaList(request.tags, 'tags', 20)?.split(',')
-    const entities = mergeEntitiesAndTags(commaList(request.entities, 'entities', 50)?.split(','), tags)
+    // Filter before commaList/merging: rejected clauses may contain commas and legacy tags
+    // may carry the same non-canonical values, and an entity that names a clause, a sentence,
+    // a short item code, a generic filler word, or a local path anchors no later recall.
+    const filteredEntities = request.entities
+      ?.map(value => canonicalEntityName(value))
+      .filter((value): value is string => value !== undefined)
+    const filteredTags = tags
+      ?.map(value => canonicalEntityName(value))
+      .filter((value): value is string => value !== undefined)
+    const entities = mergeEntitiesAndTags(
+      commaList(filteredEntities, 'entities', 50)?.split(','),
+      filteredTags,
+    )
     return {
       body,
       request: {
@@ -1957,4 +2052,13 @@ export class MemorySpacesService {
   private assertWritable(): void {
     if (!this.config.writeEnabled) throw new Error('dsh-mnemo-weave is configured read-only (writeEnabled: false)')
   }
+}
+
+function insightEquivalent(previous: Insight, next: RememberRequest): boolean {
+  if (previous.content !== next.content) return false
+  if ((previous.category ?? 'general') !== (next.category ?? 'general')) return false
+  if ((previous.importance ?? 3) !== (next.importance ?? 3)) return false
+  const prevEntities = mergeEntitiesAndTags(previous.entities, previous.tags) ?? []
+  const nextEntities = next.entities ?? []
+  return prevEntities.length === nextEntities.length && prevEntities.every((value, index) => value === nextEntities[index])
 }

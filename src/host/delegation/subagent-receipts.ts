@@ -157,3 +157,39 @@ export function recoverStructuredResult(recovery: ToolReceiptRecovery | undefine
   const matching = receipts.filter(receipt => terminalTools.has(receipt.name))
   return recoverWriteResult(matching)
 }
+
+/** Recover a schema-valid JSON result from plain-text output when a toolless subagent omitted the result tool. */
+export function recoverOutputJson(
+  output: ReadonlyArray<{ type: string; text?: string }> | undefined,
+  validate: (candidate: unknown) => void,
+): unknown | undefined {
+  if (!Array.isArray(output)) return undefined
+  const text = output
+    .filter((block): block is { type: string; text: string } => block.type === 'text' && typeof block.text === 'string')
+    .map(block => block.text)
+    .join('\n')
+    .trim()
+  if (text === '') return undefined
+
+  const candidates = [text]
+  for (const match of text.matchAll(/```(?:json)?\s*([\s\S]*?)```/giu)) {
+    const fenced = match[1]?.trim()
+    if (fenced) candidates.push(fenced)
+  }
+  const firstBrace = text.indexOf('{')
+  const lastBrace = text.lastIndexOf('}')
+  if (firstBrace !== -1 && lastBrace > firstBrace) {
+    candidates.push(text.slice(firstBrace, lastBrace + 1))
+  }
+
+  for (const raw of candidates) {
+    try {
+      const parsed = JSON.parse(raw)
+      validate(parsed)
+      return parsed
+    } catch {
+      // Try the next JSON candidate.
+    }
+  }
+  return undefined
+}

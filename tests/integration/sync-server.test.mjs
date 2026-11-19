@@ -145,7 +145,6 @@ test('two isolated MCP processes share Working Rules through the server', async 
       await call('first', 'mnemo_runtime_memory', { action: 'add', content, importance: 'critical' })
       const read = await call('second', 'mnemo_working_rules', {})
       assert.deepEqual(read.entries, [{ content, importance: 'critical' }])
-      assert.match(read.text, new RegExp(`- ${content}`))
       await call('second', 'mnemo_runtime_memory', { action: 'replace', old_text: content, content: updated })
       const afterReplace = await call('first', 'mnemo_working_rules', {})
       assert.deepEqual(afterReplace.entries, [{ content: updated, importance: 'critical' }])

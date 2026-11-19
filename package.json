@@ -167,7 +167,8 @@
   },
   "scripts": {
     "verify:windows-pnpm": "node --experimental-strip-types tests/checks/verify-windows-pnpm.mjs",
-    "build": "tsdown && tsc -p tsconfig.types.json && node scripts/link-bundle-declarations.mjs && node scripts/copy-component-assets.mjs",
+    "build": "tsdown && tsc -p tsconfig.types.json && node scripts/link-bundle-declarations.mjs && node scripts/copy-component-assets.mjs && node scripts/emit-build-marker.mjs",
+    "build:watch": "node scripts/watch-build.mjs",
     "antigravity:install": "node scripts/install-antigravity.mjs",
     "prepublishOnly": "pnpm run verify",
     "lint:package": "publint --strict && attw --pack . --profile esm-only --quiet",

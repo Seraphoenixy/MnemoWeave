@@ -12,6 +12,8 @@ import { createWriteHandler } from '../../src/host/surface/rpc.ts'
 
 async function delegated(run) {
   const fixture = await mkdtemp(join(tmpdir(), 'mnemo-delegation-'))
+  const previousDataDir = process.env.MNEMON_DATA_DIR
+  process.env.MNEMON_DATA_DIR = join(fixture, 'global')
   const callbacks = new Map()
   const on = (name, callback) => {
     const listeners = callbacks.get(name) ?? new Set()
@@ -66,6 +68,8 @@ async function delegated(run) {
     })
   } finally {
     await coordinator.dispose()
+    if (previousDataDir === undefined) delete process.env.MNEMON_DATA_DIR
+    else process.env.MNEMON_DATA_DIR = previousDataDir
     await rm(fixture, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   }
 }
@@ -158,5 +162,39 @@ test('the Status page reads a delegated run as a subagent record', async () => {
     assert.equal(records[0].stream, 'workspace')
     assert.equal(records[0].operation, 'answer')
     assert.equal(records[0].outcome, 'completed')
+  })
+})
+
+test('suggestEntities recovers JSON from output and retries once when a subagent completes without recording its result', async () => {
+  await delegated(async ({ coordinator, parent, setResult }) => {
+    const signal = new AbortController().signal
+    let callCount = 0
+    const originalStart = coordinator.subagents.startActivation.bind(coordinator.subagents)
+    coordinator.subagents.startActivation = async request => {
+      callCount += 1
+      if (callCount === 1) {
+        const started = await originalStart(request)
+        return {
+          ...started,
+          result: Promise.resolve({ stopReason: 'completed', output: [{ type: 'text', text: '{"entities":["SQLite"]}' }] }),
+        }
+      }
+      if (callCount === 2) {
+        const started = await originalStart(request)
+        return {
+          ...started,
+          result: Promise.resolve({ stopReason: 'completed', output: [{ type: 'text', text: 'SQLite, DSH' }] }),
+        }
+      }
+      setResult({ entities: ['SQLite', 'DSH'] })
+      return originalStart(request)
+    }
+
+    const fromOutput = await coordinator.suggestEntities(parent, 'Use SQLite.', [], signal)
+    assert.deepEqual(fromOutput, { entities: ['SQLite'] })
+
+    const fromRetry = await coordinator.suggestEntities(parent, 'Use SQLite and DSH.', [], signal)
+    assert.deepEqual(fromRetry, { entities: ['SQLite', 'DSH'] })
+    assert.equal(callCount, 3)
   })
 })

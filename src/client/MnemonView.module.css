@@ -438,6 +438,8 @@
 .activityList li[data-outcome='failed'] em { color: var(--mn-danger); }
 .activityList li[data-outcome='empty'] em,
 .activityList li[data-outcome='skipped'] em { color: var(--mn-faint); }
+.activityDetail { flex-basis: 100%; margin: 2px 0 0; color: var(--mn-muted); font-family: var(--dsw-font-mono, ui-monospace, monospace); font-size: 11px; line-height: 16px; overflow-wrap: anywhere; white-space: pre-wrap; }
+.activityList li[data-outcome='failed'] .activityDetail { color: var(--mn-danger); }
 /* The clear dialog states what a retraction does and does not change. */
 .activityClearSummary { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
 .activityClearSummary p { margin: 0; color: var(--mn-muted); font-size: 13px; line-height: 20px; }
